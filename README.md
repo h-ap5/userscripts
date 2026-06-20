@@ -4,13 +4,14 @@
 ## 요약 메모리 자동 생성기<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/automemory.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/automemory.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/automemory.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
 
 **기능 및 사용 방법**
+> 크랙 내부에서 장기기억용 요약 메모리 생성 및 자동 추가
 
-## 영문 출력 자동 번역기<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/autotrans.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/autotrans.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
-
+## 초월 번역기<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/autotrans.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/autotrans.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
 
 **기능 및 사용 방법**
+> 메시지를 자동 감지·번역·수정 삽입
 
 ## (구)미디어 이미지 추가 편의성 <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/media.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
 
-
 **기능 및 사용 방법**
+> 구 제작 미디어 환경에서 이미지를 간단 삽입·불필요한 힌트창 ON/OFF
