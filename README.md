@@ -7,5 +7,5 @@
 ## 영문 출력 자동 번역기
 **기능 및 사용 방법**
 
-## (구)미디어 이미지 추가 편의성
+## (구)미디어 이미지 추가 편의성 ![설치](https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js)
 **기능 및 사용 방법**
