@@ -14,6 +14,7 @@
 <img width="247" height="238" alt="image" src="https://github.com/user-attachments/assets/b2bdeb83-c379-4802-a96f-c78dc851d229" />
 
 - **채팅창 내 사이드바**에 설정창이 있습니다.
+
 **유의할 점**
 - 딥시크 모델 사용시, 로그 정보가 중국에 노출될 수 있습니다.
 
