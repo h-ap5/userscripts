@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ✨크랙 초월 번역기
+// @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
 // @version      4.0
-// @description  최신 메시지를 자동 감지·번역·수정 삽입. 듀얼 프롬프트 스와핑, DeepSeek 지원 및 휘발성 OOC 자동 삽입 기능 포함.
+// @description  최신 메시지를 자동 감지·번역·수정 삽입. 듀얼 프롬프트 스와핑, DeepSeek V4 지원 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -30,8 +30,8 @@
     'gemini-3.5-flash': { input: 1.50, output: 9.00, cacheRead: 0.15, cacheWrite: 1.50 },
     'gemini-2.5-pro': { input: 1.25, output: 10.00, cacheRead: 0.125, cacheWrite: 1.25 },
     'gemini-2.5-flash': { input: 0.30, output: 2.50, cacheRead: 0.03, cacheWrite: 0.30 },
-    'deepseek-chat': { input: 0.14, output: 0.28, cacheRead: 0.014, cacheWrite: 0.14 },
-    'deepseek-reasoner': { input: 0.55, output: 2.19, cacheRead: 0.055, cacheWrite: 0.55 },
+    'deepseek-v4-flash': { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0.14 },
+    'deepseek-v4-pro': { input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0.435 },
   };
 
   // 1. 한글 전용 기본 프롬프트
@@ -926,8 +926,8 @@
         <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
         <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-        <option value="deepseek-chat">DeepSeek V3 (Chat)</option>
-        <option value="deepseek-reasoner">DeepSeek R1 (Reasoner)</option>
+        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
       </select>
     </div>
     <div id="trans-thinking-container" data-current-model=""></div>
@@ -945,7 +945,7 @@
     <label class="t-check-row" for="trans-instant-apply">
       <input id="trans-instant-apply" type="checkbox">
       <span>
-        <span class="t-check-title">말풍선 ✨ 클릭 시 즉시 교체</span>
+        <span class="t-check-title">말풍선 🅰️ 클릭 시 즉시 교체</span>
         <span class="t-check-desc">체크하면 결과 팝업 없이 최신 메시지를 바로 패치하고 예상 금액을 nudge로 보여줍니다.</span>
       </span>
     </label>
@@ -954,7 +954,7 @@
       <textarea id="trans-custom-prompt" rows="6"></textarea>
     </div>
   </div>
-
+  
   <div class="t-section">
     <div class="t-section-title">OOC 자동 주입 (휘발성)</div>
     <label class="t-check-row" for="trans-ooc-apply">
@@ -989,7 +989,7 @@
     <button class="t-btn t-btn-primary" id="trans-save-btn" type="button">저장</button>
   </div>
 
-  <button id="trans-direct-apply-btn" type="button" style="display: none;">✨ 최신 답변 바로 번역 (팝업 없이)</button>
+  <button id="trans-direct-apply-btn" type="button" style="display: none;">🅰️ 최신 답변 바로 번역 (팝업 없이)</button>
   <div id="trans-status-box"></div>
 </div>`;
     document.body.appendChild(panel);
@@ -1002,7 +1002,7 @@
     resultModal.id = 'trans-result-modal';
     resultModal.innerHTML = `
 <div class="t-modal-header">
-  <div class="t-modal-title">✨ 번역 결과 <span class="t-modal-title-badge">초월 번역</span></div>
+  <div class="t-modal-title">🅰️ 번역 결과 <span class="t-modal-title-badge">초월 번역</span></div>
   <div class="t-reroll-group">
     <select id="trans-modal-model" class="t-select-arrow">
       <option value="gemini-3.1-pro-preview">3.1 Pro</option>
@@ -1011,8 +1011,8 @@
       <option value="gemini-3.5-flash">3.5 Flash</option>
       <option value="gemini-2.5-pro">2.5 Pro</option>
       <option value="gemini-2.5-flash">2.5 Flash</option>
-      <option value="deepseek-chat">DeepSeek V3</option>
-      <option value="deepseek-reasoner">DeepSeek R1</option>
+      <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+      <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
     </select>
     <button id="trans-reroll-btn" type="button">↻ 다시 돌리기</button>
   </div>
@@ -1091,7 +1091,7 @@
     modelSelect.value = GM_getValue('apiModel', 'gemini-2.5-pro');
     instantApplyInput.checked = GM_getValue('instantApply', false);
     modalModelSelect.value = modelSelect.value;
-
+    
     oocApplyInput.checked = GM_getValue('oocApply', false);
     oocTextInput.value = GM_getValue('oocText', 'Please reply in English OOC.');
     oocTurnsInput.value = GM_getValue('oocTurns', 10);
@@ -1107,7 +1107,7 @@
     const legacyPrompt = GM_getValue('customPrompt', '');
     if (legacyPrompt) {
       currentPrompts[savedMode] = legacyPrompt;
-      GM_setValue('customPrompt', '');
+      GM_setValue('customPrompt', ''); 
     }
 
     customPromptInput.value = currentPrompts[savedMode];
@@ -1115,10 +1115,10 @@
     const toggleProviderUI = () => {
       const isFirebase = apiProviderSelect.value === 'firebase';
       const isDeepSeek = apiProviderSelect.value === 'deepseek';
-
+      
       apiKeyInput.style.display = isFirebase ? 'none' : 'block';
       firebaseScriptInput.style.display = isFirebase ? 'block' : 'none';
-
+      
       if (isFirebase) {
         keyLabel.textContent = 'Firebase Config';
         keyLabel.setAttribute('for', 'trans-firebase-script');
@@ -1187,13 +1187,13 @@
       GM_setValue('firebaseScript', firebaseScriptInput.value.trim());
       GM_setValue('apiModel', modelSelect.value);
       GM_setValue('transMode', modeSelect.value);
-      GM_setValue('customPromptKo', currentPrompts.ko);
-      GM_setValue('customPromptEn', currentPrompts.en);
+      GM_setValue('customPromptKo', currentPrompts.ko); 
+      GM_setValue('customPromptEn', currentPrompts.en); 
       GM_setValue('instantApply', instantApplyInput.checked);
       GM_setValue('thinkingLevels', thinkingLevels);
       GM_setValue('thinkingBudgets', thinkingBudgets);
       GM_setValue('replacementSlots', replacementSlots);
-
+      
       GM_setValue('oocApply', oocApplyInput.checked);
       GM_setValue('oocText', oocTextInput.value.trim());
       GM_setValue('oocTurns', parseInt(oocTurnsInput.value, 10) || 10);
@@ -1837,7 +1837,7 @@
         btn.id = 'trans-menu-btn';
         btn.className = 'px-2.5 h-4 box-content py-[18px]';
         btn.style.cursor = 'pointer';
-        btn.innerHTML = '<span class="flex space-x-2 items-center"><span style="font-size:16px;">✨</span><span style="font-size:14px;">초월 번역 설정</span></span>';
+        btn.innerHTML = '<span class="flex space-x-2 items-center"><span style="font-size:16px;">🅰️</span><span style="font-size:14px;">초월 번역 설정</span></span>';
         btn.onclick = () => {
           document.getElementById('trans-setting-panel').style.display = 'block';
           syncTranslatorTheme();
@@ -1917,7 +1917,7 @@
       const btn = document.createElement('button');
       btn.className = 'trans-bubble-btn relative inline-flex items-center justify-center overflow-hidden rounded-full transition-colors size-7 bg-transparent hover:bg-accent';
       btn.type = 'button';
-      btn.innerHTML = '✨';
+      btn.innerHTML = '🅰️';
       btn.style.marginRight = '4px';
       btn.style.fontSize = '14px';
       btn.title = '초월 번역';
