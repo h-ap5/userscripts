@@ -1,15 +1,16 @@
 // ==UserScript==
-// @name         ✨ 크랙 초월 번역기
+// @name         ✨크랙 초월 번역기
 // @namespace    http://tampermonkey.net/
-// @version      3.4
-// @description  최신 메시지를 자동 감지·번역·수정 삽입. 이미지 링크 마스킹 보호 기능 추가.
+// @version      4.0
+// @description  최신 메시지를 자동 감지·번역·수정 삽입. 듀얼 프롬프트 스와핑, DeepSeek 지원 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
-// @run-at       document-end
+// @run-at       document-start
 // @connect      generativelanguage.googleapis.com
+// @connect      api.deepseek.com
 // ==/UserScript==
 
 (function () {
@@ -29,6 +30,8 @@
     'gemini-3.5-flash': { input: 1.50, output: 9.00, cacheRead: 0.15, cacheWrite: 1.50 },
     'gemini-2.5-pro': { input: 1.25, output: 10.00, cacheRead: 0.125, cacheWrite: 1.25 },
     'gemini-2.5-flash': { input: 0.30, output: 2.50, cacheRead: 0.03, cacheWrite: 0.30 },
+    'deepseek-chat': { input: 0.14, output: 0.28, cacheRead: 0.014, cacheWrite: 0.14 },
+    'deepseek-reasoner': { input: 0.55, output: 2.19, cacheRead: 0.055, cacheWrite: 0.55 },
   };
 
   // 1. 한글 전용 기본 프롬프트
@@ -68,6 +71,103 @@
   let thinkingBudgets = GM_getValue('thinkingBudgets', {});
   let replacementSlots = sanitizeReplacementSlots(GM_getValue('replacementSlots', []));
   let nudgeTimer = null;
+  let cleanupTimer = null;
+
+  // --- OOC 자동 삽입(휘발성) 인터셉터 세팅 ---
+  function injectNetworkInterceptor() {
+    const _origWsSend = window.WebSocket.prototype.send;
+    window.WebSocket.prototype.send = function (data) {
+      const oocEnabled = GM_getValue('oocApply', false);
+      const oocText = GM_getValue('oocText', '');
+      if (oocEnabled && oocText && typeof data === "string" && data.includes('"send"')) {
+        try {
+          const bi = data.indexOf("[");
+          if (bi >= 0) {
+            const prefix = data.slice(0, bi);
+            const arr = JSON.parse(data.slice(bi));
+            if (Array.isArray(arr) && arr[0] === "send" && arr[1] && typeof arr[1].message === "string") {
+              if (!arr[1].message.includes('[OOC:')) {
+                arr[1].message = arr[1].message + "\n\n[OOC: " + oocText + "]";
+                triggerOocCleanup();
+                return _origWsSend.call(this, prefix + JSON.stringify(arr));
+              }
+            }
+          }
+        } catch (e) {}
+      }
+      return _origWsSend.call(this, data);
+    };
+
+    const _origFetch = window.fetch;
+    window.fetch = async function (...args) {
+      const oocEnabled = GM_getValue('oocApply', false);
+      const oocText = GM_getValue('oocText', '');
+      if (oocEnabled && oocText && args[0] && typeof args[0] === 'string' && (args[0].includes('/messages') || args[0].includes('/chat'))) {
+        try {
+          let opts = args[1] || {};
+          if (opts.method === 'POST' && opts.body && typeof opts.body === 'string') {
+            const body = JSON.parse(opts.body);
+            let injected = false;
+            if (Array.isArray(body.messages)) {
+              for (let i = body.messages.length - 1; i >= 0; i--) {
+                if (body.messages[i].role === 'user' && !body.messages[i].content.includes('[OOC:')) {
+                  body.messages[i].content += "\n\n[OOC: " + oocText + "]";
+                  injected = true;
+                  break;
+                }
+              }
+            } else if (body.message && typeof body.message === 'string' && !body.message.includes('[OOC:')) {
+              body.message += "\n\n[OOC: " + oocText + "]";
+              injected = true;
+            }
+            if (injected) {
+              args[1].body = JSON.stringify(body);
+              triggerOocCleanup();
+            }
+          }
+        } catch (e) {}
+      }
+      return _origFetch.apply(this, args);
+    };
+  }
+
+  // --- 과거 OOC 흔적 삭제 타이머 ---
+  function triggerOocCleanup() {
+    clearTimeout(cleanupTimer);
+    cleanupTimer = setTimeout(async () => {
+      const chatId = parsePath();
+      if (chatId) {
+        const oocTurns = parseInt(GM_getValue('oocTurns', 10), 10);
+        try {
+          const res = await fetch(`${API_BASE}/v3/chats/${chatId}/messages?limit=50`, {
+            headers: buildHeaders(),
+            credentials: 'include',
+          });
+          if (!res.ok) return;
+          const json = await res.json();
+          const msgs = (json.data ?? json).messages ?? [];
+          const userMsgs = msgs.filter(m => m.role === 'user');
+
+          // 지정된 턴 수보다 오래된 메시지의 OOC 삭제
+          for (let i = oocTurns; i < userMsgs.length; i++) {
+            const msg = userMsgs[i];
+            if (msg.content && msg.content.includes('[OOC:')) {
+              const cleanContent = msg.content.replace(/\n\n\[OOC:.*?\]/g, '').trim();
+              if (cleanContent !== msg.content) {
+                await patchMessage(chatId, msg._id || msg.id, cleanContent);
+                console.log(`[Crack Translator] Cleaned up OOC marker in older message: ${msg._id || msg.id}`);
+              }
+            }
+          }
+        } catch (e) {
+            console.error("[Crack Translator] OOC Cleanup failed", e);
+        }
+      }
+    }, 4000); // 전송 4초 후 백그라운드 정리 실행
+  }
+
+  // 인터셉터 즉시 장착
+  injectNetworkInterceptor();
 
   function normalizeUsage(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -272,7 +372,9 @@
 #trans-slot-find,
 #trans-slot-with,
 #g-think-val,
-#trans-modal-model {
+#trans-modal-model,
+#trans-ooc-text,
+#trans-ooc-turns {
   width: 100%;
   box-sizing: border-box;
   padding: 8px 10px;
@@ -292,7 +394,9 @@
 #trans-mode-select:focus,
 #trans-custom-prompt:focus,
 #g-think-val:focus,
-#trans-modal-model:focus {
+#trans-modal-model:focus,
+#trans-ooc-text:focus,
+#trans-ooc-turns:focus {
   border-color: var(--t-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--t-accent) 20%, transparent);
 }
@@ -308,7 +412,8 @@
 }
 
 #trans-custom-prompt,
-#trans-firebase-script {
+#trans-firebase-script,
+#trans-ooc-text {
   resize: vertical;
   min-height: 76px;
   line-height: 1.55;
@@ -780,8 +885,7 @@
   .t-inline-form {
     grid-template-columns: 1fr;
   }
-}
-`;
+}`;
     document.head.appendChild(style);
   }
 
@@ -801,6 +905,7 @@
       <select id="trans-api-provider" class="t-select-arrow">
         <option value="google">Google API</option>
         <option value="firebase">Firebase</option>
+        <option value="deepseek">DeepSeek</option>
       </select>
     </div>
     <div class="t-field">
@@ -821,6 +926,8 @@
         <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
         <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
         <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+        <option value="deepseek-chat">DeepSeek V3 (Chat)</option>
+        <option value="deepseek-reasoner">DeepSeek R1 (Reasoner)</option>
       </select>
     </div>
     <div id="trans-thinking-container" data-current-model=""></div>
@@ -845,6 +952,25 @@
     <div class="t-field">
       <label class="trans-label" for="trans-custom-prompt">번역 지침서</label>
       <textarea id="trans-custom-prompt" rows="6"></textarea>
+    </div>
+  </div>
+
+  <div class="t-section">
+    <div class="t-section-title">OOC 자동 주입 (휘발성)</div>
+    <label class="t-check-row" for="trans-ooc-apply">
+      <input id="trans-ooc-apply" type="checkbox">
+      <span>
+        <span class="t-check-title">내 채팅에 OOC 문구 자동 삽입</span>
+        <span class="t-check-desc">지정한 턴이 지나면 과거 대화 기록에서 쥐도새도 모르게 지워집니다.</span>
+      </span>
+    </label>
+    <div class="t-field">
+      <label class="trans-label" for="trans-ooc-text">OOC 문구 내용</label>
+      <textarea id="trans-ooc-text" rows="3" placeholder="예: Please answer in English OOC."></textarea>
+    </div>
+    <div class="t-field">
+      <label class="trans-label" for="trans-ooc-turns">유지할 턴 수</label>
+      <input type="number" id="trans-ooc-turns" min="1" value="10">
     </div>
   </div>
 
@@ -885,6 +1011,8 @@
       <option value="gemini-3.5-flash">3.5 Flash</option>
       <option value="gemini-2.5-pro">2.5 Pro</option>
       <option value="gemini-2.5-flash">2.5 Flash</option>
+      <option value="deepseek-chat">DeepSeek V3</option>
+      <option value="deepseek-reasoner">DeepSeek R1</option>
     </select>
     <button id="trans-reroll-btn" type="button">↻ 다시 돌리기</button>
   </div>
@@ -952,12 +1080,21 @@
     const prevBtn = document.getElementById('trans-prev-btn');
     const nextBtn = document.getElementById('trans-next-btn');
 
+    // OOC 변수
+    const oocApplyInput = document.getElementById('trans-ooc-apply');
+    const oocTextInput = document.getElementById('trans-ooc-text');
+    const oocTurnsInput = document.getElementById('trans-ooc-turns');
+
     apiProviderSelect.value = GM_getValue('apiProvider', 'google');
     apiKeyInput.value = GM_getValue('apiKey', '');
     firebaseScriptInput.value = GM_getValue('firebaseScript', '');
     modelSelect.value = GM_getValue('apiModel', 'gemini-2.5-pro');
     instantApplyInput.checked = GM_getValue('instantApply', false);
     modalModelSelect.value = modelSelect.value;
+
+    oocApplyInput.checked = GM_getValue('oocApply', false);
+    oocTextInput.value = GM_getValue('oocText', 'Please reply in English OOC.');
+    oocTurnsInput.value = GM_getValue('oocTurns', 10);
 
     let savedMode = GM_getValue('transMode', 'ko');
     modeSelect.value = savedMode;
@@ -977,10 +1114,21 @@
 
     const toggleProviderUI = () => {
       const isFirebase = apiProviderSelect.value === 'firebase';
+      const isDeepSeek = apiProviderSelect.value === 'deepseek';
+
       apiKeyInput.style.display = isFirebase ? 'none' : 'block';
       firebaseScriptInput.style.display = isFirebase ? 'block' : 'none';
-      keyLabel.textContent = isFirebase ? 'Firebase Config' : 'API Key';
-      keyLabel.setAttribute('for', isFirebase ? 'trans-firebase-script' : 'trans-api-key');
+
+      if (isFirebase) {
+        keyLabel.textContent = 'Firebase Config';
+        keyLabel.setAttribute('for', 'trans-firebase-script');
+      } else if (isDeepSeek) {
+        keyLabel.textContent = 'DeepSeek API Key';
+        keyLabel.setAttribute('for', 'trans-api-key');
+      } else {
+        keyLabel.textContent = 'Google API Key';
+        keyLabel.setAttribute('for', 'trans-api-key');
+      }
     };
 
     function saveThinkVal(model) {
@@ -1032,7 +1180,6 @@
 
     const saveCurrentSettings = () => {
       saveThinkVal(thinkContainer.getAttribute('data-current-model'));
-
       currentPrompts[modeSelect.value] = customPromptInput.value;
 
       GM_setValue('apiProvider', apiProviderSelect.value);
@@ -1046,6 +1193,10 @@
       GM_setValue('thinkingLevels', thinkingLevels);
       GM_setValue('thinkingBudgets', thinkingBudgets);
       GM_setValue('replacementSlots', replacementSlots);
+
+      GM_setValue('oocApply', oocApplyInput.checked);
+      GM_setValue('oocText', oocTextInput.value.trim());
+      GM_setValue('oocTurns', parseInt(oocTurnsInput.value, 10) || 10);
     };
 
     apiProviderSelect.addEventListener('change', toggleProviderUI);
@@ -1415,22 +1566,61 @@
       const provider = document.getElementById('trans-api-provider').value;
       const modelId = overrideModel || document.getElementById('trans-model-select').value;
       const finalPrompt = getPrompt();
+      const maskedText = maskCodeBlocks(text);
       const generationConfig = buildGenerationConfig(modelId);
 
-      // 1. 이미지 링크만 안전하게 추출하여 배열에 임시 보관
-      let tempImages = [];
-      let safeText = text.replace(/!\[.*?\]\([^)]+\)/g, (match) => {
-        tempImages.push(match);
-        return `===IMG_${tempImages.length - 1}===`; // LLM이 번역하지 못하도록 플레이스홀더로 치환
-      });
+      // DeepSeek 통신
+      if (provider === 'deepseek') {
+        const apiKey = document.getElementById('trans-api-key').value.trim();
+        if (!apiKey) {
+          reject(new Error('DeepSeek API 키가 설정되지 않았습니다.'));
+          return;
+        }
 
-      // 2. 기존 코드 블록 마스킹 적용
-      const maskedText = maskCodeBlocks(safeText);
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: 'https://api.deepseek.com/chat/completions',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+          },
+          data: JSON.stringify({
+            model: modelId,
+            messages: [
+              { role: 'system', content: finalPrompt },
+              { role: 'user', content: maskedText }
+            ]
+          }),
+          onload(res) {
+            try {
+              const data = JSON.parse(res.responseText);
+              if (data.error) {
+                reject(new Error(data.error.message));
+                return;
+              }
+              const raw = data.choices[0].message.content;
+              const usage = data.usage || {};
+              const restored = unmaskCodeBlocks(stripOuterFence(raw));
+              resolve({
+                text: restored,
+                usage: { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens },
+                model: modelId
+              });
+            } catch (e) {
+              reject(e);
+            }
+          },
+          onerror() {
+            reject(new Error('DeepSeek 네트워크 오류가 발생했습니다.'));
+          }
+        });
+        return;
+      }
 
+      // Firebase 통신
       if (provider === 'firebase') {
         try {
-          // 수정: 파이어베이스 함수로 tempImages 변수를 함께 넘겨줌
-          const result = await callFirebaseGemini(maskedText, modelId, finalPrompt, generationConfig, tempImages);
+          const result = await callFirebaseGemini(maskedText, modelId, finalPrompt, generationConfig);
           resolve(result);
         } catch (e) {
           reject(e);
@@ -1438,6 +1628,7 @@
         return;
       }
 
+      // Google 기본 통신
       const apiKey = document.getElementById('trans-api-key').value.trim();
       if (!apiKey) {
         reject(new Error('API 키가 설정되지 않았습니다.'));
@@ -1463,15 +1654,7 @@
 
             const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
             const usage = data.usageMetadata || {};
-            let restored = unmaskCodeBlocks(stripOuterFence(raw));
-
-            // 3. 임시 보관했던 이미지 링크를 원래 자리에 복구
-            if (tempImages && tempImages.length > 0) {
-              tempImages.forEach((img, index) => {
-                restored = restored.replace(`===IMG_${index}===`, img);
-              });
-            }
-
+            const restored = unmaskCodeBlocks(stripOuterFence(raw));
             resolve({ text: restored, usage, model: modelId });
           } catch (e) {
             reject(e);
@@ -1484,8 +1667,7 @@
     });
   }
 
-  // 수정: tempImages 매개변수 추가 (기본값 설정)
-  async function callFirebaseGemini(maskedText, modelId, finalPrompt, generationConfig, tempImages = []) {
+  async function callFirebaseGemini(maskedText, modelId, finalPrompt, generationConfig) {
     const configRaw = document.getElementById('trans-firebase-script').value.trim();
     if (!configRaw) {
       throw new Error('설정창에서 Firebase 복사본을 먼저 입력해주세요.');
@@ -1539,21 +1721,12 @@
       const result = await generativeModel.generateContent(maskedText);
       const rawResult = result.response.text();
       const usage = result.response.usageMetadata || {};
-      let restored = unmaskCodeBlocks(stripOuterFence(rawResult));
-
-      // 추가: Firebase 쪽에도 이미지 언마스킹 적용
-      if (tempImages && tempImages.length > 0) {
-        tempImages.forEach((img, index) => {
-          restored = restored.replace(`===IMG_${index}===`, img);
-        });
-      }
-
+      const restored = unmaskCodeBlocks(stripOuterFence(rawResult));
       return { text: restored, usage, model: modelId };
     } catch (e) {
-      // 누락되었던 catch 구문 복구!
       throw new Error(`Firebase Vertex 통신 실패: ${e.message}`);
     }
-  } // 누락되었던 함수 닫기 괄호 복구!
+  }
 
   function parseFirebaseConfig(configRaw) {
     let fbVersion = '12.12.0';
