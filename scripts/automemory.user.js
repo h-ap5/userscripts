@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 요약 추가
 // @namespace    https://crack.wrtn.ai/
-// @version      2.0
+// @version      2.1
 // @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
 // @author       User
 // @match        https://crack.wrtn.ai/*
@@ -15,23 +15,18 @@
 
     const API_BASE = 'https://crack-api.wrtn.ai/crack-gen/v3/chats';
 
-
-    // ============== 내장형 장기기억 슬롯 구조 ==============
-    // 사용자 프롬프트의 내용·문체·병합·분리·본문 형식은 건드리지 않고, 저장 가능한 슬롯 경계와 글자 수만 알려줍니다.
+    // ============== 저장 한도 / 전체 범위 처리 ==============
+    // 제목·본문 제한은 미리보기와 저장 검증에만 사용하며, AI의 출력 형식에는 개입하지 않습니다.
     const GENERATED_TITLE_MAX = 10;
     const GENERATED_SUMMARY_MAX = 300;
-    const BUILTIN_MEMORY_SLOT_CONTRACT = `# TECHNICAL MEMORY SLOT BOUNDARY — HIGHEST PRIORITY
 
-This instruction defines only the technical storage boundary of a memory slot.
-It must NOT override the user's selected prompt about content, writing style, language, dates, headings, bullets, number of slots, merge rules, split rules, or level of detail.
-
-1. One slot starts with a title enclosed in square brackets: [title].
-2. The title text inside the brackets must be 1–10 characters including spaces. The brackets themselves are not counted.
-3. Everything after that title and before the next slot title is the body of that slot.
-4. The body may use any line structure required by the user's prompt: plain prose, bullets, multiple date lines, headings, or other formatting. Do not add a hyphen or force a two-line template unless the user's prompt asks for it.
-5. The entire body of one slot must be 1–300 characters including spaces and line breaks.
-6. Follow the user's selected prompt for every decision other than these two hard storage limits: title ≤ 10 characters and body ≤ 300 characters.
-7. Do not explain this contract in the answer.`;
+    // 사용자 프롬프트의 형식에는 관여하지 않고, 전달된 입력 전체를 끝까지 처리하도록 요구합니다.
+    const BUILTIN_FULL_COVERAGE_REQUIREMENT = `[FULL INPUT COVERAGE — HIGHEST PRIORITY]
+Process the entire provided input from beginning to end before producing the final answer.
+Do not process only an early portion and stop.
+Do not omit later events, entries, or important information merely to shorten the response.
+Follow the selected user prompt exactly for output format, grouping, style, language, and level of detail.
+This requirement controls coverage only. It must not change or add any output format, grouping rule, slot rule, writing style, or content rule.`;
 
     // ============== 1차 요약 프롬프트 ==============
     const DEFAULT_PROMPT = `# 📔 장기기억 아카이브 요약 프롬프트
@@ -307,9 +302,8 @@ async function fetchRecentMessages(limit) {
 }
 
 
-    function buildSystemPromptWithContract(userPrompt) {
-        return BUILTIN_MEMORY_SLOT_CONTRACT +
-            '\n\n# USER-SELECTED PROMPT — FOLLOW THIS FOR ALL CONTENT AND FORMATTING DECISIONS\n' + (userPrompt || '');
+    function buildSystemPrompt(userPrompt) {
+        return userPrompt || '';
     }
 
     function stripCodeFence(value) {
@@ -346,108 +340,16 @@ async function fetchRecentMessages(limit) {
         return cards;
     }
 
-    function inspectGeneratedMemoryCards(cards) {
-        var issues = [];
-        if (!cards.length) {
-            issues.push('대괄호 제목으로 시작하는 슬롯을 찾을 수 없음');
-            return issues;
-        }
-        cards.forEach(function(card, index) {
-            var label = (index + 1) + '번 슬롯';
-            if (!card.title.trim()) issues.push(label + ' 제목이 비어 있음');
-            if (card.title.length > GENERATED_TITLE_MAX) issues.push(label + ' 제목이 ' + GENERATED_TITLE_MAX + '자 초과');
-            if (!card.summary.trim()) issues.push(label + ' 내용이 비어 있음');
-            if (card.summary.length > GENERATED_SUMMARY_MAX) issues.push(label + ' 내용이 ' + GENERATED_SUMMARY_MAX + '자 초과');
-        });
-        return issues;
-    }
-
-    function formatGeneratedMemoryCards(cards) {
-        return cards.map(function(card) {
-            var body = card.summary.replace(/^\n+|\n+$/g, '').trimEnd();
-            return card.inline ? ('[' + card.title.trim() + '] ' + body) : ('[' + card.title.trim() + ']\n' + body);
-        }).join('\n\n');
-    }
-
-    function findStructuralSplitIndex(text, maxLength) {
-        if (text.length <= maxLength) return text.length;
-        var lower = Math.floor(maxLength * 0.62);
-        var window = text.slice(lower, maxLength + 1);
-        var preferred = ['\n\n', '\n', '. ', '。', '! ', '? ', '; ', '；', ', ', '，', ' '];
-        for (var i = 0; i < preferred.length; i++) {
-            var pos = window.lastIndexOf(preferred[i]);
-            if (pos >= 0) {
-                var cut = lower + pos + (preferred[i].endsWith(' ') ? preferred[i].length - 1 : preferred[i].length);
-                if (cut > 0) return cut;
-            }
-        }
-        return maxLength;
-    }
-
-    function splitBodyPreservingFormat(value, maxLength) {
-        var remaining = String(value || '').replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
-        if (!remaining) return [];
-        var chunks = [];
-        while (remaining.length > maxLength) {
-            var cut = findStructuralSplitIndex(remaining, maxLength);
-            var chunk = remaining.slice(0, cut).replace(/^\n+|\n+$/g, '').trimEnd();
-            if (!chunk) {
-                cut = maxLength;
-                chunk = remaining.slice(0, cut);
-            }
-            chunks.push(chunk);
-            remaining = remaining.slice(cut).replace(/^\s+/, '');
-        }
-        if (remaining) chunks.push(remaining.replace(/^\n+|\n+$/g, '').trimEnd());
-        return chunks;
-    }
-
-    function makeSplitTitle(baseTitle, partIndex, totalParts) {
-        var clean = String(baseTitle || '요약').replace(/[\[\]\r\n]/g, '').trim() || '요약';
-        if (totalParts <= 1) return clean.slice(0, GENERATED_TITLE_MAX);
-        var suffix = String(partIndex + 1);
-        var baseLength = Math.max(1, GENERATED_TITLE_MAX - suffix.length);
-        return clean.slice(0, baseLength) + suffix;
-    }
-
-    function repairGeneratedMemoryStructure(cards) {
-        var repaired = [];
-        cards.forEach(function(card) {
-            var chunks = splitBodyPreservingFormat(card.summary, GENERATED_SUMMARY_MAX);
-            if (!chunks.length) {
-                repaired.push({ title:String(card.title || '').slice(0, GENERATED_TITLE_MAX), summary:'', inline:!!card.inline });
-                return;
-            }
-            chunks.forEach(function(chunk, index) {
-                repaired.push({
-                    title:makeSplitTitle(card.title, index, chunks.length),
-                    summary:chunk,
-                    inline:!!card.inline
-                });
-            });
-        });
-        return repaired;
-    }
-
     async function finalizeGeneratedMemoryResult(provider, config, rawText, isCompress) {
-        var cards = parseGeneratedMemoryCards(rawText);
-        var issues = inspectGeneratedMemoryCards(cards);
-        if (!cards.length) {
-            return { text:stripCodeFence(rawText), repaired:false, repairMode:'none', issues:issues };
-        }
-        if (!issues.length) {
-            return { text:stripCodeFence(rawText), repaired:false, repairMode:'none', issues:[] };
-        }
-        var repairedCards = repairGeneratedMemoryStructure(cards);
-        var repairedIssues = inspectGeneratedMemoryCards(repairedCards);
+        // AI가 생성한 슬롯 수·병합·분리·본문 형식을 수정하지 않습니다.
+        // 저장 한도 초과 여부는 미리보기와 저장 시점에만 사용자에게 안내합니다.
         return {
-            text:formatGeneratedMemoryCards(repairedCards),
-            repaired:true,
-            repairMode:'structural',
-            issues:repairedIssues
+            text:stripCodeFence(rawText),
+            repaired:false,
+            repairMode:'none',
+            issues:[]
         };
     }
-
 
     function extractOpenAIText(data) {
         if (!data) return '';
@@ -820,16 +722,17 @@ async function fetchRecentMessages(limit) {
         options = options || {};
         LAST_AI_USAGE = null;
         const promptMode = isCompress ? 'compress' : 'main';
-        const currentPrompt = options.systemPrompt || buildSystemPromptWithContract(getActivePromptText(promptMode));
+        const currentPrompt = options.systemPrompt || buildSystemPrompt(getActivePromptText(promptMode));
         const reasoningValue = config.reasoning || 'auto';
 
         const styleInstruction = isCompress ? '' : (style === 'concise'
             ? '\n[간결 모드] 사용자 프롬프트의 구성은 유지하면서 핵심 사건과 전환점을 우선한다.'
             : '\n[상세 모드] 사용자 프롬프트의 구성은 유지하면서 감정 변화, 관계 역학, 분위기와 구체적 반응을 더 충실히 보존한다.');
 
-        const reinforcedPrompt = options.inputPrompt || (isCompress
+        const taskPrompt = options.inputPrompt || (isCompress
             ? `[압축 대상 장기기억 목록]\n${chatLog}\n\n위 장기기억들을 선택된 사용자 프롬프트에 따라 압축정리하라.`
-            : `[요약 대상]\n제공된 대화는 총 ${turns}턴 분량입니다.\n처음부터 끝까지 흐름을 파악하고 선택된 사용자 프롬프트에 따라 요약하세요.\n${styleInstruction}\n\n[채팅 내역 시작]\n${chatLog}\n[채팅 내역 끝]`);
+            : `[요약 대상]\n제공된 대화는 총 ${turns}턴 분량입니다.\n처음부터 끝까지 모든 흐름을 확인한 뒤 선택된 사용자 프롬프트에 따라 요약하세요.\n${styleInstruction}\n\n[채팅 내역 시작]\n${chatLog}\n[채팅 내역 끝]`);
+        const reinforcedPrompt = `${BUILTIN_FULL_COVERAGE_REQUIREMENT}\n\n${taskPrompt}`;
 
         if (provider === 'google') {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`;
@@ -1840,8 +1743,6 @@ if (mainModel && mainProvider) {
                 overlay.remove();
                 if (parentOverlay && parentOverlay.isConnected) parentOverlay.remove();
                 showMainModal(finalized.text, true);
-                if (finalized.repaired) showToast('제목 10자·본문 300자 한도만 자동 보정했습니다.');
-                if (finalized.issues && finalized.issues.length) showToast('슬롯 구조를 확인해주세요: ' + finalized.issues[0]);
             } catch (err) {
                 await showUiAlert('압축 중 오류: ' + err.message, '압축 오류', { tone:'danger' });
                 btnStart.disabled = false;
@@ -1897,7 +1798,7 @@ if (mainModel && mainProvider) {
 
         html += '<div class="fg">';
         html += '<div class="crack-ext-prompt-header" id="ce-ai-prompt-header">';
-        html += '<div class="crack-ext-prompt-heading"><div class="crack-ext-result-title-row"><span class="crack-ext-prompt-heading-main" id="ce-ai-result-label">생성 결과</span><span class="crack-ext-reasoning-usage" id="ce-ai-reasoning-usage"></span></div><span class="crack-ext-prompt-heading-sub">🔒 내장 구조: [제목] 10자 이하 · 본문 300자 이하 · 나머지 형식과 분리 기준은 선택한 프롬프트를 따름</span></div>';
+        html += '<div class="crack-ext-prompt-heading"><div class="crack-ext-result-title-row"><span class="crack-ext-prompt-heading-main" id="ce-ai-result-label">생성 결과</span><span class="crack-ext-reasoning-usage" id="ce-ai-reasoning-usage"></span></div><span class="crack-ext-prompt-heading-sub">생성 형식은 선택한 프롬프트만 따름 · 저장 한도 초과 항목은 직접 수정</span></div>';
         html += '<div class="crack-ext-prompt-edit-actions">';
         html += '<button id="ce-ai-add-prompt" class="crack-ext-ai-mbtn crack-ext-prompt-icon-btn" type="button" title="새 슬롯 추가" aria-label="새 슬롯 추가">＋</button>';
         html += '<button id="ce-ai-rename-prompt" class="crack-ext-ai-mbtn crack-ext-prompt-icon-btn" type="button" title="슬롯 이름 변경" aria-label="슬롯 이름 변경"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>';
@@ -2387,8 +2288,6 @@ if (mainModel && mainProvider) {
                 updateReasoningUsage(LAST_AI_USAGE, false);
                 var finalizedResult = await finalizeGeneratedMemoryResult(provider, config, finalResult, false);
                 txtResult.value = finalizedResult.text;
-                if (finalizedResult.repaired) showToast('제목 10자·본문 300자 한도만 자동 보정했습니다.');
-                if (finalizedResult.issues && finalizedResult.issues.length) showToast('슬롯 구조를 확인해주세요: ' + finalizedResult.issues[0]);
             } catch (err) {
                 txtResult.value = '오류: ' + err.message;
                 reasoningUsageEl.textContent = '';
@@ -2414,7 +2313,7 @@ if (mainModel && mainProvider) {
             if (errorIndex >= 0) {
                 currentCardIndex = errorIndex;
                 updatePreviewCards();
-                await showUiAlert('빈 항목이 있거나 내장 슬롯 제한(제목 ' + GENERATED_TITLE_MAX + '자, 내용 ' + GENERATED_SUMMARY_MAX + '자)을 초과한 항목이 있습니다.', '슬롯 형식 확인', { tone:'warning' });
+                await showUiAlert('빈 항목이 있거나 저장 한도(제목 ' + GENERATED_TITLE_MAX + '자, 내용 ' + GENERATED_SUMMARY_MAX + '자)를 초과한 항목이 있습니다.', '저장 한도 확인', { tone:'warning' });
                 return;
             }
             btnSave.disabled = true;
