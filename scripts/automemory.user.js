@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 요약 추가
 // @namespace    https://crack.wrtn.ai/
-// @version      2.1
+// @version      2.2.2
 // @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
 // @author       User
 // @match        https://crack.wrtn.ai/*
@@ -14,10 +14,21 @@
     'use strict';
 
     const API_BASE = 'https://crack-api.wrtn.ai/crack-gen/v3/chats';
+    const AI_RESULT_DRAFTS = new Map();
+    const UI_ICONS = Object.freeze({
+        memory:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12A1.5 1.5 0 0 1 19.5 5v14a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19V5A1.5 1.5 0 0 1 6 3.5Z"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>',
+        flask:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v5.5L4.8 17a2 2 0 0 0 1.8 3h10.8a2 2 0 0 0 1.8-3L14 8.5V3"/><path d="M7.5 14h9"/></svg>',
+        edit:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+        sparkle:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.7 4.6L18 9.2l-4.3 1.6L12 15.5l-1.7-4.7L6 9.2l4.3-1.6Z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8Z"/></svg>',
+        plus:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+        save:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11l3 3v15H5Z"/><path d="M8 3v6h8V3M8 15h8v6H8Z"/></svg>',
+        info:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg>',
+        close:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>'
+    });
 
     // ============== 저장 한도 / 전체 범위 처리 ==============
     // 제목·본문 제한은 미리보기와 저장 검증에만 사용하며, AI의 출력 형식에는 개입하지 않습니다.
-    const GENERATED_TITLE_MAX = 10;
+    const GENERATED_TITLE_MAX = 20;
     const GENERATED_SUMMARY_MAX = 300;
 
     // 사용자 프롬프트의 형식에는 관여하지 않고, 전달된 입력 전체를 끝까지 처리하도록 요구합니다.
@@ -221,6 +232,29 @@ This requirement controls coverage only. It must not change or add any output fo
     function getChatId() {
         const m = location.pathname.match(/\/episodes\/([a-f0-9]+)/);
         return m ? m[1] : null;
+    }
+
+    function getAiResultDraftKey() {
+        return getChatId() || location.pathname || 'current';
+    }
+
+    function getAiResultDraft() {
+        return AI_RESULT_DRAFTS.get(getAiResultDraftKey()) || null;
+    }
+
+    function saveAiResultDraft(value, mode) {
+        var text = String(value || '');
+        var trimmed = text.trim();
+        if (!trimmed) {
+            AI_RESULT_DRAFTS.delete(getAiResultDraftKey());
+            return;
+        }
+        if (trimmed === '요약 중...' || trimmed.startsWith('오류:')) return;
+        AI_RESULT_DRAFTS.set(getAiResultDraftKey(), { text:text, mode:mode === 'compress' ? 'compress' : 'main' });
+    }
+
+    function clearAiResultDraft() {
+        AI_RESULT_DRAFTS.delete(getAiResultDraftKey());
     }
 
     function getToken() {
@@ -1090,7 +1124,7 @@ async function fetchRecentMessages(limit) {
 }
 @media(max-width:430px){
 .crack-flex-ai-row .fg{min-width:100%}
-.crack-ext-ai-modal{padding:14px!important;max-height:calc(100vh - 8px)!important;max-height:calc(100dvh - 8px)!important}
+.crack-ext-ai-modal{padding:14px!important;max-height:calc(100vh - 16px)!important;max-height:calc(100dvh - 16px)!important}
 .crack-ext-ai-modal-header{top:-14px}
 .crack-ext-ai-modal-btns{bottom:-14px!important}
 .crack-ext-ai-mbtn{padding:8px 12px}
@@ -1105,50 +1139,6 @@ async function fetchRecentMessages(limit) {
 .crack-ext-ai-overlay{align-items:center;padding:4px}
 .crack-ext-ai-modal{max-height:calc(100vh - 8px)!important;max-height:calc(100dvh - 8px)!important}
 }
-body[data-theme="dark"] .crack-ext-editor-toolbar{background:#242321;border-color:#42413D}
-body[data-theme="dark"] .crack-ext-editor-card{background:#1a1918;border-color:#42413D}
-body[data-theme="dark"] .crack-ext-editor-card.is-delete{background:#3a181a;border-color:#ef4444}
-body[data-theme="dark"] .crack-ext-editor-pane{background:#141413;border-color:#42413D}
-body[data-theme="dark"] .crack-ext-editor-original{color:#ccc}
-body[data-theme="dark"] .crack-ext-editor-index,body[data-theme="dark"] .crack-ext-editor-pane h4{color:#aaa}
-
-body[data-theme="dark"] .crack-ext-ai-modal{background:#242321!important;color:#F0EFEB!important}
-body[data-theme="dark"] .crack-ext-ai-modal-header h3,body[data-theme="dark"] .crack-ext-ai-modal label{color:#F0EFEB!important}
-body[data-theme="dark"] .crack-ext-ai-close-btn{background:transparent!important;color:#d6d3d1!important;border:0!important}
-body[data-theme="dark"] .crack-ext-ai-close-btn:hover{background:transparent!important;color:#fff!important}
-body[data-theme="dark"] .crack-ext-prompt-header.is-editing{background:#1a1918;border-color:#42413D}
-body[data-theme="dark"] .crack-ext-prompt-heading-main{color:#F0EFEB}
-body[data-theme="dark"] .crack-ext-prompt-heading-sub,body[data-theme="dark"] .crack-ext-prompt-field-label{color:#aaa}
-body[data-theme="dark"] .crack-ext-prompt-icon-btn.is-save{background:#F0EFEB!important;color:#1A1918!important;border-color:#F0EFEB!important}
-body[data-theme="dark"] .crack-ext-prompt-icon-btn.is-delete{background:#2E2D2B!important;color:#ff6b6b!important;border-color:#7f1d1d!important}
-body[data-theme="dark"] .crack-ext-ui-dialog{background:#242321;color:#F0EFEB}
-body[data-theme="dark"] .crack-ext-ui-dialog h4{color:#F0EFEB}
-body[data-theme="dark"] .crack-ext-ui-dialog p{color:#bbb}
-body[data-theme="dark"] .crack-ext-ui-dialog input{background:#141413;color:#F0EFEB;border-color:#42413D}
-body[data-theme="dark"] .crack-ext-ai-modal input,body[data-theme="dark"] .crack-ext-ai-modal textarea,body[data-theme="dark"] .crack-ext-ai-modal select{background:#141413!important;color:#F0EFEB!important;border:1px solid #42413D!important}
-body[data-theme="dark"] .crack-ext-ai-modal select option{background:#141413!important;color:#F0EFEB!important}
-body[data-theme="dark"] #ce-ai-card-nav button{background:#2E2D2B!important;color:#F0EFEB!important;border:1px solid #42413D!important}
-body[data-theme="dark"] .crack-ext-session-card{background:#1a1918!important;border:1px solid #42413D!important}
-body[data-theme="dark"] .crack-ext-session-content{color:#ccc!important}
-body[data-theme="dark"] .crack-ext-ai-mbtn{background:#2E2D2B!important;color:#F0EFEB!important;border:1px solid #42413D!important}
-body[data-theme="dark"] .crack-ext-ai-mbtn-p{background:#F0EFEB!important;color:#1A1918!important}
-body[data-theme="dark"] .crack-ext-count-error{color:#ff6b6b!important}
-body[data-theme="dark"] .crack-ext-export-btn{background:#2E2D2B!important;color:#F0EFEB!important;border:1px solid #42413D!important}
-body[data-theme="dark"] .crack-ext-compress-list{border-color:#42413D}
-body[data-theme="dark"] .crack-ext-compress-item:hover{background:#2E2D2B}
-body[data-theme="dark"] .crack-ext-compress-item .item-title{color:#F0EFEB}
-body[data-theme="dark"] .crack-ext-compress-item .item-summary{color:#999}
-body[data-theme="dark"] .crack-ext-compress-header span{color:#999}
-body[data-theme="dark"] .crack-ext-badge-compress{background:#3b2e0a;color:#fcd34d}
-body[data-theme="dark"] .crack-ext-ai-mbtn-save{background:#388E3C!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn{background:transparent!important;color:#aaa69f!important;border-color:transparent!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn:hover{background:rgba(240,239,235,.07)!important;color:#F0EFEB!important;border-color:rgba(240,239,235,.08)!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#aaa197}
-body[data-theme="dark"] .crack-ext-reasoning-usage{color:#b9b3aa}
-html[data-sgb-theme="dark"] .crack-ext-header-ai-btn{color:#d6d1c9!important}
-html[data-sgb-theme="dark"] .crack-ext-header-ai-btn:hover{background:rgba(240,239,235,.07)!important;color:#fff!important;border-color:rgba(240,239,235,.08)!important}
-html[data-sgb-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#c4beb5!important}
-html[data-sgb-theme="dark"] .crack-ext-reasoning-usage{color:#bbb5ac}
 .crack-ext-ui-dialog{position:relative;overflow:hidden}
 .crack-ext-ui-dialog::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:#222}
 .crack-ext-ui-dialog.is-danger::before{background:#dc2626}
@@ -1156,16 +1146,389 @@ html[data-sgb-theme="dark"] .crack-ext-reasoning-usage{color:#bbb5ac}
 .crack-ext-ui-dialog.is-success::before{background:#16a34a}
 .crack-ext-ui-dialog-message{max-height:min(48vh,360px);overflow:auto;padding-right:2px}
 .crack-ext-toast{position:fixed;top:max(20px,env(safe-area-inset-top));left:50%;transform:translateX(-50%) translateY(-10px);z-index:999999999;background:#fff;color:#222;border:1px solid #e5e7eb;padding:11px 16px;border-radius:10px;font-size:13px;font-weight:600;box-shadow:0 8px 28px rgba(0,0,0,.18);transition:opacity .3s,transform .3s;max-width:min(520px,calc(100vw - 32px));word-break:break-word}
-body[data-theme="dark"] .crack-ext-ui-dialog,html[data-sgb-theme="dark"] .crack-ext-ui-dialog{background:#242321;color:#F0EFEB}
-body[data-theme="dark"] .crack-ext-ui-dialog h4,html[data-sgb-theme="dark"] .crack-ext-ui-dialog h4{color:#F0EFEB}
-body[data-theme="dark"] .crack-ext-ui-dialog p,html[data-sgb-theme="dark"] .crack-ext-ui-dialog p{color:#bbb}
-body[data-theme="dark"] .crack-ext-ui-dialog input,html[data-sgb-theme="dark"] .crack-ext-ui-dialog input{background:#141413;color:#F0EFEB;border-color:#42413D}
-body[data-theme="dark"] .crack-ext-ui-dialog::before,html[data-sgb-theme="dark"] .crack-ext-ui-dialog::before{background:#F0EFEB}
-body[data-theme="dark"] .crack-ext-ui-dialog.is-danger::before,html[data-sgb-theme="dark"] .crack-ext-ui-dialog.is-danger::before{background:#ff6b6b}
-body[data-theme="dark"] .crack-ext-ui-dialog.is-warning::before,html[data-sgb-theme="dark"] .crack-ext-ui-dialog.is-warning::before{background:#fbbf24}
-body[data-theme="dark"] .crack-ext-ui-dialog.is-success::before,html[data-sgb-theme="dark"] .crack-ext-ui-dialog.is-success::before{background:#4ade80}
-body[data-theme="dark"] .crack-ext-toast,html[data-sgb-theme="dark"] .crack-ext-toast{background:#242321;color:#F0EFEB;border-color:#42413D}
 @media(max-width:480px){.crack-ext-ui-dialog-message{max-height:42vh}.crack-ext-toast{top:max(12px,env(safe-area-inset-top));max-width:calc(100vw - 24px);padding:10px 14px}}
+
+/* ==========================================================
+   기억 서고 테마 — 원본 기능·문구·폰트 유지
+   ========================================================== */
+.crack-ext-ai-overlay,
+.crack-ext-ui-dialog-overlay,
+.crack-ext-toast{
+--ce-bg:#F3EDE2;
+--ce-panel:#FFFBF4;
+--ce-panel-2:#F8F0E4;
+--ce-card:#FBF5EA;
+--ce-card-hi:#F2E8D9;
+--ce-line:#D8CAB7;
+--ce-line-soft:#E8DDCE;
+--ce-ink:#362E25;
+--ce-ink-dim:#746858;
+--ce-ink-faint:#9A8C7A;
+--ce-amber:#B67822;
+--ce-amber-deep:#8F5B18;
+--ce-amber-glow:rgba(182,120,34,.14);
+--ce-sage:#4F8069;
+--ce-sage-deep:#3B6854;
+--ce-sage-glow:rgba(79,128,105,.13);
+--ce-on-sage:#FFFFFF;
+--ce-rose:#B95146;
+--ce-rose-deep:#923B33;
+--ce-rose-glow:rgba(185,81,70,.11);
+--ce-overlay:rgba(38,29,19,.48);
+--ce-shadow:0 24px 70px rgba(61,43,23,.24),0 0 0 1px rgba(86,61,31,.06);
+--ce-scheme:light;
+}
+body[data-theme="dark"] .crack-ext-ai-overlay,
+body[data-theme="dark"] .crack-ext-ui-dialog-overlay,
+body[data-theme="dark"] .crack-ext-toast,
+html[data-theme="dark"] .crack-ext-ai-overlay,
+html[data-theme="dark"] .crack-ext-ui-dialog-overlay,
+html[data-theme="dark"] .crack-ext-toast,
+html[data-sgb-theme="dark"] .crack-ext-ai-overlay,
+html[data-sgb-theme="dark"] .crack-ext-ui-dialog-overlay,
+html[data-sgb-theme="dark"] .crack-ext-toast{
+--ce-bg:#14120F;
+--ce-panel:#1D1A15;
+--ce-panel-2:#211D17;
+--ce-card:#262119;
+--ce-card-hi:#2C2720;
+--ce-line:#3B342A;
+--ce-line-soft:#2E2921;
+--ce-ink:#EDE5D6;
+--ce-ink-dim:#A79B85;
+--ce-ink-faint:#756B5C;
+--ce-amber:#E2A84B;
+--ce-amber-deep:#B87F2C;
+--ce-amber-glow:rgba(226,168,75,.16);
+--ce-sage:#8FB8A0;
+--ce-sage-deep:#6E9A84;
+--ce-sage-glow:rgba(143,184,160,.14);
+--ce-on-sage:#102018;
+--ce-rose:#D97B6C;
+--ce-rose-deep:#B85D51;
+--ce-rose-glow:rgba(217,123,108,.12);
+--ce-overlay:rgba(5,4,3,.64);
+--ce-shadow:0 24px 70px rgba(0,0,0,.5),0 0 0 1px rgba(0,0,0,.3);
+--ce-scheme:dark;
+}
+.crack-ext-ai-overlay *,
+.crack-ext-ai-overlay *::before,
+.crack-ext-ai-overlay *::after,
+.crack-ext-ui-dialog-overlay *,
+.crack-ext-ui-dialog-overlay *::before,
+.crack-ext-ui-dialog-overlay *::after{box-sizing:border-box}
+.crack-ext-ai-overlay{background:var(--ce-overlay)!important;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);padding:18px}
+.crack-ext-ai-modal{
+position:relative;
+background:radial-gradient(ellipse 720px 320px at 76% -12%,var(--ce-amber-glow),transparent 64%),var(--ce-panel)!important;
+color:var(--ce-ink)!important;
+border:1px solid var(--ce-line)!important;
+border-radius:14px!important;
+padding:24px!important;
+box-shadow:var(--ce-shadow)!important;
+color-scheme:var(--ce-scheme);
+scrollbar-color:var(--ce-line) transparent;
+animation:ce-archive-in .26s ease both;
+}
+.crack-ext-ai-modal::selection,.crack-ext-ai-modal *::selection{background:var(--ce-amber-glow);color:var(--ce-ink)}
+@keyframes ce-archive-in{from{opacity:0;transform:translateY(8px) scale(.995)}to{opacity:1;transform:none}}
+.crack-ext-ai-modal-header{
+position:relative;
+isolation:isolate;
+display:flex;
+align-items:center;
+justify-content:space-between;
+gap:14px;
+margin:-24px -24px 20px!important;
+padding:20px 22px 18px!important;
+border-bottom:1px solid var(--ce-line-soft);
+background:linear-gradient(180deg,var(--ce-panel-2),var(--ce-panel));
+overflow:hidden;
+}
+.crack-ext-ai-modal-header::after{
+content:"";
+position:absolute;
+inset:0;
+z-index:-1;
+pointer-events:none;
+background:var(--ce-amber);
+opacity:.38;
+-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 700 74' preserveAspectRatio='none'%3E%3Cpath d='M-10 58C120 30 190 64 300 42S520 18 710 40' fill='none' stroke='black' stroke-width='1.2'/%3E%3Ccircle cx='140' cy='44' r='2.6'/%3E%3Ccircle cx='300' cy='42' r='2.6'/%3E%3Ccircle cx='470' cy='30' r='2.6'/%3E%3Ccircle cx='620' cy='36' r='2.6'/%3E%3C/svg%3E") center/100% 100% no-repeat;
+mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 700 74' preserveAspectRatio='none'%3E%3Cpath d='M-10 58C120 30 190 64 300 42S520 18 710 40' fill='none' stroke='black' stroke-width='1.2'/%3E%3Ccircle cx='140' cy='44' r='2.6'/%3E%3Ccircle cx='300' cy='42' r='2.6'/%3E%3Ccircle cx='470' cy='30' r='2.6'/%3E%3Ccircle cx='620' cy='36' r='2.6'/%3E%3C/svg%3E") center/100% 100% no-repeat;
+transform-origin:left center;
+animation:ce-thread-in 1.35s ease both .12s;
+}
+.crack-ext-compress-modal .crack-ext-ai-modal-header::after{background:var(--ce-sage)}
+@keyframes ce-thread-in{from{opacity:0;transform:scaleX(.08)}to{opacity:.38;transform:scaleX(1)}}
+.crack-ext-ai-modal-header h3{
+position:relative;
+z-index:1;
+display:flex;
+align-items:center;
+gap:12px;
+min-width:0;
+margin:0!important;
+color:var(--ce-ink)!important;
+font-size:18px!important;
+font-weight:700!important;
+line-height:1.35;
+}
+.crack-ext-head-glyph{
+display:grid;
+place-items:center;
+flex:0 0 auto;
+width:36px;
+height:36px;
+border:1px solid color-mix(in srgb,var(--ce-amber) 34%,transparent);
+border-radius:10px;
+background:var(--ce-amber-glow);
+color:var(--ce-amber);
+font-size:17px;
+line-height:1;
+}
+.crack-ext-head-glyph .crack-ext-ui-icon{width:19px;height:19px}
+.crack-ext-compress-modal .crack-ext-head-glyph{border-color:color-mix(in srgb,var(--ce-sage) 38%,transparent);background:var(--ce-sage-glow);color:var(--ce-sage)}
+.crack-ext-head-title{min-width:0}
+.crack-ext-ai-modal-header-actions{position:relative;z-index:1}
+#ce-editor-total{color:var(--ce-ink-faint)!important;font-variant-numeric:tabular-nums}
+.crack-ext-ai-close-btn{
+width:30px!important;
+height:30px!important;
+min-width:30px!important;
+border-radius:8px!important;
+background:transparent!important;
+color:var(--ce-ink-faint)!important;
+font-size:24px!important;
+transition:color .2s,background .2s,transform .2s!important;
+}
+.crack-ext-ai-close-btn:hover{background:color-mix(in srgb,var(--ce-ink) 7%,transparent)!important;color:var(--ce-ink)!important;opacity:1!important;transform:rotate(90deg)}
+.crack-ext-ai-close-btn:focus-visible,.crack-ext-ai-modal :focus-visible,.crack-ext-ui-dialog :focus-visible{outline:2px solid var(--ce-amber)!important;outline-offset:2px}
+.crack-ext-ai-modal label{color:var(--ce-ink-dim)!important;font-size:11px!important;font-weight:650!important;letter-spacing:.055em;margin-bottom:6px!important}
+.crack-ext-ai-modal input:not([type="checkbox"]),
+.crack-ext-ai-modal textarea,
+.crack-ext-ai-modal select,
+.crack-ext-ui-dialog input{
+background:var(--ce-bg)!important;
+color:var(--ce-ink)!important;
+border:1px solid var(--ce-line)!important;
+border-radius:9px!important;
+font-family:inherit!important;
+font-size:13px!important;
+transition:border-color .2s,box-shadow .2s,background .2s!important;
+}
+.crack-ext-ai-modal input:not([type="checkbox"]):focus,
+.crack-ext-ai-modal textarea:focus,
+.crack-ext-ai-modal select:focus,
+.crack-ext-ui-dialog input:focus{outline:none!important;border-color:var(--ce-amber)!important;box-shadow:0 0 0 3px var(--ce-amber-glow)!important}
+.crack-ext-ai-modal input::placeholder,.crack-ext-ai-modal textarea::placeholder,.crack-ext-ui-dialog input::placeholder{color:var(--ce-ink-faint)!important}
+.crack-ext-ai-modal select option{background:var(--ce-bg)!important;color:var(--ce-ink)!important}
+.crack-ext-ai-modal input[type="checkbox"]{accent-color:var(--ce-sage)}
+.crack-ext-ai-modal input:disabled,.crack-ext-ai-modal textarea:disabled,.crack-ext-ai-modal select:disabled{opacity:.48!important;cursor:not-allowed}
+#ce-ai-result{min-height:150px;resize:vertical;line-height:1.7;padding:14px!important}
+#ce-ai-top-settings{display:grid;grid-template-columns:1.2fr 2fr 1.5fr .8fr;gap:12px;margin-bottom:12px}
+#ce-ai-secondary-settings{display:grid;grid-template-columns:1fr 1fr 2fr;gap:12px;margin-bottom:18px}
+#ce-ai-top-settings .fg,#ce-ai-secondary-settings .fg{min-width:0!important}
+.crack-ext-ai-modal-btns{
+display:flex;
+align-items:center;
+justify-content:space-between;
+gap:10px;
+flex-wrap:wrap;
+margin:18px -24px -24px!important;
+padding:16px 22px!important;
+border-top:1px solid var(--ce-line-soft);
+background:var(--ce-panel-2)!important;
+}
+.crack-ext-editor-modal .crack-ext-ai-modal-btns{position:sticky!important;bottom:-24px!important;z-index:20!important}
+.crack-ext-ai-footer-right{gap:8px}
+.crack-ext-ai-mbtn,
+.crack-ext-export-btn,
+#ce-ai-card-nav button{
+border:1px solid var(--ce-line)!important;
+background:var(--ce-card)!important;
+color:var(--ce-ink)!important;
+border-radius:9px!important;
+font-family:inherit!important;
+font-weight:650!important;
+box-shadow:none!important;
+transition:transform .15s ease,box-shadow .2s,border-color .2s,background .2s,color .2s!important;
+}
+.crack-ext-ai-mbtn{display:inline-flex;align-items:center;justify-content:center;gap:7px}
+.crack-ext-ui-icon{display:block;flex:0 0 auto;width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+.crack-ext-ai-close-btn .crack-ext-ui-icon{width:16px;height:16px}
+.crack-ext-compress-note .crack-ext-ui-icon{width:16px;height:16px;margin-top:2px}
+.crack-ext-ai-mbtn:hover,.crack-ext-export-btn:hover,#ce-ai-card-nav button:hover{background:var(--ce-card-hi)!important;border-color:var(--ce-ink-faint)!important;transform:translateY(-1px)}
+.crack-ext-ai-mbtn:active,.crack-ext-export-btn:active,#ce-ai-card-nav button:active{transform:translateY(0)}
+.crack-ext-ai-mbtn-p:not(:disabled),#ce-ai-generate:not(:disabled),#ce-editor-save:not(:disabled){
+background:linear-gradient(160deg,var(--ce-amber),var(--ce-amber-deep))!important;
+color:#1B150A!important;
+border-color:transparent!important;
+box-shadow:0 3px 14px var(--ce-amber-glow)!important;
+}
+.crack-ext-ai-mbtn-p:not(:disabled):hover,#ce-ai-generate:not(:disabled):hover,#ce-editor-save:not(:disabled):hover{box-shadow:0 5px 22px var(--ce-amber-glow)!important}
+#ce-ai-compress-btn:not(:disabled){background:var(--ce-sage-glow)!important;color:var(--ce-sage)!important;border-color:color-mix(in srgb,var(--ce-sage) 42%,transparent)!important}
+#ce-compress-start:not(:disabled){background:linear-gradient(160deg,var(--ce-sage),var(--ce-sage-deep))!important;color:var(--ce-on-sage)!important;border-color:transparent!important;box-shadow:0 3px 14px var(--ce-sage-glow)!important}
+#ce-compress-back,#ce-editor-back,#ce-ai-prompt-back{background:transparent!important;border-color:transparent!important;color:var(--ce-ink-dim)!important}
+#ce-compress-back:hover,#ce-editor-back:hover,#ce-ai-prompt-back:hover{background:color-mix(in srgb,var(--ce-ink) 6%,transparent)!important;color:var(--ce-ink)!important}
+.crack-ext-editor-danger,.crack-ext-prompt-icon-btn.is-delete{background:transparent!important;color:var(--ce-rose)!important;border-color:color-mix(in srgb,var(--ce-rose) 48%,transparent)!important}
+.crack-ext-editor-danger:hover,.crack-ext-prompt-icon-btn.is-delete:hover{background:var(--ce-rose-glow)!important;color:var(--ce-rose-deep)!important}
+.crack-ext-ai-mbtn-save{background:var(--ce-sage)!important;color:#102018!important;border-color:transparent!important}
+.crack-ext-ai-mbtn:disabled,.crack-ext-ai-mbtn-p:disabled,.crack-ext-export-btn:disabled{background:var(--ce-line-soft)!important;color:var(--ce-ink-faint)!important;border-color:var(--ce-line-soft)!important;box-shadow:none!important;cursor:not-allowed;transform:none;opacity:.68}
+#ce-ai-generate:disabled{position:relative;overflow:hidden}
+#ce-ai-generate:disabled::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,color-mix(in srgb,var(--ce-ink) 22%,transparent) 50%,transparent 70%);animation:ce-shimmer 1.35s linear infinite}
+@keyframes ce-shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.crack-ext-export-actions{gap:6px}
+.crack-ext-export-btn{padding:7px 13px;border-radius:999px!important;background:transparent!important;color:var(--ce-ink-dim)!important}
+.crack-ext-export-btn:hover{color:var(--ce-amber)!important;border-color:var(--ce-amber-deep)!important}
+.crack-ext-prompt-header{margin-bottom:8px;gap:12px}
+.crack-ext-prompt-heading-main{display:inline-flex;align-items:center;gap:9px;color:var(--ce-ink)!important;font-size:15px;font-weight:700}
+.crack-ext-prompt-heading-main::before{content:"";width:7px;height:7px;flex:0 0 auto;border-radius:50%;background:var(--ce-amber);box-shadow:0 0 8px var(--ce-amber);animation:ce-pulse 2.4s ease-in-out infinite}
+@keyframes ce-pulse{0%,100%{opacity:.48}50%{opacity:1}}
+.crack-ext-reasoning-usage{color:var(--ce-ink-faint)!important;font-weight:500;font-variant-numeric:tabular-nums}
+.crack-ext-prompt-heading-sub,.crack-ext-prompt-field-label{color:var(--ce-ink-faint)!important}
+.crack-ext-prompt-header.is-editing{border-color:var(--ce-line)!important;border-radius:10px;background:var(--ce-card)!important;padding:11px 12px}
+.crack-ext-prompt-header.is-editing .crack-ext-prompt-heading-main::before{background:var(--ce-sage);box-shadow:0 0 8px var(--ce-sage)}
+.crack-ext-prompt-field select{background-color:var(--ce-bg)!important}
+.crack-ext-prompt-icon-btn.is-save{background:linear-gradient(160deg,var(--ce-amber),var(--ce-amber-deep))!important;color:#1B150A!important;border-color:transparent!important}
+#ce-ai-selection-counter{color:var(--ce-sage)!important;font-weight:650}
+#ce-ai-preview-container{margin-top:14px}
+#ce-ai-card-nav{gap:14px;margin:10px 0 8px;color:var(--ce-ink-dim)!important;font-weight:600}
+#ce-ai-card-nav button{padding:5px 11px;font-size:11px}
+.crack-ext-session-card{
+position:relative;
+overflow:hidden;
+margin-bottom:8px;
+padding:14px 16px 12px 22px!important;
+background:var(--ce-card)!important;
+border:1px solid var(--ce-line)!important;
+border-radius:9px!important;
+transition:transform .2s ease,box-shadow .25s ease!important;
+}
+.crack-ext-session-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,var(--ce-amber),var(--ce-amber-deep))}
+.crack-ext-session-card::after{content:"";position:absolute;left:9px;top:14px;width:5px;height:5px;border-radius:50%;background:var(--ce-bg);border:1px solid var(--ce-line)}
+.crack-ext-session-card:hover{transform:translateY(-2px);box-shadow:0 8px 24px color-mix(in srgb,var(--ce-ink) 14%,transparent)}
+.crack-ext-session-title{color:var(--ce-amber)!important;font-size:14px;line-height:1.45}
+.crack-ext-session-content{color:var(--ce-ink-dim)!important;line-height:1.75!important}
+.crack-ext-char-count{color:var(--ce-ink-faint)!important;font-variant-numeric:tabular-nums}
+.crack-ext-count-error{color:var(--ce-rose)!important}
+.crack-ext-badge{border-radius:999px;padding:4px 10px;margin-left:6px;vertical-align:middle;letter-spacing:.02em}
+.crack-ext-badge-compress{background:var(--ce-sage-glow)!important;color:var(--ce-sage)!important;border:1px solid color-mix(in srgb,var(--ce-sage) 34%,transparent)}
+.crack-ext-compress-header{margin-bottom:9px;gap:10px}
+.crack-ext-compress-header span{color:var(--ce-ink-dim)!important;font-size:12px}
+.crack-ext-compress-list{max-height:300px;padding:0;background:var(--ce-bg);border:1px solid var(--ce-line);border-radius:9px;overflow-y:auto;scrollbar-color:var(--ce-line) transparent}
+.crack-ext-compress-list>div[style]{color:var(--ce-ink-faint)!important}
+.crack-ext-compress-item{position:relative;gap:12px;padding:12px 14px;border-bottom:1px solid var(--ce-line-soft);font-size:12px;transition:background .18s}
+.crack-ext-compress-item:last-child{border-bottom:0}
+.crack-ext-compress-item:hover{background:color-mix(in srgb,var(--ce-ink) 4%,transparent)}
+.crack-ext-compress-item:has(input:checked){background:var(--ce-sage-glow)}
+.crack-ext-compress-item:has(input:checked)::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ce-sage)}
+.crack-ext-compress-item input[type="checkbox"]{width:17px!important;height:17px!important;margin-top:2px!important;accent-color:var(--ce-sage)}
+.crack-ext-compress-item .item-title{color:var(--ce-ink)!important;font-size:13px;font-weight:650}
+.crack-ext-compress-item .item-summary{max-width:500px;color:var(--ce-ink-faint)!important;font-size:11.5px;margin-top:2px}
+.crack-ext-compress-note{display:flex;align-items:flex-start;gap:8px;padding:11px 14px;margin-top:14px!important;border:1px solid color-mix(in srgb,var(--ce-sage) 30%,transparent);border-radius:9px;background:var(--ce-sage-glow);color:var(--ce-sage)!important;line-height:1.6}
+.crack-ext-editor-modal{width:1040px!important}
+.crack-ext-editor-toolbar{position:sticky;top:-24px;z-index:15;padding:0 0 14px;margin-bottom:16px;background:var(--ce-panel)!important;border-color:var(--ce-line-soft)!important}
+.crack-ext-editor-search-row{gap:10px}
+.crack-ext-editor-search-row input{min-width:220px;padding-left:12px!important}
+.crack-ext-editor-check-label{color:var(--ce-ink-dim)!important;font-size:12px!important;letter-spacing:0!important}
+.crack-ext-editor-check-label input[type="checkbox"]{accent-color:var(--ce-sage)}
+#ce-editor-summary{color:var(--ce-ink-faint)!important;font-variant-numeric:tabular-nums}
+.crack-ext-editor-list{gap:14px}
+.crack-ext-editor-card{
+position:relative;
+overflow:hidden;
+padding:0;
+background:var(--ce-card)!important;
+border:1px solid var(--ce-line)!important;
+border-radius:14px;
+box-shadow:none;
+transition:border-color .25s,box-shadow .25s,opacity .25s;
+}
+.crack-ext-editor-card.is-selected{border-color:var(--ce-sage)!important;box-shadow:0 0 0 2px var(--ce-sage-glow)!important}
+.crack-ext-editor-card.is-changed{border-color:color-mix(in srgb,var(--ce-amber) 55%,var(--ce-line))!important;box-shadow:0 0 0 1px var(--ce-amber-glow)!important}
+.crack-ext-editor-card.is-delete{border-color:color-mix(in srgb,var(--ce-rose) 58%,var(--ce-line))!important;background:var(--ce-card)!important;opacity:.78}
+.crack-ext-editor-card.is-error{border-color:var(--ce-rose)!important;box-shadow:0 0 0 2px var(--ce-rose-glow)!important}
+.crack-ext-editor-card-head{margin:0;padding:11px 16px;border-bottom:1px solid var(--ce-line-soft);background:color-mix(in srgb,var(--ce-ink) 2.5%,transparent)}
+.crack-ext-editor-card-title{gap:12px}
+.crack-ext-editor-index{display:flex;align-items:center;gap:8px;color:var(--ce-ink-faint)!important;font-variant-numeric:tabular-nums}
+.crack-ext-editor-status{display:inline-flex;padding:3px 9px;border-radius:999px;background:color-mix(in srgb,var(--ce-ink) 5%,transparent);color:var(--ce-ink-faint);font-size:10px;line-height:1.35;letter-spacing:.035em}
+.crack-ext-editor-card.is-changed .crack-ext-editor-status{background:var(--ce-amber-glow);color:var(--ce-amber)}
+.crack-ext-editor-card.is-delete .crack-ext-editor-status{background:var(--ce-rose-glow);color:var(--ce-rose)}
+.crack-ext-editor-grid{grid-template-columns:1fr 1fr;gap:0}
+.crack-ext-editor-pane{padding:14px 16px;background:transparent!important;border:0!important;border-radius:0}
+.crack-ext-editor-pane+.crack-ext-editor-pane{border-left:1px dashed var(--ce-line-soft)!important}
+.crack-ext-editor-pane h4{display:flex;align-items:center;gap:6px;margin:0 0 9px;color:var(--ce-ink-faint)!important;font-size:10px;letter-spacing:.12em}
+.crack-ext-editor-pane h4::after{content:"";flex:1;height:1px;background:var(--ce-line-soft)}
+.crack-ext-editor-original{color:var(--ce-ink-dim)!important;line-height:1.75;font-size:12px}
+.crack-ext-editor-original strong{display:block;margin-bottom:5px;color:var(--ce-ink)!important;font-size:13px}
+.crack-ext-editor-title-input{margin-bottom:9px!important;font-weight:700}
+.crack-ext-editor-summary-input{min-height:112px;line-height:1.7}
+.crack-ext-editor-meta{color:var(--ce-ink-faint)!important;font-variant-numeric:tabular-nums}
+.crack-ext-editor-meta span:last-child:not(:empty){color:var(--ce-rose)!important;font-weight:650}
+.crack-ext-editor-empty{color:var(--ce-ink-faint)!important}
+.crack-ext-ui-dialog-overlay{background:var(--ce-overlay)!important;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
+.crack-ext-ui-dialog{background:var(--ce-panel)!important;color:var(--ce-ink)!important;border:1px solid var(--ce-line);border-radius:14px;padding:20px;box-shadow:var(--ce-shadow);color-scheme:var(--ce-scheme)}
+.crack-ext-ui-dialog::before{height:3px;background:var(--ce-amber)!important}
+.crack-ext-ui-dialog.is-danger::before{background:var(--ce-rose)!important}
+.crack-ext-ui-dialog.is-warning::before{background:var(--ce-amber)!important}
+.crack-ext-ui-dialog.is-success::before{background:var(--ce-sage)!important}
+.crack-ext-ui-dialog h4{color:var(--ce-ink)!important;font-size:15px}
+.crack-ext-ui-dialog p{color:var(--ce-ink-dim)!important;line-height:1.65}
+.crack-ext-ui-dialog-error{color:var(--ce-rose)!important}
+.crack-ext-toast{background:var(--ce-panel)!important;color:var(--ce-ink)!important;border:1px solid var(--ce-line)!important;border-left:3px solid var(--ce-amber)!important;border-radius:10px;box-shadow:0 8px 28px color-mix(in srgb,var(--ce-ink) 18%,transparent)!important}
+.crack-ext-header-ai-btn{color:#6E5F4C!important}
+.crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#9D6D2B!important}
+.crack-ext-header-ai-btn:hover{background:rgba(182,120,34,.09)!important;border-color:rgba(182,120,34,.15)!important;color:#8F5B18!important}
+.crack-ext-header-ai-btn.crack-ext-floating{background:#FFFBF4!important;border:1px solid #D8CAB7!important;box-shadow:0 5px 18px rgba(61,43,23,.18)!important}
+body[data-theme="dark"] .crack-ext-header-ai-btn,html[data-theme="dark"] .crack-ext-header-ai-btn,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn{color:#C9BBA5!important}
+body[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#D5A052!important}
+body[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn:hover{background:rgba(226,168,75,.1)!important;border-color:rgba(226,168,75,.16)!important;color:#EDE5D6!important}
+body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating{background:#1D1A15!important;border-color:#3B342A!important;box-shadow:0 5px 18px rgba(0,0,0,.38)!important}
+@media(max-width:820px){
+#ce-ai-top-settings,#ce-ai-secondary-settings{grid-template-columns:1fr 1fr}
+.crack-ext-editor-grid{grid-template-columns:1fr}
+.crack-ext-editor-pane+.crack-ext-editor-pane{border-left:0!important;border-top:1px dashed var(--ce-line-soft)!important}
+}
+@media(max-width:760px){
+.crack-ext-ai-overlay{padding:8px}
+.crack-ext-ai-modal{width:calc(100vw - 16px)!important;max-width:none!important;max-height:calc(100vh - 16px)!important;max-height:calc(100dvh - 16px)!important;padding:16px!important}
+.crack-ext-ai-modal-header{position:sticky;top:-16px;z-index:20;margin:-16px -16px 16px!important;padding:16px 16px 14px!important}
+.crack-ext-ai-modal-btns{position:sticky!important;bottom:-16px!important;z-index:20!important;margin:16px -16px -16px!important;padding:14px 16px!important}
+.crack-ext-editor-modal .crack-ext-ai-modal-btns{bottom:-16px!important}
+.crack-ext-editor-toolbar{top:27px;padding-top:8px}
+.crack-ext-editor-search-row input{min-width:100%}
+.crack-ext-compress-list{max-height:44vh;max-height:44dvh}
+.crack-ext-prompt-header{align-items:flex-start}
+}
+@media(max-width:520px){
+#ce-ai-top-settings,#ce-ai-secondary-settings{grid-template-columns:1fr}
+.crack-ext-ai-modal-btns{flex-direction:column;align-items:stretch}
+#ce-ai-main-actions,.crack-ext-ai-footer-right{width:100%}
+#ce-ai-main-actions .crack-ext-ai-mbtn,.crack-ext-ai-footer-right .crack-ext-ai-mbtn{flex:1 1 auto;justify-content:center}
+.crack-ext-ai-modal-header h3{font-size:16px!important;gap:9px}
+.crack-ext-head-glyph{width:34px;height:34px;border-radius:9px;font-size:16px}
+.crack-ext-badge{display:inline-flex;margin:5px 0 0}
+}
+@media(max-width:430px){
+.crack-ext-ai-modal{padding:14px!important;max-height:calc(100vh - 16px)!important;max-height:calc(100dvh - 16px)!important}
+.crack-ext-ai-modal-header{top:-14px;margin:-14px -14px 14px!important;padding:14px!important}
+.crack-ext-ai-modal-btns{bottom:-14px!important;margin:14px -14px -14px!important;padding:12px 14px!important}
+.crack-ext-editor-modal .crack-ext-ai-modal-btns{bottom:-14px!important}
+.crack-ext-editor-card-head{align-items:flex-start;padding:10px 12px}
+.crack-ext-editor-pane{padding:12px}
+.crack-ext-editor-actions{justify-content:flex-end}
+}
+/* 모바일 가로 화면: 편집 툴바가 카드 조작 영역을 덮지 않도록 일반 스크롤로 전환 */
+@media (max-height:520px) and (max-width:760px){
+.crack-ext-editor-toolbar{position:static!important;top:auto!important;padding-top:0}
+}
+/* 768px 태블릿에서도 스크롤 중 닫기 버튼을 유지 */
+@media (min-width:761px) and (max-width:820px){
+.crack-ext-ai-modal-header{position:sticky;top:-24px;z-index:20}
+}
+@media(prefers-reduced-motion:reduce){
+.crack-ext-ai-modal,.crack-ext-ai-modal-header::after,.crack-ext-prompt-heading-main::before,#ce-ai-generate:disabled::after{animation:none!important;transition:none!important}
+}
 `;
         document.head.appendChild(s);
     }
@@ -1362,7 +1725,7 @@ body[data-theme="dark"] .crack-ext-toast,html[data-sgb-theme="dark"] .crack-ext-
         var overlay = document.createElement('div');
         overlay.className = 'crack-ext-ai-overlay';
         overlay.innerHTML = '<div class="crack-ext-ai-modal crack-ext-editor-modal">' +
-            '<div class="crack-ext-ai-modal-header"><h3>📝 장기기억 일괄 편집</h3><div class="crack-ext-ai-modal-header-actions"><span id="ce-editor-total" style="font-size:11px;color:#888;">불러오는 중...</span><button class="crack-ext-ai-close-btn" id="ce-editor-x-close" type="button" aria-label="창 닫기" title="창 닫기">×</button></div></div>' +
+            '<div class="crack-ext-ai-modal-header"><h3><span class="crack-ext-head-glyph" aria-hidden="true">' + UI_ICONS.edit + '</span><span class="crack-ext-head-title">장기기억 일괄 편집</span></h3><div class="crack-ext-ai-modal-header-actions"><span id="ce-editor-total" style="font-size:11px;color:#888;">불러오는 중...</span><button class="crack-ext-ai-close-btn" id="ce-editor-x-close" type="button" aria-label="창 닫기" title="창 닫기">' + UI_ICONS.close + '</button></div></div>' +
             '<div class="crack-ext-editor-toolbar">' +
               '<div class="crack-ext-editor-search-row">' +
                 '<input id="ce-editor-search" type="text" placeholder="제목 또는 내용 검색">' +
@@ -1378,7 +1741,7 @@ body[data-theme="dark"] .crack-ext-toast,html[data-sgb-theme="dark"] .crack-ext-
             '</div>' +
             '<div class="crack-ext-editor-list" id="ce-editor-list"><div class="crack-ext-editor-empty">장기기억을 불러오는 중...</div></div>' +
             '<div class="crack-ext-ai-modal-btns" style="position:sticky;bottom:-24px;background:inherit;padding:12px 0 0;z-index:3;">' +
-              '<div class="crack-ext-ai-footer-right"><button class="crack-ext-ai-mbtn" id="ce-editor-back">돌아가기</button><button class="crack-ext-ai-mbtn crack-ext-ai-mbtn-p" id="ce-editor-save" disabled>변경사항 저장</button></div>' +
+              '<div class="crack-ext-ai-footer-right"><button class="crack-ext-ai-mbtn" id="ce-editor-back">돌아가기</button><button class="crack-ext-ai-mbtn crack-ext-ai-mbtn-p" id="ce-editor-save" disabled>' + UI_ICONS.save + '<span>변경사항 저장</span></button></div>' +
             '</div></div>';
         document.body.appendChild(overlay);
 
@@ -1440,7 +1803,7 @@ body[data-theme="dark"] .crack-ext-toast,html[data-sgb-theme="dark"] .crack-ext-
             var invalid = items.filter(isInvalid).length;
             summaryEl.textContent = '선택 ' + selected + '개 · 수정 ' + changed + '개 · 삭제 ' + deleted + '개' + (invalid ? ' · 오류 ' + invalid + '개' : '');
             saveBtn.disabled = (changed + deleted === 0) || invalid > 0 || saving;
-            saveBtn.textContent = saving ? '저장 중...' : '변경사항 저장 (' + (changed + deleted) + ')';
+            saveBtn.innerHTML = UI_ICONS.save + '<span>' + (saving ? '저장 중...' : '변경사항 저장 (' + (changed + deleted) + ')') + '</span>';
             deleteSelectedBtn.disabled = selected === 0 || saving;
             restoreSelectedBtn.disabled = selected === 0 || saving;
 
@@ -1566,7 +1929,7 @@ body[data-theme="dark"] .crack-ext-toast,html[data-sgb-theme="dark"] .crack-ext-
             var failed = [];
             for (var i = 0; i < targets.length; i++) {
                 var item = targets[i];
-                saveBtn.textContent = '저장 중... (' + (i + 1) + '/' + targets.length + ')';
+                saveBtn.innerHTML = UI_ICONS.save + '<span>저장 중... (' + (i + 1) + '/' + targets.length + ')</span>';
                 try {
                     if (item.deletePending) {
                         await deleteExistingSummary(item.raw);
@@ -1629,13 +1992,13 @@ body[data-theme="dark"] .crack-ext-toast,html[data-sgb-theme="dark"] .crack-ext-
         var overlay = document.createElement('div');
         overlay.className = 'crack-ext-ai-overlay';
 
-        var html = '<div class="crack-ext-ai-modal" style="width:600px;">';
-        html += '<div class="crack-ext-ai-modal-header"><h3>📦 장기기억 2차 압축</h3><div class="crack-ext-ai-modal-header-actions"><span class="crack-ext-badge crack-ext-badge-compress">검색형 압축</span><button class="crack-ext-ai-close-btn" id="ce-compress-x-close" type="button" aria-label="창 닫기" title="창 닫기">×</button></div></div>';
+        var html = '<div class="crack-ext-ai-modal crack-ext-compress-modal" style="width:600px;">';
+        html += '<div class="crack-ext-ai-modal-header"><h3><span class="crack-ext-head-glyph" aria-hidden="true">' + UI_ICONS.flask + '</span><span class="crack-ext-head-title">장기기억 2차 압축</span></h3><div class="crack-ext-ai-modal-header-actions"><span class="crack-ext-badge crack-ext-badge-compress">검색형 압축</span><button class="crack-ext-ai-close-btn" id="ce-compress-x-close" type="button" aria-label="창 닫기" title="창 닫기">' + UI_ICONS.close + '</button></div></div>';
         html += '<div class="crack-ext-compress-header"><span>압축할 장기기억을 선택하세요 (여러 개 선택 가능)</span><button class="crack-ext-ai-mbtn" id="ce-compress-select-all" style="font-size:11px;padding:4px 10px;">전체 선택</button></div>';
         html += '<div class="crack-ext-compress-list" id="ce-compress-list"><div style="text-align:center;padding:20px;color:#999;">불러오는 중...</div></div>';
-        html += '<div style="margin-top:8px;font-size:11px;color:#888;">💡 선택한 항목들을 2차 압축 프롬프트로 병합·압축합니다. 원본은 유지됩니다.</div>';
+        html += '<div class="crack-ext-compress-note" style="margin-top:8px;font-size:11px;color:#888;">' + UI_ICONS.info + '<span>선택한 항목들을 2차 압축 프롬프트로 병합·압축합니다. 원본은 유지됩니다.</span></div>';
         html += '<div class="crack-ext-ai-modal-btns">';
-        html += '<div class="crack-ext-ai-footer-right"><button class="crack-ext-ai-mbtn" id="ce-compress-back">돌아가기</button><button class="crack-ext-ai-mbtn crack-ext-ai-mbtn-p" id="ce-compress-start" disabled>압축 생성</button></div>';
+        html += '<div class="crack-ext-ai-footer-right"><button class="crack-ext-ai-mbtn" id="ce-compress-back">돌아가기</button><button class="crack-ext-ai-mbtn crack-ext-ai-mbtn-p" id="ce-compress-start" disabled>' + UI_ICONS.flask + '<span>압축 생성</span></button></div>';
         html += '</div></div>';
 
         overlay.innerHTML = html;
@@ -1703,7 +2066,7 @@ body[data-theme="dark"] .crack-ext-toast,html[data-sgb-theme="dark"] .crack-ext-
 
         function updateButton() {
             btnStart.disabled = getSelected().length === 0;
-            btnStart.textContent = '압축 생성 (' + getSelected().length + '개 선택)';
+            btnStart.innerHTML = UI_ICONS.flask + '<span>압축 생성 (' + getSelected().length + '개 선택)</span>';
         }
 
         listContainer.addEventListener('change', updateButton);
@@ -1734,7 +2097,7 @@ if (mainModel && mainProvider) {
             var reasoning = localStorage.getItem(getReasoningStorageKey(provider, model)) || 'auto';
 
             btnStart.disabled = true;
-            btnStart.textContent = '압축 중...';
+            btnStart.innerHTML = UI_ICONS.flask + '<span>압축 중...</span>';
 
             try {
                 var config = { apiKey:apiKey, model:model, firebaseScript:firebaseScript, reasoning:reasoning };
@@ -1746,13 +2109,21 @@ if (mainModel && mainProvider) {
             } catch (err) {
                 await showUiAlert('압축 중 오류: ' + err.message, '압축 오류', { tone:'danger' });
                 btnStart.disabled = false;
-                btnStart.textContent = '압축 생성';
+                btnStart.innerHTML = UI_ICONS.flask + '<span>압축 생성</span>';
             }
         };
     }
 
     // ============== 메인 모달 ==============
     function showMainModal(prefillText, isCompressResult) {
+        var restoredDraft = null;
+        if (!String(prefillText || '').trim()) {
+            restoredDraft = getAiResultDraft();
+            if (restoredDraft) {
+                prefillText = restoredDraft.text;
+                isCompressResult = restoredDraft.mode === 'compress';
+            }
+        }
         var overlay = document.createElement('div');
         overlay.className = 'crack-ext-ai-overlay';
 
@@ -1766,12 +2137,13 @@ if (mainModel && mainProvider) {
         var tempResultContent = '';
         var parsedCards = [];
         var currentCardIndex = 0;
+        var isGenerating = false;
         var promptMode = isCompressResult ? 'compress' : 'main';
         var resultMode = isCompressResult ? 'compress' : 'main';
         var editingSlotId = null;
 
-        var html = '<div class="crack-ext-ai-modal">';
-        html += '<div class="crack-ext-ai-modal-header"><h3>✨ AI 요약 / 장기 기억 추가' + (isCompressResult ? ' <span class="crack-ext-badge crack-ext-badge-compress">2차 압축 결과</span>' : '') + '</h3><div class="crack-ext-ai-modal-header-actions"><button class="crack-ext-ai-close-btn" id="ce-ai-x-close" type="button" aria-label="창 닫기" title="창 닫기">×</button></div></div>';
+        var html = '<div class="crack-ext-ai-modal crack-ext-main-modal">';
+        html += '<div class="crack-ext-ai-modal-header"><h3><span class="crack-ext-head-glyph" aria-hidden="true">' + UI_ICONS.memory + '</span><span class="crack-ext-head-title">AI 요약 / 장기 기억 추가' + (isCompressResult ? ' <span class="crack-ext-badge crack-ext-badge-compress">2차 압축 결과</span>' : '') + '</span></h3><div class="crack-ext-ai-modal-header-actions"><button class="crack-ext-ai-close-btn" id="ce-ai-x-close" type="button" aria-label="창 닫기" title="창 닫기">' + UI_ICONS.close + '</button></div></div>';
 
         html += '<div class="crack-flex-ai-row" id="ce-ai-top-settings">';
         html += '<div class="fg" style="flex:1.2;"><label>API</label><select id="ce-ai-provider">' +
@@ -1781,7 +2153,7 @@ if (mainModel && mainProvider) {
             '<option value="firebase"' + (savedProvider === 'firebase' ? ' selected' : '') + '>Firebase</option>' +
             '</select></div>';
         html += '<div class="fg" id="ce-ai-key-wrap" style="flex:2;' + (savedProvider === 'firebase' ? 'display:none' : '') + '"><label>API Key</label><input type="password" id="ce-ai-key" value="' + escapeHtml(currentKey) + '"></div>';
-        html += '<div class="fg" id="ce-ai-firebase-wrap" style="flex:2;' + (savedProvider === 'firebase' ? '' : 'display:none') + '"><label>Firebase Script</label><input type="text" id="ce-ai-firebase-script" value="' + escapeHtml(savedFirebaseScript) + '"></div>';
+        html += '<div class="fg" id="ce-ai-firebase-wrap" style="flex:2;' + (savedProvider === 'firebase' ? '' : 'display:none') + '"><label>Firebase Script</label><input type="text" id="ce-ai-firebase-script" value=""></div>';
         html += '<div class="fg" style="flex:1.5;"><label>모델</label><select id="ce-ai-model"></select></div>';
         html += '<div class="fg" style="flex:.8;"><label>턴 수</label><input type="number" id="ce-ai-turns" value="' + escapeHtml(savedTurns) + '" min="0"></div>';
         html += '</div>';
@@ -1819,8 +2191,8 @@ if (mainModel && mainProvider) {
         html += '</div></div>';
 
         html += '<div class="crack-ext-ai-modal-btns" id="ce-ai-main-footer">';
-        html += '<div id="ce-ai-main-actions" style="display:flex;gap:8px;flex-wrap:wrap;"><button class="crack-ext-ai-mbtn" id="ce-ai-generate">요약 생성</button><button class="crack-ext-ai-mbtn" id="ce-ai-compress-btn" style="background:#fef3c7!important;color:#92400e!important;border-color:#fcd34d!important;">📦 2차 압축</button><button class="crack-ext-ai-mbtn" id="ce-ai-memory-edit-btn">📝 장기기억 편집</button></div>';
-        html += '<div class="crack-ext-ai-footer-right"><button class="crack-ext-ai-mbtn" id="ce-ai-prompt-back" style="display:none;">돌아가기</button><button class="crack-ext-ai-mbtn crack-ext-ai-mbtn-p" id="ce-ai-save">추가하기</button></div>';
+        html += '<div id="ce-ai-main-actions" style="display:flex;gap:8px;flex-wrap:wrap;"><button class="crack-ext-ai-mbtn" id="ce-ai-generate">' + UI_ICONS.sparkle + '<span>요약 생성</span></button><button class="crack-ext-ai-mbtn" id="ce-ai-compress-btn">' + UI_ICONS.flask + '<span>2차 압축</span></button><button class="crack-ext-ai-mbtn" id="ce-ai-memory-edit-btn">' + UI_ICONS.edit + '<span>장기기억 편집</span></button></div>';
+        html += '<div class="crack-ext-ai-footer-right"><button class="crack-ext-ai-mbtn" id="ce-ai-prompt-back" style="display:none;">돌아가기</button><button class="crack-ext-ai-mbtn crack-ext-ai-mbtn-p" id="ce-ai-save">' + UI_ICONS.plus + '<span>추가하기</span></button></div>';
         html += '</div></div>';
 
         overlay.innerHTML = html;
@@ -1864,6 +2236,9 @@ if (mainModel && mainProvider) {
         var topSettings = overlay.querySelector('#ce-ai-top-settings');
         var secondarySettings = overlay.querySelector('#ce-ai-secondary-settings');
 
+        // 저장된 Firebase 코드는 HTML 속성에 끼워 넣지 않고 DOM 값으로 복원한다.
+        // 설정 안의 큰따옴표가 value 속성을 중간에서 닫아 내용을 잘라먹는 문제를 방지한다.
+        inputFirebase.value = savedFirebaseScript;
         updateModelOptions(savedProvider);
         if (prefillText && LAST_AI_USAGE) { reasoningUsageEl.textContent = formatReasoningUsage(LAST_AI_USAGE); reasoningUsageEl.title = getUsageTooltip(LAST_AI_USAGE); }
 
@@ -1918,8 +2293,8 @@ if (mainModel && mainProvider) {
             promptHeader.classList.toggle('is-editing', enabled);
             btnTogglePrompt.style.display = enabled ? 'none' : 'inline-block';
             btnPromptBack.style.display = enabled ? 'inline-block' : 'none';
-            topSettings.style.display = enabled ? 'none' : 'flex';
-            secondarySettings.style.display = enabled ? 'none' : 'flex';
+            topSettings.style.display = enabled ? 'none' : '';
+            secondarySettings.style.display = enabled ? 'none' : '';
             mainActions.style.display = enabled ? 'none' : 'flex';
             mainFooter.classList.toggle('is-prompt-editing', enabled);
             btnSave.style.display = enabled ? 'none' : 'block';
@@ -2134,13 +2509,19 @@ if (mainModel && mainProvider) {
         txtResult.addEventListener('mouseup', updateSelectionCount);
 
         function updatePreviewCards() {
-            if (isPromptMode) {
+            if (isPromptMode || isGenerating) {
                 previewCards.innerHTML = '';
                 cardNav.style.display = 'none';
                 return;
             }
             var content = txtResult.value.trim();
             if (!content) {
+                previewCards.innerHTML = '';
+                cardNav.style.display = 'none';
+                parsedCards = [];
+                return;
+            }
+            if (content === '요약 중...' || content.startsWith('오류:')) {
                 previewCards.innerHTML = '';
                 cardNav.style.display = 'none';
                 parsedCards = [];
@@ -2169,7 +2550,10 @@ if (mainModel && mainProvider) {
                 '<div style="text-align:right;margin-top:6px;"><span class="crack-ext-char-count ' + sClass + '">(' + mem.summary.length + '/' + GENERATED_SUMMARY_MAX + '자)</span></div></div></div>';
         }
 
-        txtResult.addEventListener('input', updatePreviewCards);
+        txtResult.addEventListener('input', function() {
+            updatePreviewCards();
+            if (!isPromptMode && !isGenerating) saveAiResultDraft(txtResult.value, resultMode);
+        });
         btnCardPrev.onclick = function(e) { e.preventDefault(); if (currentCardIndex > 0) { currentCardIndex--; updatePreviewCards(); } };
         btnCardNext.onclick = function(e) { e.preventDefault(); if (currentCardIndex < parsedCards.length - 1) { currentCardIndex++; updatePreviewCards(); } };
 
@@ -2231,6 +2615,7 @@ if (mainModel && mainProvider) {
 
         async function closeMainModal() {
             if (hasUnsavedPromptText() && !(await showUiConfirm('저장하지 않은 프롬프트 수정이 있습니다. 창을 닫을까요?', '저장하지 않은 변경사항', { confirmText:'닫기', danger:true }))) return;
+            if (!isGenerating) saveAiResultDraft(isPromptMode ? tempResultContent : txtResult.value, resultMode);
             overlay.remove();
         }
         btnXClose.onclick = function(e) { e.stopPropagation(); closeMainModal(); };
@@ -2271,6 +2656,8 @@ if (mainModel && mainProvider) {
             saveApiKey(provider, apiKey);
             if (provider === 'firebase') localStorage.setItem('crack_ext_firebase_script', firebaseScript);
 
+            saveAiResultDraft(txtResult.value, resultMode);
+            isGenerating = true;
             btnGen.disabled = true;
             btnSave.disabled = true;
             txtResult.value = '요약 중...';
@@ -2288,14 +2675,16 @@ if (mainModel && mainProvider) {
                 updateReasoningUsage(LAST_AI_USAGE, false);
                 var finalizedResult = await finalizeGeneratedMemoryResult(provider, config, finalResult, false);
                 txtResult.value = finalizedResult.text;
+                saveAiResultDraft(txtResult.value, resultMode);
             } catch (err) {
                 txtResult.value = '오류: ' + err.message;
                 reasoningUsageEl.textContent = '';
                 reasoningUsageEl.classList.remove('is-working');
             } finally {
+                isGenerating = false;
                 btnGen.disabled = false;
                 btnSave.disabled = false;
-                btnGen.textContent = '재생성 (리롤)';
+                btnGen.innerHTML = UI_ICONS.sparkle + '<span>재생성 (리롤)</span>';
                 updatePreviewCards();
             }
         };
@@ -2321,19 +2710,20 @@ if (mainModel && mainProvider) {
             var successCount = 0;
             var addFailures = [];
             for (var j = 0; j < parsedCards.length; j++) {
-                btnSave.textContent = '추가 중... (' + (j + 1) + '/' + parsedCards.length + ')';
+                btnSave.innerHTML = UI_ICONS.plus + '<span>추가 중... (' + (j + 1) + '/' + parsedCards.length + ')</span>';
                 var res = await apiCall('POST', '/summaries', { type:'shortTerm', title:parsedCards[j].title, summary:parsedCards[j].summary });
                 if (res) successCount++;
                 else addFailures.push('[' + parsedCards[j].title + '] 추가 실패');
             }
             if (addFailures.length) await showUiAlert(addFailures.join('\n'), '일부 요약 추가 실패', { tone:'danger' });
             if (successCount > 0) {
+                clearAiResultDraft();
                 showToast(successCount + '개의 요약이 장기 기억에 추가되었습니다.');
                 overlay.remove();
                 var dialogEl = document.querySelector('[role="dialog"]');
                 if (dialogEl) refreshCurrentTab(dialogEl);
             } else {
-                btnSave.textContent = '추가하기';
+                btnSave.innerHTML = UI_ICONS.plus + '<span>추가하기</span>';
                 btnSave.disabled = false;
                 btnXClose.disabled = false;
             }
@@ -2341,6 +2731,7 @@ if (mainModel && mainProvider) {
 
         if (prefillText) {
             txtResult.value = prefillText;
+            saveAiResultDraft(prefillText, resultMode);
             updatePreviewCards();
         }
     }
