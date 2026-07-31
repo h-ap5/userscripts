@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.1
 // @description  최신 메시지를 자동 감지·번역·수정 삽입. 듀얼 프롬프트 스와핑, DeepSeek V4 지원 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -24,6 +24,7 @@
   const FIREBASE_LOCATION = 'global';
 
   const MODEL_PRICING = {
+    'gemini-3.6-flash': { input: 1.50, output: 7.50, cacheRead: 0.15, cacheWrite: 1.50 },
     'gemini-3.1-pro-preview': { input: 2.00, output: 12.00, cacheRead: 0.20, cacheWrite: 2.00 },
     'gemini-3.1-flash-lite-preview': { input: 0.25, output: 1.50, cacheRead: 0.025, cacheWrite: 0.25 },
     'gemini-3-flash-preview': { input: 0.50, output: 3.00, cacheRead: 0.05, cacheWrite: 0.50 },
@@ -920,6 +921,7 @@
     <div class="t-field">
       <label class="trans-label" for="trans-model-select">모델 선택</label>
       <select id="trans-model-select" class="t-select-arrow">
+        <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
         <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
         <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite Preview</option>
         <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
@@ -1005,6 +1007,7 @@
   <div class="t-modal-title">🅰️ 번역 결과 <span class="t-modal-title-badge">초월 번역</span></div>
   <div class="t-reroll-group">
     <select id="trans-modal-model" class="t-select-arrow">
+      <option value="gemini-3.6-flash">3.6 Flash</option>
       <option value="gemini-3.1-pro-preview">3.1 Pro</option>
       <option value="gemini-3.1-flash-lite-preview">3.1 Flash Lite</option>
       <option value="gemini-3-flash-preview">3 Flash</option>
