@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 요약 추가
 // @namespace    https://crack.wrtn.ai/
-// @version      2.2.2
+// @version      2.2.3
 // @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
 // @author       User
 // @match        https://crack.wrtn.ai/*
@@ -413,7 +413,7 @@ async function fetchRecentMessages(limit) {
     }
 
     var LAST_AI_USAGE = null;
-    var MODEL_PRICING_UPDATED_AT = '2026-07-12';
+    var MODEL_PRICING_UPDATED_AT = '2026-07-21';
     var USD_KRW_FALLBACK = 1400;
     var USD_KRW_CACHE_KEY = 'crack_ext_usd_krw_rate_v1';
     var USD_KRW_CACHE_TTL = 12 * 60 * 60 * 1000;
@@ -421,6 +421,7 @@ async function fetchRecentMessages(limit) {
     // 유료 API 표준 처리 기준, USD / 1M tokens. 실제 청구액은 무료 티어·캐시·지역·세금에 따라 달라질 수 있음.
     var MODEL_PRICING_USD_PER_M = {
         google: {
+            'gemini-3.6-flash': { input:1.50, cachedInput:0.15, output:7.50 },
             'gemini-3.5-flash': { input:1.50, cachedInput:0.15, output:9.00 },
             'gemini-3.1-pro-preview': { input:2.00, cachedInput:0.20, output:12.00, longInput:4.00, longCachedInput:0.40, longOutput:18.00, threshold:200000 },
             'gemini-3.1-flash-lite': { input:0.25, cachedInput:0.025, output:1.50 },
@@ -580,6 +581,13 @@ async function fetchRecentMessages(limit) {
         }
         if (value === 'off' || value === 'none' || value === 'max' || value === 'xhigh') return null;
         return { thinkingLevel:value };
+    }
+
+    function getGeminiGenerationConfig(model) {
+        var m = String(model || '').toLowerCase();
+        // Gemini 3.6 Flash부터 샘플링 파라미터는 폐기되었으며 향후 오류가 될 수 있다.
+        if (m === 'gemini-3.6-flash' || m === 'gemini-3.5-flash-lite') return {};
+        return { temperature:0.2, topK:40, topP:0.8 };
     }
 
     function getCachedUsdKrwRate() {
@@ -770,7 +778,7 @@ async function fetchRecentMessages(limit) {
 
         if (provider === 'google') {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`;
-            const generationConfig = { temperature:0.2, topK:40, topP:0.8 };
+            const generationConfig = getGeminiGenerationConfig(config.model);
             const thinkingConfig = getGeminiThinkingConfig(config.model, reasoningValue);
             if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig;
             const payload = {
@@ -891,7 +899,7 @@ async function fetchRecentMessages(limit) {
                 { category:HarmCategory.HARM_CATEGORY_HARASSMENT, threshold:HarmBlockThreshold.OFF },
                 { category:HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold:HarmBlockThreshold.OFF }
             ];
-            const generationConfig = { temperature:0.2, topK:40, topP:0.8 };
+            const generationConfig = getGeminiGenerationConfig(config.model);
             const rawThinkingConfig = getGeminiThinkingConfig(config.model, reasoningValue);
             if (rawThinkingConfig) {
                 if (rawThinkingConfig.thinkingLevel) {
@@ -1647,6 +1655,7 @@ body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-th
         var models = [];
         if (provider === 'google') {
             models = [
+                {v:'gemini-3.6-flash', t:'3.6 Flash'},
                 {v:'gemini-3.5-flash', t:'3.5 Flash'},
                 {v:'gemini-3.1-pro-preview', t:'3.1 Pro'},
                 {v:'gemini-3.1-flash-lite', t:'3.1 Flash-Lite'},
@@ -1663,6 +1672,7 @@ body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-th
             ];
         } else if (provider === 'firebase') {
             models = [
+                {v:'gemini-3.6-flash', t:'3.6 Flash'},
                 {v:'gemini-3.1-pro-preview', t:'3.1 Pro'},
                 {v:'gemini-3.5-flash', t:'3.5 Flash'},
                 {v:'gemini-3.1-flash-lite', t:'3.1 Flash-Lite'},
