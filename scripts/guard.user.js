@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛑 Crack 일일 크래커 가드
 // @namespace    crack-daily-cracker-guard
-// @version      1.2.4
+// @version      1.2.5
 // @description  오늘 사용한 크래커를 내역 API로 합산하고, 설정한 일일 목표의 허용 구간 안에서 메시지 전송과 재생성을 막습니다.
 // @match        https://crack.wrtn.ai/*
 // @match        http://crack.wrtn.ai/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'Crack 일일 크래커 가드';
-    const VERSION = '1.2.4';
+    const VERSION = '1.2.5';
     const API_HISTORY = 'https://crack-api.wrtn.ai/crack-cash/crackers/history';
     const CONFIG_KEY = 'cdc_guard_config_v1';
     // 첨부된 대시보드가 실제로 사용 중인 API 페이지 크기에 맞춘다.
@@ -1486,32 +1486,50 @@
             document.body.appendChild(ui.host);
         }
 
-        const hasRadiosondeRow = Boolean(
-            nextHost.querySelector('#igx-live-popup')
-            || document.getElementById('igx-live-popup'),
-        );
+        const radiosondeElement = nextHost.querySelector('#igx-live-popup')
+            || document.getElementById('igx-live-popup');
+        const hasRadiosondeRow = isVisibleElement(radiosondeElement);
         const hasSgbLayout = Boolean(
             nextHost.matches('[data-sgb-input-host], [data-sgb-input-box]')
             || nextHost.querySelector('[data-sgb-input-box]'),
         );
-        // 라디오존데가 있으면 기존처럼 추가 공간 확보. 순정 UI는 레이아웃을 밀지 않고 오버레이로 표시.
+        // SGB 환경에서는 기존처럼 라디오존데용 공간을 확보한다.
+        // 순정 환경에서는 실제 라디오존데의 화면 위치를 읽어 가드와 직접 충돌하지 않게 배치한다.
         syncGuardReservedSpace(nextHost, hasRadiosondeRow && hasSgbLayout);
         syncInlineThemeFromComposer(nextHost);
 
         const rect = nextHost.getBoundingClientRect();
         const viewportHeight = window.visualViewport?.height || window.innerHeight;
+        const PILL_HEIGHT = 20;
+        const PURE_COMPOSER_GAP = 8;
+        const STACK_GAP = 5;
         let pillBottom;
 
         if (hasSgbLayout) {
-            // 테마 확프/SGB 환경은 기존 위치를 그대로 유지한다.
-            // 라디오존데가 있으면 그 아래 전용 행, 없으면 SGB 입력 호스트 상단에 배치.
+            // ③ 테마 확프만 / ④ 테마 확프 + 라디오존데
+            // 기존에 문제 없던 위치 계산은 그대로 둔다.
             const rowTopOffset = hasRadiosondeRow ? 28 : 6;
-            pillBottom = rect.top + rowTopOffset + 20;
+            pillBottom = rect.top + rowTopOffset + PILL_HEIGHT;
+        } else if (hasRadiosondeRow) {
+            // ② 순정 + 라디오존데
+            // 라디오존데와 가드가 같은 '입력창 위' 좌표를 차지하지 않도록 실제 위치를 기준으로 스택한다.
+            const radioRect = radiosondeElement.getBoundingClientRect();
+
+            // 우선 테마+라디오존데와 같은 순서(라디오존데 → 가드 → 입력창)를 시도한다.
+            const belowRadioBottom = radioRect.bottom + STACK_GAP + PILL_HEIGHT;
+            const composerSafeBottom = rect.top - PURE_COMPOSER_GAP;
+
+            if (belowRadioBottom <= composerSafeBottom) {
+                pillBottom = belowRadioBottom;
+            } else {
+                // 사이 공간이 부족하면 레이아웃을 억지로 밀지 않고 가드를 라디오존데 위로 올린다.
+                // 이렇게 하면 화면 폭/확프 버전에 상관없이 둘이 겹치지 않는다.
+                pillBottom = Math.max(PILL_HEIGHT + 2, radioRect.top - STACK_GAP);
+            }
         } else {
-            // 순정 크랙은 입력창 안쪽에 걸치지 않고, 입력창 바로 위에 떠 있도록 배치한다.
-            // 테마+라디오존데 환경에서 보이던 것처럼 입력창 테두리와 약간의 간격을 둔다.
-            const PURE_COMPOSER_GAP = 8;
-            pillBottom = Math.max(22, rect.top - PURE_COMPOSER_GAP);
+            // ① 완전 순정
+            // 입력창 안쪽에 걸치지 않고 입력창 바로 위에 띄운다.
+            pillBottom = Math.max(PILL_HEIGHT + 2, rect.top - PURE_COMPOSER_GAP);
         }
 
         const anchorX = Math.max(24, Math.min(window.innerWidth - 24, rect.left + rect.width / 2));
