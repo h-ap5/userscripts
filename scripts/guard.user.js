@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛑 Crack 일일 크래커 가드
 // @namespace    crack-daily-cracker-guard
-// @version      1.2.2
+// @version      1.2.4
 // @description  오늘 사용한 크래커를 내역 API로 합산하고, 설정한 일일 목표의 허용 구간 안에서 메시지 전송과 재생성을 막습니다.
 // @match        https://crack.wrtn.ai/*
 // @match        http://crack.wrtn.ai/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'Crack 일일 크래커 가드';
-    const VERSION = '1.2.2';
+    const VERSION = '1.2.4';
     const API_HISTORY = 'https://crack-api.wrtn.ai/crack-cash/crackers/history';
     const CONFIG_KEY = 'cdc_guard_config_v1';
     // 첨부된 대시보드가 실제로 사용 중인 API 페이지 크기에 맞춘다.
@@ -439,62 +439,162 @@
         }
     }
 
+    const CHAT_EDITOR_SELECTORS = [
+        '[data-sgb-input-box] .__chat_input_textarea',
+        '[data-sgb-input-box] [contenteditable="true"]',
+        'textarea[placeholder*="메시지"]',
+        'textarea[placeholder*="채팅"]',
+        '[contenteditable="true"][data-placeholder*="메시지"]',
+        '[contenteditable="true"][aria-label*="메시지"]',
+        '[contenteditable="true"][role="textbox"]',
+    ];
+
+    function isVisibleElement(element) {
+        if (!(element instanceof HTMLElement)) return false;
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0
+            && rect.height > 0
+            && style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && style.opacity !== '0';
+    }
+
+    function getVisibleChatEditors(scope = document) {
+        const root = scope instanceof Element || scope instanceof Document ? scope : document;
+        const found = [];
+        const seen = new Set();
+
+        for (const selector of CHAT_EDITOR_SELECTORS) {
+            for (const element of root.querySelectorAll(selector)) {
+                if (!(element instanceof HTMLElement) || seen.has(element)) continue;
+                if (element.closest('#cdcg-root')) continue;
+                seen.add(element);
+                if (isVisibleElement(element)) found.push(element);
+            }
+        }
+
+        // 순정 크랙의 속성명이 바뀌어도, 화면 하단의 실제 입력창을 마지막 폴백으로 잡는다.
+        if (!found.length) {
+            for (const element of root.querySelectorAll('textarea, [contenteditable="true"]')) {
+                if (!(element instanceof HTMLElement) || seen.has(element)) continue;
+                if (element.closest('#cdcg-root')) continue;
+                const rect = element.getBoundingClientRect();
+                if (!isVisibleElement(element) || rect.width < 180) continue;
+                const viewportHeight = window.visualViewport?.height || window.innerHeight || 1;
+                if (rect.top < viewportHeight * 0.45) continue;
+                seen.add(element);
+                found.push(element);
+            }
+        }
+
+        return found.sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            // 채팅 입력창은 보통 화면 가장 아래에 있으므로 아래쪽 요소를 우선한다.
+            if (Math.abs(ar.bottom - br.bottom) > 2) return ar.bottom - br.bottom;
+            return ar.width - br.width;
+        });
+    }
+
+    function getVisibleChatEditor(scope = document) {
+        const editors = getVisibleChatEditors(scope);
+        return editors[editors.length - 1] || null;
+    }
+
+    function getComposerFromEditor(editor) {
+        if (!(editor instanceof HTMLElement)) return null;
+
+        const sgbComposer = editor.closest('[data-sgb-input-box]');
+        if (sgbComposer instanceof HTMLElement) return sgbComposer;
+
+        const form = editor.closest('form');
+        if (form instanceof HTMLElement) return form;
+
+        const editorRect = editor.getBoundingClientRect();
+        let current = editor.parentElement;
+        let depth = 0;
+        while (current && current !== document.body && depth < 6) {
+            const rect = current.getBoundingClientRect();
+            const hasButton = Boolean(current.querySelector('button'));
+            const widthReasonable = rect.width >= editorRect.width
+                && rect.width <= Math.max(editorRect.width + 320, editorRect.width * 1.8);
+            const heightReasonable = rect.height >= editorRect.height && rect.height < 320;
+            if (hasButton && widthReasonable && heightReasonable) return current;
+            current = current.parentElement;
+            depth += 1;
+        }
+
+        return editor.parentElement instanceof HTMLElement ? editor.parentElement : editor;
+    }
+
     function isChatEditor(target) {
         if (!(target instanceof Element)) return false;
-        return Boolean(target.closest([
-            '[data-sgb-input-box] .__chat_input_textarea',
-            '[data-sgb-input-box] [contenteditable="true"]',
-            'textarea[placeholder*="메시지"]',
-            '[contenteditable="true"][data-placeholder*="메시지"]',
-        ].join(',')));
+        return CHAT_EDITOR_SELECTORS.some((selector) => target.matches(selector) || Boolean(target.closest(selector)))
+            || target === getVisibleChatEditor();
     }
 
     function getVisibleComposer() {
-        const composers = Array.from(document.querySelectorAll('[data-sgb-input-box]'));
-        const visible = composers.filter((element) => {
-            const rect = element.getBoundingClientRect();
-            const style = window.getComputedStyle(element);
-            return rect.width > 0
-                && rect.height > 0
-                && style.display !== 'none'
-                && style.visibility !== 'hidden';
-        });
-        return visible[visible.length - 1] || composers[composers.length - 1] || null;
+        // 테마 확프가 붙여 주는 SGB 구조가 있으면 기존 방식 그대로 최우선 사용.
+        const sgbComposers = Array.from(document.querySelectorAll('[data-sgb-input-box]'))
+            .filter((element) => isVisibleElement(element));
+        if (sgbComposers.length) return sgbComposers[sgbComposers.length - 1];
+
+        // SGB가 없는 순정 크랙에서는 실제 textarea/contenteditable을 기준으로 컨테이너를 추적.
+        const editor = getVisibleChatEditor();
+        return getComposerFromEditor(editor);
     }
 
     function findSendButton(composer = getVisibleComposer()) {
-        if (!composer) return null;
+        if (!(composer instanceof HTMLElement)) return null;
 
         const explicitSelectors = [
             'button[data-cdcg-send-button="1"]',
             'button[data-crack-ui-empty-send-guard]',
             'button[type="submit"]',
             'button[aria-label*="메시지 보내"]',
+            'button[aria-label*="보내기"]',
             'button[aria-label*="전송"]',
             'button[title*="메시지 보내"]',
+            'button[title*="보내기"]',
             'button[title*="전송"]',
         ];
         for (const selector of explicitSelectors) {
-            const match = composer.querySelector(selector);
-            if (match) return match;
+            const matches = Array.from(composer.querySelectorAll(selector)).filter(isVisibleElement);
+            if (matches.length) return matches[matches.length - 1];
         }
 
-        const candidates = Array.from(composer.querySelectorAll('button')).filter((button) => {
+        const buttons = Array.from(composer.querySelectorAll('button')).filter(isVisibleElement);
+        const styledCandidates = buttons.filter((button) => {
             const className = String(button.className || '');
             return button.querySelector('svg')
                 && className.includes('bg-primary')
                 && className.includes('text-primary-foreground');
         });
-        return candidates[candidates.length - 1] || null;
+        if (styledCandidates.length) return styledCandidates[styledCandidates.length - 1];
+
+        // 순정 UI 클래스명이 바뀐 경우: 입력창 오른쪽에 있는 SVG 버튼을 전송 버튼 후보로 사용.
+        const editor = getVisibleChatEditor(composer) || getVisibleChatEditor();
+        if (editor) {
+            const editorRect = editor.getBoundingClientRect();
+            const svgButtons = buttons.filter((button) => {
+                if (!button.querySelector('svg')) return false;
+                const rect = button.getBoundingClientRect();
+                return rect.left >= editorRect.left + (editorRect.width * 0.55)
+                    && rect.bottom >= editorRect.top - 12
+                    && rect.top <= editorRect.bottom + 12;
+            });
+            if (svgButtons.length) return svgButtons[svgButtons.length - 1];
+        }
+
+        return null;
     }
 
     function isSendButtonTarget(target) {
         if (!(target instanceof Element)) return false;
         const button = target.closest('button');
         if (!button) return false;
-        const composer = button.closest('[data-sgb-input-box]');
-        if (!composer) return false;
-        return button === findSendButton(composer);
+        return button === findSendButton();
     }
 
     function isRegenerationTarget(target) {
@@ -545,10 +645,13 @@
     }
 
     function handleSubmit(event) {
-        const composer = event.target instanceof Element
-            ? event.target.closest('form')?.querySelector('[data-sgb-input-box]')
-            : null;
-        if (!composer) return;
+        const form = event.target instanceof Element ? event.target.closest('form') : null;
+        if (!(form instanceof HTMLElement)) return;
+
+        const editor = getVisibleChatEditor(form);
+        const hasSgbComposer = Boolean(form.querySelector('[data-sgb-input-box]'));
+        if (!editor && !hasSgbComposer) return;
+
         if (isBlocked()) blockEvent(event);
         else schedulePostSendRefreshes();
     }
@@ -1292,12 +1395,15 @@
         const composer = getVisibleComposer();
         if (!(composer instanceof HTMLElement)) return null;
 
+        // 테마 확프의 전용 호스트가 있으면 기존 배치를 그대로 유지한다.
         const preferred = composer.closest('[data-sgb-input-host]');
-        if (preferred instanceof HTMLElement) return preferred;
+        if (preferred instanceof HTMLElement && isVisibleElement(preferred)) return preferred;
 
+        // 순정 크랙에서는 form/입력창 래퍼 자체를 기준점으로 사용한다.
         const candidates = [
-            composer.parentElement,
+            composer,
             composer.closest('form'),
+            composer.parentElement,
             composer.parentElement?.parentElement,
         ];
         const viewportWidth = window.innerWidth || 1;
@@ -1310,6 +1416,7 @@
         for (const candidate of candidates) {
             if (!(candidate instanceof HTMLElement)) continue;
             if (candidate === document.body || candidate === document.documentElement) continue;
+            if (!isVisibleElement(candidate)) continue;
             const rect = candidate.getBoundingClientRect();
             if (rect.width < 180 || rect.height < 28) continue;
             if (rect.width > maxReasonableWidth) continue;
@@ -1342,7 +1449,9 @@
 
     function syncInlineThemeFromComposer(host) {
         if (!(host instanceof HTMLElement) || !ui.host) return;
-        const source = host.querySelector('[data-sgb-input-box]') || getVisibleComposer();
+        const source = host.querySelector('[data-sgb-input-box]')
+            || getVisibleChatEditor(host)
+            || getVisibleComposer();
         if (!(source instanceof HTMLElement)) return;
         const style = window.getComputedStyle(source);
         const backgroundColor = style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)'
@@ -1381,13 +1490,30 @@
             nextHost.querySelector('#igx-live-popup')
             || document.getElementById('igx-live-popup'),
         );
-        syncGuardReservedSpace(nextHost, hasRadiosondeRow);
+        const hasSgbLayout = Boolean(
+            nextHost.matches('[data-sgb-input-host], [data-sgb-input-box]')
+            || nextHost.querySelector('[data-sgb-input-box]'),
+        );
+        // 라디오존데가 있으면 기존처럼 추가 공간 확보. 순정 UI는 레이아웃을 밀지 않고 오버레이로 표시.
+        syncGuardReservedSpace(nextHost, hasRadiosondeRow && hasSgbLayout);
         syncInlineThemeFromComposer(nextHost);
 
         const rect = nextHost.getBoundingClientRect();
         const viewportHeight = window.visualViewport?.height || window.innerHeight;
-        const rowTopOffset = hasRadiosondeRow ? 28 : 6;
-        const pillBottom = rect.top + rowTopOffset + 20;
+        let pillBottom;
+
+        if (hasSgbLayout) {
+            // 테마 확프/SGB 환경은 기존 위치를 그대로 유지한다.
+            // 라디오존데가 있으면 그 아래 전용 행, 없으면 SGB 입력 호스트 상단에 배치.
+            const rowTopOffset = hasRadiosondeRow ? 28 : 6;
+            pillBottom = rect.top + rowTopOffset + 20;
+        } else {
+            // 순정 크랙은 입력창 안쪽에 걸치지 않고, 입력창 바로 위에 떠 있도록 배치한다.
+            // 테마+라디오존데 환경에서 보이던 것처럼 입력창 테두리와 약간의 간격을 둔다.
+            const PURE_COMPOSER_GAP = 8;
+            pillBottom = Math.max(22, rect.top - PURE_COMPOSER_GAP);
+        }
+
         const anchorX = Math.max(24, Math.min(window.innerWidth - 24, rect.left + rect.width / 2));
         const anchorBottom = Math.max(8, viewportHeight - pillBottom);
         ui.host.style.setProperty('--cdcg-anchor-x', `${anchorX}px`);
