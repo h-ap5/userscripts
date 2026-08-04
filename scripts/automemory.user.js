@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 요약 추가
 // @namespace    https://crack.wrtn.ai/
-// @version      2.2.3
+// @version      2.2.4
 // @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
 // @author       User
 // @match        https://crack.wrtn.ai/*
@@ -1335,6 +1335,124 @@ transition:border-color .2s,box-shadow .2s,background .2s!important;
 #ce-ai-result{min-height:150px;resize:vertical;line-height:1.7;padding:14px!important}
 #ce-ai-top-settings{display:grid;grid-template-columns:1.2fr 2fr 1.5fr .8fr;gap:12px;margin-bottom:12px}
 #ce-ai-secondary-settings{display:grid;grid-template-columns:1fr 1fr 2fr;gap:12px;margin-bottom:18px}
+/* ── 턴 수 안내 ───────────────────────────── */
+.crack-ext-turn-field{
+position:relative;
+}
+
+.crack-ext-turn-field .crack-ext-turn-label{
+display:flex!important;
+align-items:center!important;
+justify-content:flex-start!important;
+gap:5px!important;
+width:max-content;
+}
+
+.crack-ext-turn-info-btn{
+display:inline-flex!important;
+align-items:center!important;
+justify-content:center!important;
+flex:0 0 auto!important;
+width:17px!important;
+height:17px!important;
+min-width:17px!important;
+padding:0!important;
+margin:0!important;
+border:0!important;
+border-radius:50%!important;
+background:transparent!important;
+color:var(--ce-ink-faint)!important;
+cursor:pointer;
+box-shadow:none!important;
+transition:color .18s,background .18s,transform .18s!important;
+}
+
+.crack-ext-turn-info-btn .crack-ext-ui-icon{
+width:13px!important;
+height:13px!important;
+}
+
+.crack-ext-turn-info-btn:hover,
+.crack-ext-turn-info-btn[aria-expanded="true"]{
+color:var(--ce-amber)!important;
+background:var(--ce-amber-glow)!important;
+}
+
+.crack-ext-turn-info-btn:active{
+transform:scale(.92);
+}
+
+.crack-ext-turn-info-popover{
+position:absolute;
+z-index:50;
+top:calc(100% + 7px);
+right:0;
+width:max-content;
+max-width:290px;
+padding:10px 12px;
+border:1px solid var(--ce-line);
+border-radius:9px;
+background:var(--ce-panel);
+color:var(--ce-ink-dim);
+box-shadow:0 8px 24px color-mix(in srgb,var(--ce-ink) 16%,transparent);
+font-size:11px;
+font-weight:500;
+line-height:1.55;
+letter-spacing:0;
+}
+
+.crack-ext-turn-info-popover[hidden]{
+display:none!important;
+}
+
+.crack-ext-turn-info-popover::before{
+content:"";
+position:absolute;
+top:-5px;
+right:12px;
+width:8px;
+height:8px;
+background:var(--ce-panel);
+border-left:1px solid var(--ce-line);
+border-top:1px solid var(--ce-line);
+transform:rotate(45deg);
+}
+
+.crack-ext-turn-info-popover strong{
+display:block;
+color:var(--ce-ink);
+font-size:11px;
+font-weight:700;
+white-space:nowrap;
+}
+
+.crack-ext-turn-info-popover span{
+display:block;
+margin-top:2px;
+white-space:nowrap;
+}
+
+.crack-ext-turn-info-popover b{
+color:var(--ce-amber);
+font-weight:750;
+}
+
+@media(max-width:520px){
+.crack-ext-turn-info-popover{
+right:auto;
+left:0;
+width:max-content;
+max-width:min(290px,calc(100vw - 50px));
+}
+.crack-ext-turn-info-popover::before{
+right:auto;
+left:39px;
+}
+.crack-ext-turn-info-popover strong,
+.crack-ext-turn-info-popover span{
+white-space:normal;
+}
+}
 #ce-ai-top-settings .fg,#ce-ai-secondary-settings .fg{min-width:0!important}
 .crack-ext-ai-modal-btns{
 display:flex;
@@ -2165,7 +2283,17 @@ if (mainModel && mainProvider) {
         html += '<div class="fg" id="ce-ai-key-wrap" style="flex:2;' + (savedProvider === 'firebase' ? 'display:none' : '') + '"><label>API Key</label><input type="password" id="ce-ai-key" value="' + escapeHtml(currentKey) + '"></div>';
         html += '<div class="fg" id="ce-ai-firebase-wrap" style="flex:2;' + (savedProvider === 'firebase' ? '' : 'display:none') + '"><label>Firebase Script</label><input type="text" id="ce-ai-firebase-script" value=""></div>';
         html += '<div class="fg" style="flex:1.5;"><label>모델</label><select id="ce-ai-model"></select></div>';
-        html += '<div class="fg" style="flex:.8;"><label>턴 수</label><input type="number" id="ce-ai-turns" value="' + escapeHtml(savedTurns) + '" min="0"></div>';
+        html += '<div class="fg crack-ext-turn-field" style="flex:.8;">' +
+    '<label class="crack-ext-turn-label">' +
+        '<span>턴 수</span>' +
+        '<button type="button" class="crack-ext-turn-info-btn" id="ce-ai-turn-info" aria-label="턴 수 계산 안내" aria-expanded="false">' + UI_ICONS.info + '</button>' +
+    '</label>' +
+    '<input type="number" id="ce-ai-turns" value="' + escapeHtml(savedTurns) + '" min="0">' +
+    '<div class="crack-ext-turn-info-popover" id="ce-ai-turn-info-popover" hidden>' +
+        '<strong>사용자 1 + LLM 1 = 총 2턴</strong>' +
+        '<span>일반적인 대화 30턴을 원하면 <b>60턴</b>으로 설정하세요.</span>' +
+    '</div>' +
+'</div>';
         html += '</div>';
 
         html += '<div class="crack-flex-ai-row" id="ce-ai-secondary-settings">';
@@ -2241,10 +2369,34 @@ if (mainModel && mainProvider) {
         var inputKey = overlay.querySelector('#ce-ai-key');
         var inputFirebase = overlay.querySelector('#ce-ai-firebase-script');
         var inputTurns = overlay.querySelector('#ce-ai-turns');
+        var btnTurnInfo = overlay.querySelector('#ce-ai-turn-info');
+        var turnInfoPopover = overlay.querySelector('#ce-ai-turn-info-popover');
         var keyWrap = overlay.querySelector('#ce-ai-key-wrap');
         var firebaseWrap = overlay.querySelector('#ce-ai-firebase-wrap');
         var topSettings = overlay.querySelector('#ce-ai-top-settings');
         var secondarySettings = overlay.querySelector('#ce-ai-secondary-settings');
+        // 턴 수 안내 팝업
+if (btnTurnInfo && turnInfoPopover) {
+    btnTurnInfo.addEventListener('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        var willOpen = turnInfoPopover.hidden;
+        turnInfoPopover.hidden = !willOpen;
+        btnTurnInfo.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    });
+
+    turnInfoPopover.addEventListener('click', function(e) {
+        e.stopPropagation();
+    });
+
+    overlay.addEventListener('click', function() {
+        if (!turnInfoPopover.hidden) {
+            turnInfoPopover.hidden = true;
+            btnTurnInfo.setAttribute('aria-expanded', 'false');
+        }
+    });
+}
 
         // 저장된 Firebase 코드는 HTML 속성에 끼워 넣지 않고 DOM 값으로 복원한다.
         // 설정 안의 큰따옴표가 value 속성을 중간에서 닫아 내용을 잘라먹는 문제를 방지한다.
