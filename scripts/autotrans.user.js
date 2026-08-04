@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.1
+// @version      4.1.1
 // @description  최신 메시지를 자동 감지·번역·수정 삽입. 듀얼 프롬프트 스와핑, DeepSeek V4 지원 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -22,6 +22,8 @@
   const FENCE_CLOSE_SUB = '===BLOCK_CLOSE===';
   const FIREBASE_APP_NAME = 'crack-translator-ai';
   const FIREBASE_LOCATION = 'global';
+  const TRANSLATOR_ICON_SVG = `<svg width="15.5" height="15.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="trans-logo-icon" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"></rect><path d="M8 16.5 12 7.5l4 9"></path><path d="M9.6 13.4h4.8"></path></svg>`;
+  const TRANSLATOR_SIDEBAR_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="var(--icon_secondary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" color="icon_secondary" class="trans-sidebar-logo-icon" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"></rect><path d="M8 16.5 12 7.5l4 9"></path><path d="M9.6 13.4h4.8"></path></svg>`;
 
   const MODEL_PRICING = {
     'gemini-3.6-flash': { input: 1.50, output: 7.50, cacheRead: 0.15, cacheWrite: 1.50 },
@@ -71,6 +73,11 @@
   let thinkingLevels = GM_getValue('thinkingLevels', {});
   let thinkingBudgets = GM_getValue('thinkingBudgets', {});
   let replacementSlots = sanitizeReplacementSlots(GM_getValue('replacementSlots', []));
+  let oocRuntime = {
+    enabled: GM_getValue('oocApply', false),
+    text: GM_getValue('oocText', ''),
+    turns: Math.max(1, parseInt(GM_getValue('oocTurns', 10), 10) || 10),
+  };
   let nudgeTimer = null;
   let cleanupTimer = null;
 
@@ -78,8 +85,8 @@
   function injectNetworkInterceptor() {
     const _origWsSend = window.WebSocket.prototype.send;
     window.WebSocket.prototype.send = function (data) {
-      const oocEnabled = GM_getValue('oocApply', false);
-      const oocText = GM_getValue('oocText', '');
+      const oocEnabled = oocRuntime.enabled;
+      const oocText = oocRuntime.text;
       if (oocEnabled && oocText && typeof data === "string" && data.includes('"send"')) {
         try {
           const bi = data.indexOf("[");
@@ -101,8 +108,8 @@
 
     const _origFetch = window.fetch;
     window.fetch = async function (...args) {
-      const oocEnabled = GM_getValue('oocApply', false);
-      const oocText = GM_getValue('oocText', '');
+      const oocEnabled = oocRuntime.enabled;
+      const oocText = oocRuntime.text;
       if (oocEnabled && oocText && args[0] && typeof args[0] === 'string' && (args[0].includes('/messages') || args[0].includes('/chat'))) {
         try {
           let opts = args[1] || {};
@@ -138,7 +145,7 @@
     cleanupTimer = setTimeout(async () => {
       const chatId = parsePath();
       if (chatId) {
-        const oocTurns = parseInt(GM_getValue('oocTurns', 10), 10);
+        const oocTurns = oocRuntime.turns;
         try {
           const res = await fetch(`${API_BASE}/v3/chats/${chatId}/messages?limit=50`, {
             headers: buildHeaders(),
@@ -273,6 +280,55 @@
   --t-tx2: #aaa7b8;
   --t-tx3: #777486;
   --t-shadow: 0 24px 60px rgba(0, 0, 0, .72), 0 4px 12px rgba(0, 0, 0, .5);
+}
+
+.trans-logo-icon {
+  display: inline-block;
+  width: 15.5px;
+  height: 15.5px;
+  flex: 0 0 auto;
+  vertical-align: -2px;
+  color: currentColor;
+}
+
+.trans-bubble-btn .trans-logo-icon {
+  width: 15px;
+  height: 15px;
+  opacity: .62;
+  transition: opacity .15s, transform .15s;
+}
+
+.trans-bubble-btn:hover .trans-logo-icon {
+  opacity: .95;
+  transform: scale(1.04);
+}
+
+#trans-menu-btn .trans-sidebar-logo-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  opacity: 1;
+  fill: none !important;
+  stroke: var(--icon_secondary) !important;
+}
+
+/* 크랙 기본 메뉴의 [&_svg]:fill-icon_tertiary가
+   선형 번역 로고 내부를 채우지 못하게 강제한다. */
+#trans-menu-btn .trans-sidebar-logo-icon rect,
+#trans-menu-btn .trans-sidebar-logo-icon path {
+  fill: none !important;
+  stroke: var(--icon_secondary) !important;
+}
+
+#trans-menu-btn > [role="button"] {
+  color: var(--text_primary);
+}
+
+#trans-direct-apply-btn .trans-logo-icon,
+.t-modal-title .trans-logo-icon,
+.t-check-title .trans-logo-icon {
+  margin-right: 5px;
 }
 
 #trans-setting-panel {
@@ -864,6 +920,23 @@
   color: var(--t-danger);
 }
 
+@media (min-width: 768px) {
+  #trans-setting-panel {
+    width: clamp(620px, 62vw, 860px);
+    max-width: calc(100vw - 64px);
+    max-height: 82vh;
+  }
+
+  #trans-result-modal {
+    width: clamp(760px, 82vw, 1200px);
+    max-width: calc(100vw - 64px);
+  }
+
+  #trans-result-content {
+    height: min(50vh, 600px);
+  }
+}
+
 @media (max-width: 560px) {
   .t-modal-header,
   .t-modal-footer {
@@ -947,7 +1020,7 @@
     <label class="t-check-row" for="trans-instant-apply">
       <input id="trans-instant-apply" type="checkbox">
       <span>
-        <span class="t-check-title">말풍선 🅰️ 클릭 시 즉시 교체</span>
+        <span class="t-check-title">${TRANSLATOR_ICON_SVG}말풍선 클릭 시 즉시 교체</span>
         <span class="t-check-desc">체크하면 결과 팝업 없이 최신 메시지를 바로 패치하고 예상 금액을 nudge로 보여줍니다.</span>
       </span>
     </label>
@@ -991,7 +1064,7 @@
     <button class="t-btn t-btn-primary" id="trans-save-btn" type="button">저장</button>
   </div>
 
-  <button id="trans-direct-apply-btn" type="button" style="display: none;">🅰️ 최신 답변 바로 번역 (팝업 없이)</button>
+  <button id="trans-direct-apply-btn" type="button" style="display: none;">${TRANSLATOR_ICON_SVG}최신 답변 바로 번역 (팝업 없이)</button>
   <div id="trans-status-box"></div>
 </div>`;
     document.body.appendChild(panel);
@@ -1004,7 +1077,7 @@
     resultModal.id = 'trans-result-modal';
     resultModal.innerHTML = `
 <div class="t-modal-header">
-  <div class="t-modal-title">🅰️ 번역 결과 <span class="t-modal-title-badge">초월 번역</span></div>
+  <div class="t-modal-title">${TRANSLATOR_ICON_SVG}번역 결과 <span class="t-modal-title-badge">초월 번역</span></div>
   <div class="t-reroll-group">
     <select id="trans-modal-model" class="t-select-arrow">
       <option value="gemini-3.6-flash">3.6 Flash</option>
@@ -1095,9 +1168,9 @@
     instantApplyInput.checked = GM_getValue('instantApply', false);
     modalModelSelect.value = modelSelect.value;
     
-    oocApplyInput.checked = GM_getValue('oocApply', false);
-    oocTextInput.value = GM_getValue('oocText', 'Please reply in English OOC.');
-    oocTurnsInput.value = GM_getValue('oocTurns', 10);
+    oocApplyInput.checked = oocRuntime.enabled;
+    oocTextInput.value = oocRuntime.text || 'Please reply in English OOC.';
+    oocTurnsInput.value = oocRuntime.turns;
 
     let savedMode = GM_getValue('transMode', 'ko');
     modeSelect.value = savedMode;
@@ -1197,9 +1270,14 @@
       GM_setValue('thinkingBudgets', thinkingBudgets);
       GM_setValue('replacementSlots', replacementSlots);
       
-      GM_setValue('oocApply', oocApplyInput.checked);
-      GM_setValue('oocText', oocTextInput.value.trim());
-      GM_setValue('oocTurns', parseInt(oocTurnsInput.value, 10) || 10);
+      oocRuntime = {
+        enabled: oocApplyInput.checked,
+        text: oocTextInput.value.trim(),
+        turns: Math.max(1, parseInt(oocTurnsInput.value, 10) || 10),
+      };
+      GM_setValue('oocApply', oocRuntime.enabled);
+      GM_setValue('oocText', oocRuntime.text);
+      GM_setValue('oocTurns', oocRuntime.turns);
     };
 
     apiProviderSelect.addEventListener('change', toggleProviderUI);
@@ -1829,6 +1907,8 @@
   }
 
   function injectSidebar() {
+    // 이미 주입된 뒤에는 전체 DOM 텍스트를 다시 훑지 않는다.
+    if (document.getElementById('trans-menu-btn')) return;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
     let node;
     while ((node = walker.nextNode())) {
@@ -1839,8 +1919,13 @@
         const btn = document.createElement('div');
         btn.id = 'trans-menu-btn';
         btn.className = 'px-2.5 h-4 box-content py-[18px]';
-        btn.style.cursor = 'pointer';
-        btn.innerHTML = '<span class="flex space-x-2 items-center"><span style="font-size:16px;">🅰️</span><span style="font-size:14px;">초월 번역 설정</span></span>';
+        btn.innerHTML = `
+          <div role="button" tabindex="0" class="w-full flex h-4 items-center justify-between typo-text-base_leading-none_medium space-x-2 [&_svg]:fill-icon_tertiary ring-offset-4 ring-offset-sidebar cursor-pointer">
+            <span class="flex space-x-2 items-center min-w-0">
+              ${TRANSLATOR_SIDEBAR_ICON_SVG}
+              <span class="whitespace-nowrap overflow-hidden text-ellipsis typo-text-sm_leading-none_medium">초월 번역 설정</span>
+            </span>
+          </div>`;
         btn.onclick = () => {
           document.getElementById('trans-setting-panel').style.display = 'block';
           syncTranslatorTheme();
@@ -1920,9 +2005,8 @@
       const btn = document.createElement('button');
       btn.className = 'trans-bubble-btn relative inline-flex items-center justify-center overflow-hidden rounded-full transition-colors size-7 bg-transparent hover:bg-accent';
       btn.type = 'button';
-      btn.innerHTML = '🅰️';
+      btn.innerHTML = TRANSLATOR_ICON_SVG;
       btn.style.marginRight = '4px';
-      btn.style.fontSize = '14px';
       btn.title = '초월 번역';
       btn.onclick = (e) => {
         e.stopPropagation();
@@ -1966,8 +2050,12 @@
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
-  function syncTranslatorTheme() {
+  let lastTranslatorTheme = '';
+
+  function syncTranslatorTheme(force = false) {
     const theme = detectSiteTheme();
+    if (!force && theme === lastTranslatorTheme) return;
+    lastTranslatorTheme = theme;
     const targets = [
       document.getElementById('trans-setting-panel'),
       document.getElementById('trans-result-modal'),
@@ -1984,13 +2072,35 @@
   addStyles();
   createUI();
 
-  const observer = new MutationObserver(() => {
-    injectSidebar();
-    injectBubbleButtons();
-    syncTranslatorTheme();
+  let uiRefreshTimer = null;
+  function scheduleUiRefresh() {
+    // 스트리밍/React 렌더 중 MutationObserver가 연속 호출돼도 한 번으로 합친다.
+    if (uiRefreshTimer) return;
+    uiRefreshTimer = setTimeout(() => {
+      uiRefreshTimer = null;
+      injectSidebar();
+      injectBubbleButtons();
+    }, 90);
+  }
+
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.type === 'childList' && mutation.addedNodes.length) {
+        scheduleUiRefresh();
+        break;
+      }
+    }
   });
 
-  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-theme'] });
+  // 일반 DOM 변화에서는 클래스 변화를 감시하지 않는다.
+  // 테마 변경 가능성이 있는 html/body만 별도 감시해 불필요한 전체 콜백을 줄인다.
+  const themeObserver = new MutationObserver(() => syncTranslatorTheme());
+
+  observer.observe(document.body, { childList: true, subtree: true });
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
+  themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme'] });
+
   injectSidebar();
   injectBubbleButtons();
+  syncTranslatorTheme(true);
 })();
