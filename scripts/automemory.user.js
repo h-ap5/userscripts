@@ -2002,7 +2002,14 @@ body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-th
             updateSummaryBar(visible);
         }
 
-        searchEl.addEventListener('input', render);
+        // 검색 입력 중에는 카드 전체 재렌더링을 잠깐 묶어서 불필요한 DOM 작업을 줄인다.
+        var editorSearchRenderTimer = 0;
+        searchEl.addEventListener('input', function() {
+            clearTimeout(editorSearchRenderTimer);
+            editorSearchRenderTimer = setTimeout(function() {
+                if (overlay.isConnected) render();
+            }, 120);
+        });
         changedOnlyEl.addEventListener('change', render);
         selectAllEl.addEventListener('change', function() {
             var visible = getVisibleItems();
@@ -2469,9 +2476,15 @@ if (btnTurnInfo && turnInfoPopover) {
         function saveVisibleCredentials(providerOverride) {
             var provider = providerOverride || activeCredentialProvider || selProvider.value;
             if (provider === 'firebase') {
-                localStorage.setItem('crack_ext_firebase_script', inputFirebase.value || '');
+                var firebaseValue = inputFirebase.value || '';
+                if ((localStorage.getItem('crack_ext_firebase_script') || '') !== firebaseValue) {
+                    localStorage.setItem('crack_ext_firebase_script', firebaseValue);
+                }
             } else {
-                saveApiKey(provider, inputKey.value || '');
+                var apiKeyValue = inputKey.value || '';
+                if (getSavedApiKey(provider) !== apiKeyValue) {
+                    saveApiKey(provider, apiKeyValue);
+                }
             }
         }
         function bindAutoSave(input, handler) {
@@ -2479,7 +2492,12 @@ if (btnTurnInfo && turnInfoPopover) {
             input.addEventListener('paste', function() { setTimeout(handler, 0); setTimeout(handler, 120); });
         }
         bindAutoSave(inputKey, function() { saveVisibleCredentials(activeCredentialProvider); });
-        bindAutoSave(inputFirebase, function() { localStorage.setItem('crack_ext_firebase_script', inputFirebase.value || ''); });
+        bindAutoSave(inputFirebase, function() {
+            var firebaseValue = inputFirebase.value || '';
+            if ((localStorage.getItem('crack_ext_firebase_script') || '') !== firebaseValue) {
+                localStorage.setItem('crack_ext_firebase_script', firebaseValue);
+            }
+        });
 
         selProvider.onchange = function() {
             saveVisibleCredentials(activeCredentialProvider);
@@ -2712,12 +2730,28 @@ if (btnTurnInfo && turnInfoPopover) {
                 '<div style="text-align:right;margin-top:6px;"><span class="crack-ext-char-count ' + sClass + '">(' + mem.summary.length + '/' + GENERATED_SUMMARY_MAX + '자)</span></div></div></div>';
         }
 
-        txtResult.addEventListener('input', function() {
+        // 결과를 직접 편집할 때 매 키 입력마다 전체 슬롯을 재파싱하지 않도록 짧게 debounce한다.
+        var previewUpdateTimer = 0;
+        function schedulePreviewUpdate() {
+            clearTimeout(previewUpdateTimer);
+            previewUpdateTimer = setTimeout(function() {
+                previewUpdateTimer = 0;
+                if (overlay.isConnected) updatePreviewCards();
+            }, 100);
+        }
+        function flushPreviewUpdate() {
+            if (previewUpdateTimer) {
+                clearTimeout(previewUpdateTimer);
+                previewUpdateTimer = 0;
+            }
             updatePreviewCards();
+        }
+        txtResult.addEventListener('input', function() {
+            schedulePreviewUpdate();
             if (!isPromptMode && !isGenerating) saveAiResultDraft(txtResult.value, resultMode);
         });
-        btnCardPrev.onclick = function(e) { e.preventDefault(); if (currentCardIndex > 0) { currentCardIndex--; updatePreviewCards(); } };
-        btnCardNext.onclick = function(e) { e.preventDefault(); if (currentCardIndex < parsedCards.length - 1) { currentCardIndex++; updatePreviewCards(); } };
+        btnCardPrev.onclick = function(e) { e.preventDefault(); if (currentCardIndex > 0) { currentCardIndex--; flushPreviewUpdate(); } };
+        btnCardNext.onclick = function(e) { e.preventDefault(); if (currentCardIndex < parsedCards.length - 1) { currentCardIndex++; flushPreviewUpdate(); } };
 
         overlay.querySelectorAll('.crack-ext-export-btn').forEach(function(btn) {
             btn.onclick = async function(e) {
@@ -2853,6 +2887,7 @@ if (btnTurnInfo && turnInfoPopover) {
 
         btnSave.onclick = async function(e) {
             e.stopPropagation();
+            flushPreviewUpdate();
             if (!parsedCards.length) { await showUiAlert('추가할 요약이 없습니다.', '추가할 내용 없음', { tone:'warning' }); return; }
             var errorIndex = -1;
             for (var i = 0; i < parsedCards.length; i++) {
@@ -2942,18 +2977,30 @@ if (btnTurnInfo && turnInfoPopover) {
     function start() {
         refreshUsdKrwRate(false);
         var injectScheduled = false;
-        function scheduleInject() {
+
+        function needsInjection() {
+            return !document.getElementById('crack-ext-ai-css') || !document.querySelector('.crack-ext-header-ai-btn');
+        }
+
+        function scheduleInject(force) {
+            if (!force && !needsInjection()) return;
             if (injectScheduled) return;
             injectScheduled = true;
             requestAnimationFrame(function() {
                 injectScheduled = false;
-                inject();
+                if (force || needsInjection()) inject();
             });
         }
-        var obs = new MutationObserver(scheduleInject);
+
+        // SPA에서 헤더가 교체되어 요약 버튼이 사라진 경우에만 다시 주입한다.
+        var obs = new MutationObserver(function() {
+            if (needsInjection()) scheduleInject();
+        });
         obs.observe(document.body, { childList: true, subtree: true });
-        scheduleInject();
-        setInterval(scheduleInject, 2500);
+
+        scheduleInject(true);
+        // Observer가 놓치는 예외 상황을 위한 저빈도 안전망.
+        setInterval(function() { scheduleInject(); }, 10000);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
