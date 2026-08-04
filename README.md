@@ -1,10 +1,31 @@
+<a id="top"></a>
+
 # 크랙 확장 프로그램 모음
+
 나와 제미나이, 코덱스, 클로드가 함께한 편의성 확장 프로그램들
-***
-## 요약 메모리 자동 생성기<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/automemory.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/automemory.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/automemory.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
+
+---
+
+## 목차
+
+- [요약 메모리 자동 생성기](#automemory)
+- [초월 번역기](#autotrans)
+- [(구) 미디어 이미지 추가 편의성](#media)
+- [일일 크래커 가드](#guard)
+
+---
+
+<a id="automemory"></a>
+
+## 요약 메모리 자동 생성기
+
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/automemory.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/automemory.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/automemory.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
 
 **기능 및 사용 방법**
-> 크랙 내부에서 장기기억용 요약 메모리 생성 및 자동 추가
+
+> 크랙 내부에서 장기기억용 요약 메모리를 생성하고 자동으로 추가합니다.
 
 ### 기본 사용법
 
@@ -12,10 +33,12 @@
 2. 사용할 **API·모델·턴 수·요약 스타일·추론 단계**를 선택합니다.
 
 > [!NOTE]
-> 턴 수는 채팅 버블 개수 기준입니다.
-> 사용자 메시지 1개 = 1턴, LLM 응답 1개 = 1턴으로 계산됩니다.
-> 사용자 1 + LLM 1 = 총 2턴
-> 따라서 일반적인 대화 30턴을 원한다면 60턴으로 설정해 주세요.
+> 턴 수는 채팅 버블 개수를 기준으로 계산합니다.  
+> 사용자 메시지 1개 = 1턴  
+> LLM 응답 1개 = 1턴  
+> 사용자 1 + LLM 1 = 총 2턴  
+>
+> 따라서 일반적인 대화 30턴을 불러오려면 확장프로그램에서는 60턴으로 설정해 주세요.
 
 3. API Key 또는 Firebase Script를 입력합니다. 입력값은 브라우저에 자동 저장됩니다.
 4. **요약 생성**을 누른 뒤 결과를 확인하거나 직접 수정합니다.
@@ -57,37 +80,72 @@
 
 - 제목은 **20자**, 내용은 **300자**를 넘으면 바로 저장할 수 없습니다.
 - API Key와 설정은 현재 브라우저의 로컬 저장소에 보관됩니다.
-- 요약 생성 시 선택한 API 제공자에게 불러온 채팅 내용이 전송됩니다. 민감한 대화는 사용 전 확인해주세요.
-- 모바일과 다크 테마를 지원합니다.
+- 요약 생성 시 선택한 API 제공자에게 불러온 채팅 내용이 전송됩니다. 민감한 대화는 사용 전 확인해 주세요.
+- 모바일 환경과 다크 테마를 지원합니다.
 
-## 초월 번역기<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/autotrans.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/autotrans.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
+<p align="right"><a href="#top">⬆ 목차로 돌아가기</a></p>
+
+---
+
+<a id="autotrans"></a>
+
+## 초월 번역기
+
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/autotrans.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/autotrans.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/autotrans.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
 
 **기능 및 사용 방법**
-> 메시지를 자동 감지·번역·수정 삽입
+
+> 메시지를 자동으로 감지해 번역하고, 기존 메시지를 번역본으로 교체합니다.
 
 <img width="247" height="238" alt="image" src="https://github.com/user-attachments/assets/b2bdeb83-c379-4802-a96f-c78dc851d229" />
 
-- **채팅창 내 사이드바**에 설정창이 있습니다.
+- 크랙 채팅방의 **오른쪽 사이드바**에서 초월 번역 설정을 열 수 있습니다.
+- 번역할 AI 메시지 아래의 번역 아이콘을 누르면 번역 결과를 확인하고 교체할 수 있습니다.
 
-**유의할 점**
-- 딥시크 모델 사용시, 로그 정보가 중국에 노출될 수 있습니다.
+### 즉시 교체
 
 <img width="311" height="95" alt="image" src="https://github.com/user-attachments/assets/89a998a6-3c92-41aa-88a2-42f0c7e59b95" />
 
-- 해당 옵션을 킬 시 채팅에서 '🅰️' 아이콘을 누를시, 팝업이 뜨지 않고 즉시 번역->교체 합니다.
+- 해당 옵션을 켜면 채팅의 번역 아이콘을 눌렀을 때 결과 팝업을 띄우지 않고 즉시 번역·교체합니다.
 
+### 유의할 점
 
+- DeepSeek 모델 사용 시 대화 로그가 DeepSeek API로 전송될 수 있습니다.
+- 민감한 대화는 사용하려는 API 제공자의 개인정보 처리 방침을 확인한 뒤 이용해 주세요.
 
+<p align="right"><a href="#top">⬆ 목차로 돌아가기</a></p>
 
-## (구)미디어 이미지 추가 편의성 <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/media.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
+---
+
+<a id="media"></a>
+
+## (구) 미디어 이미지 추가 편의성
+
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/media.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/media.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
 
 **기능 및 사용 방법**
-> 구 제작 미디어 환경에서 이미지를 간단 삽입·불필요한 힌트창 ON/OFF
 
-## 일일 크래커 가드<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/guard.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/guard.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a> <a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/guard.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
+> 구 제작 미디어 환경에서 이미지를 간편하게 삽입하고, 불필요한 힌트창을 켜거나 끌 수 있습니다.
+
+<p align="right"><a href="#top">⬆ 목차로 돌아가기</a></p>
+
+---
+
+<a id="guard"></a>
+
+## 일일 크래커 가드
+
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/guard.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/guard.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/guard.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
 
 **기능 및 사용 방법**
-> 오늘 사용한 크래커를 자동으로 합산하고, 설정한 일일 목표의 허용 범위에서 메시지 전송과 재생성을 차단
+
+> 오늘 사용한 크래커를 자동 합산하고, 설정한 일일 목표의 허용 범위에 도달하면 메시지 전송과 재생성을 차단합니다.
 
 ### 기본 사용법
 
@@ -97,7 +155,7 @@
 4. 필요하면 **재생성도 차단**을 활성화합니다.
 5. **설정 저장**을 누르면 현재 사용량을 기준으로 자동 감시합니다.
 
-> 예시: 일일 목표가 `1,000개`, 허용 오차가 `±200개`라면 정지 구간은 `800~1,200개`입니다. 최근 1회 소모량을 참고하여 목표에 더 가까운 지점에서 멈춥니다.
+> **예시:** 일일 목표가 `1,000개`, 허용 오차가 `±200개`라면 정지 구간은 `800~1,200개`입니다. 최근 1회 소모량을 참고하여 목표에 더 가까운 지점에서 멈춥니다.
 
 ### 주요 기능
 
@@ -116,4 +174,6 @@
 - 설정은 현재 브라우저의 로컬 저장소에 보관됩니다.
 - 다른 브라우저나 기기에서 사용한 크래커도 다음 사용 내역 갱신 때 합산됩니다.
 - 사용 내역을 아직 확인하지 못했거나 정보가 오래된 경우에는 안전을 위해 전송을 잠시 차단합니다.
-- 다른 확장 프로그램이 리롤을 별도의 길게 누르기 이벤트로 구현한 경우에는 재생성 차단이 적용되지 않을 수 있습니다.
+- 다른 확장프로그램이 리롤을 별도의 길게 누르기 이벤트로 구현한 경우에는 재생성 차단이 적용되지 않을 수 있습니다.
+
+<p align="right"><a href="#top">⬆ 목차로 돌아가기</a></p>
