@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛑 Crack 일일 크래커 가드
 // @namespace    crack-daily-cracker-guard
-// @version      1.2.5
+// @version      1.2.6
 // @description  오늘 사용한 크래커를 내역 API로 합산하고, 설정한 일일 목표의 허용 구간 안에서 메시지 전송과 재생성을 막습니다.
 // @match        https://crack.wrtn.ai/*
 // @match        http://crack.wrtn.ai/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'Crack 일일 크래커 가드';
-    const VERSION = '1.2.5';
+    const VERSION = '1.2.9';
     const API_HISTORY = 'https://crack-api.wrtn.ai/crack-cash/crackers/history';
     const CONFIG_KEY = 'cdc_guard_config_v1';
     // 첨부된 대시보드가 실제로 사용 중인 API 페이지 크기에 맞춘다.
@@ -37,11 +37,14 @@
     let refreshTimer = null;
     let composerObserver = null;
     let themeObserver = null;
+    let uiResizeObserver = null;
     let composerUpdateTimer = null;
     let uiPositionTimer = null;
+    let uiGeometryFrame = null;
     let postSendTimers = [];
     let toastTimer = null;
     let currentUiInlineHost = null;
+    let currentUiMountParent = null;
 
     const state = {
         used: 0,
@@ -439,14 +442,32 @@
         }
     }
 
+    const CHAT_PAGE_PATTERNS = [
+        /^\/stories\/[^/]+\/episodes(?:\/|$)/i,
+        /^\/characters\/[^/]+\/chats(?:\/|$)/i,
+        /^\/stories\/[^/]+\/parties\/(?!new(?:\/|$))[^/]+\/?$/i,
+        /^\/u\/[^/]+\/c\/[^/]+\/?$/i,
+        /^\/arpg\/[^/]+\/(?:play\/[^/]+|[^/]+\/play)\/?$/i,
+        /^\/fliptale\/play\/?$/i,
+    ];
+
+    function isChatPage() {
+        return CHAT_PAGE_PATTERNS.some(
+            (pattern) => pattern.test(window.location.pathname),
+        );
+    }
+
     const CHAT_EDITOR_SELECTORS = [
         '[data-sgb-input-box] .__chat_input_textarea',
+        '[data-sgb-input-box] textarea',
         '[data-sgb-input-box] [contenteditable="true"]',
+        'textarea.__chat_input_textarea',
+        '[contenteditable="true"].__chat_input_textarea',
         'textarea[placeholder*="메시지"]',
         'textarea[placeholder*="채팅"]',
+        'textarea[aria-label*="메시지"]',
         '[contenteditable="true"][data-placeholder*="메시지"]',
         '[contenteditable="true"][aria-label*="메시지"]',
-        '[contenteditable="true"][role="textbox"]',
     ];
 
     function isVisibleElement(element) {
@@ -461,6 +482,8 @@
     }
 
     function getVisibleChatEditors(scope = document) {
+        if (!isChatPage()) return [];
+
         const root = scope instanceof Element || scope instanceof Document ? scope : document;
         const found = [];
         const seen = new Set();
@@ -468,30 +491,17 @@
         for (const selector of CHAT_EDITOR_SELECTORS) {
             for (const element of root.querySelectorAll(selector)) {
                 if (!(element instanceof HTMLElement) || seen.has(element)) continue;
-                if (element.closest('#cdcg-root')) continue;
+                if (element.closest(
+                    '#cdcg-root, [role="dialog"], [aria-modal="true"], [data-sidebar="sidebar"], .bg-sidebar',
+                )) continue;
                 seen.add(element);
                 if (isVisibleElement(element)) found.push(element);
-            }
-        }
-
-        // 순정 크랙의 속성명이 바뀌어도, 화면 하단의 실제 입력창을 마지막 폴백으로 잡는다.
-        if (!found.length) {
-            for (const element of root.querySelectorAll('textarea, [contenteditable="true"]')) {
-                if (!(element instanceof HTMLElement) || seen.has(element)) continue;
-                if (element.closest('#cdcg-root')) continue;
-                const rect = element.getBoundingClientRect();
-                if (!isVisibleElement(element) || rect.width < 180) continue;
-                const viewportHeight = window.visualViewport?.height || window.innerHeight || 1;
-                if (rect.top < viewportHeight * 0.45) continue;
-                seen.add(element);
-                found.push(element);
             }
         }
 
         return found.sort((a, b) => {
             const ar = a.getBoundingClientRect();
             const br = b.getBoundingClientRect();
-            // 채팅 입력창은 보통 화면 가장 아래에 있으므로 아래쪽 요소를 우선한다.
             if (Math.abs(ar.bottom - br.bottom) > 2) return ar.bottom - br.bottom;
             return ar.width - br.width;
         });
@@ -530,19 +540,13 @@
 
     function isChatEditor(target) {
         if (!(target instanceof Element)) return false;
-        return CHAT_EDITOR_SELECTORS.some((selector) => target.matches(selector) || Boolean(target.closest(selector)))
-            || target === getVisibleChatEditor();
+        const activeEditor = getVisibleChatEditor();
+        return Boolean(activeEditor && (target === activeEditor || activeEditor.contains(target)));
     }
 
     function getVisibleComposer() {
-        // 테마 확프가 붙여 주는 SGB 구조가 있으면 기존 방식 그대로 최우선 사용.
-        const sgbComposers = Array.from(document.querySelectorAll('[data-sgb-input-box]'))
-            .filter((element) => isVisibleElement(element));
-        if (sgbComposers.length) return sgbComposers[sgbComposers.length - 1];
-
-        // SGB가 없는 순정 크랙에서는 실제 textarea/contenteditable을 기준으로 컨테이너를 추적.
-        const editor = getVisibleChatEditor();
-        return getComposerFromEditor(editor);
+        if (!isChatPage()) return null;
+        return getComposerFromEditor(getVisibleChatEditor());
     }
 
     function findSendButton(composer = getVisibleComposer()) {
@@ -598,9 +602,16 @@
     }
 
     function isRegenerationTarget(target) {
-        if (!config.blockRegeneration || !(target instanceof Element)) return false;
+        if (
+            !isChatPage()
+            || !getVisibleChatEditor()
+            || !config.blockRegeneration
+            || !(target instanceof Element)
+        ) return false;
         const button = target.closest('button, [role="button"]');
-        if (!button || button.closest('#cdcg-root')) return false;
+        if (!button || button.closest(
+            '#cdcg-root, [role="dialog"], [aria-modal="true"], [data-sidebar="sidebar"], .bg-sidebar',
+        )) return false;
         const label = [
             button.getAttribute('aria-label'),
             button.getAttribute('title'),
@@ -645,12 +656,13 @@
     }
 
     function handleSubmit(event) {
+        if (!isChatPage()) return;
+
         const form = event.target instanceof Element ? event.target.closest('form') : null;
         if (!(form instanceof HTMLElement)) return;
 
-        const editor = getVisibleChatEditor(form);
-        const hasSgbComposer = Boolean(form.querySelector('[data-sgb-input-box]'));
-        if (!editor && !hasSgbComposer) return;
+        const activeEditor = getVisibleChatEditor();
+        if (!activeEditor || !form.contains(activeEditor)) return;
 
         if (isBlocked()) blockEvent(event);
         else schedulePostSendRefreshes();
@@ -720,9 +732,18 @@
             }
 
             #cdcg-root {
-                position: fixed !important;
-                inset: 0 !important;
+                position: absolute !important;
+                top: var(--cdcg-inline-top, 0px) !important;
+                left: var(--cdcg-inline-left, 0px) !important;
+                width: var(--cdcg-inline-width, 100%) !important;
+                height: 20px !important;
+                overflow: visible !important;
+                z-index: 2 !important;
                 pointer-events: none !important;
+            }
+
+            #cdcg-root[hidden] {
+                display: none !important;
             }
 
             button[data-cdcg-send-blocked="1"] {
@@ -736,12 +757,13 @@
     }
 
     function mountUi() {
-        if (ui.host?.isConnected || !document.body) return;
+        if (ui.host || !document.body) return;
         injectOuterStyle();
 
         const host = document.createElement('div');
         host.id = 'cdcg-root';
         host.dataset.theme = getPageTheme();
+        host.hidden = true;
         const shadow = host.attachShadow({ mode: 'open' });
         shadow.innerHTML = `
             <style>
@@ -789,15 +811,14 @@
                 button { -webkit-tap-highlight-color: transparent; }
 
                 .dock {
-                    position: fixed;
-                    bottom: var(--cdcg-anchor-bottom, 16px);
-                    left: var(--cdcg-anchor-x, 50%);
-                    width: var(--cdcg-anchor-width, min(768px, calc(100vw - 32px)));
+                    position: absolute;
+                    inset: auto 0 0 0;
+                    width: 100%;
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     gap: 6px;
-                    transform: translateX(-50%);
+                    transform: none;
                     pointer-events: none;
                 }
 
@@ -813,6 +834,7 @@
                     width: 100%;
                     height: 20px;
                     min-height: 20px;
+                    margin-top: var(--cdcg-panel-lift, 0px);
                     display: flex;
                     align-items: center;
                     gap: 6px;
@@ -901,7 +923,7 @@
 
                 .panel {
                     width: min(292px, calc(100vw - 16px));
-                    max-height: min(440px, 65vh);
+                    max-height: min(440px, 65vh, var(--cdcg-panel-max-height, 440px));
                     align-self: flex-end;
                     margin-right: 4px;
                     overflow: auto;
@@ -1223,7 +1245,7 @@
                 @media (max-width: 520px) {
                     .panel {
                         width: min(280px, calc(100vw - 16px));
-                        max-height: 60vh;
+                        max-height: min(60vh, var(--cdcg-panel-max-height, 440px));
                     }
                     .pill-label { font-size: var(--cdcg-font-xs); }
                 }
@@ -1392,38 +1414,171 @@
     }
 
     function findUiInlineHost() {
-        const composer = getVisibleComposer();
-        if (!(composer instanceof HTMLElement)) return null;
+        const editor = getVisibleChatEditor();
+        if (!(editor instanceof HTMLElement)) return null;
 
-        // 테마 확프의 전용 호스트가 있으면 기존 배치를 그대로 유지한다.
-        const preferred = composer.closest('[data-sgb-input-host]');
-        if (preferred instanceof HTMLElement && isVisibleElement(preferred)) return preferred;
+        // 라디오존데가 이미 찾은 입력 호스트가 있으면 같은 부모를 그대로 공유한다.
+        const radiosonde = document.getElementById('igx-live-popup');
+        const radiosondeHost = radiosonde?.parentElement;
+        if (
+            radiosonde instanceof HTMLElement
+            && radiosonde.matches('[data-igx-stable-inline-host="1"]')
+            && radiosondeHost instanceof HTMLElement
+            && radiosondeHost !== document.body
+            && radiosondeHost !== document.documentElement
+            && radiosondeHost.matches('[data-sgb-input-host], .igx-inline-overlay-host')
+            && radiosondeHost.contains(editor)
+            && isVisibleElement(radiosondeHost)
+        ) return radiosondeHost;
 
-        // 순정 크랙에서는 form/입력창 래퍼 자체를 기준점으로 사용한다.
+        // SGB와 라디오존데가 표시한 검증된 입력 호스트를 최우선으로 사용한다.
+        const markedHost = editor.closest(
+            '[data-sgb-input-host], .igx-inline-overlay-host',
+        );
+        if (markedHost instanceof HTMLElement && isVisibleElement(markedHost)) {
+            return markedHost;
+        }
+
+        // 순정 Crack의 현재 입력 영역 바깥 호스트.
+        const crackHost = editor.closest(
+            'div[class*="bg-bg_screen"][class*="pointer-events-auto"]',
+        );
+        if (crackHost instanceof HTMLElement && isVisibleElement(crackHost)) {
+            return crackHost;
+        }
+
+        // 마지막 폴백도 입력 박스 자체보다 한 단계 바깥 래퍼를 먼저 고른다.
+        const wrapper = editor.closest('div.flex.w-full.flex-col.rounded-lg.border')
+            || editor.closest('div.flex.w-full.flex-col.rounded-lg')
+            || editor.closest('div[class*="rounded"][class*="border"]')
+            || editor.closest('form')
+            || editor.parentElement;
         const candidates = [
-            composer,
-            composer.closest('form'),
-            composer.parentElement,
-            composer.parentElement?.parentElement,
+            wrapper?.parentElement,
+            wrapper,
+            wrapper?.parentElement?.parentElement,
         ];
         const viewportWidth = window.innerWidth || 1;
-        const composerRect = composer.getBoundingClientRect();
+        const editorRect = editor.getBoundingClientRect();
         const maxReasonableWidth = Math.min(
-            viewportWidth * 0.98,
-            Math.max(composerRect.width * 1.55, composerRect.width + 220),
+            viewportWidth * 0.9,
+            Math.max(editorRect.width * 1.55, editorRect.width + 220),
         );
 
         for (const candidate of candidates) {
             if (!(candidate instanceof HTMLElement)) continue;
+            if (!candidate.contains(editor)) continue;
             if (candidate === document.body || candidate === document.documentElement) continue;
+            if (candidate.closest(
+                '[role="dialog"], [aria-modal="true"], [data-sidebar="sidebar"]',
+            )) continue;
             if (!isVisibleElement(candidate)) continue;
             const rect = candidate.getBoundingClientRect();
+            const style = window.getComputedStyle(candidate);
+            const clipsPopup = [style.overflowX, style.overflowY]
+                .some((value) => /^(hidden|clip|auto|scroll)$/.test(value));
             if (rect.width < 180 || rect.height < 28) continue;
-            if (rect.width > maxReasonableWidth) continue;
+            if (rect.width > viewportWidth * 0.99 || rect.width > maxReasonableWidth) continue;
+            const clipPath = style.clipPath || 'none';
+            const maskImage = style.maskImage || style.webkitMaskImage || 'none';
+            if (clipsPopup || String(style.contain || '').includes('paint')) continue;
+            if (clipPath !== 'none' || maskImage !== 'none') continue;
             return candidate;
         }
 
         return null;
+    }
+
+    function findLowestCommonAncestor(first, second) {
+        if (!(first instanceof HTMLElement) || !(second instanceof HTMLElement)) return null;
+        const firstAncestors = new Set();
+        for (let node = first; node; node = node.parentElement) firstAncestors.add(node);
+        for (let node = second; node; node = node.parentElement) {
+            if (firstAncestors.has(node)) return node;
+        }
+        return null;
+    }
+
+    function getDirectChildUnder(ancestor, descendant) {
+        if (!(ancestor instanceof HTMLElement) || !(descendant instanceof HTMLElement)) return null;
+        let node = descendant;
+        while (node.parentElement && node.parentElement !== ancestor) node = node.parentElement;
+        return node.parentElement === ancestor ? node : null;
+    }
+
+    function findUiMountContext(anchorHost) {
+        if (!(anchorHost instanceof HTMLElement)) return null;
+
+        const sidePanels = document.querySelectorAll(
+            'div[class*="border-l"][class*="right-0"][class*="h-full"][class*="overflow-hidden"]',
+        );
+        let bestContext = null;
+        let bestDepth = Number.POSITIVE_INFINITY;
+
+        for (const sidePanel of sidePanels) {
+            if (!(sidePanel instanceof HTMLElement) || anchorHost.contains(sidePanel)) continue;
+            if (sidePanel.closest('[role="dialog"], [aria-modal="true"]')) continue;
+            const common = findLowestCommonAncestor(anchorHost, sidePanel);
+            if (!(common instanceof HTMLElement)) continue;
+            if (common === document.body || common === document.documentElement) continue;
+
+            const style = window.getComputedStyle(common);
+            const rect = common.getBoundingClientRect();
+            if (style.position === 'static' || rect.width < anchorHost.offsetWidth) continue;
+            if (rect.height < Math.min(280, window.innerHeight * 0.5)) continue;
+
+            let depth = 0;
+            for (let node = anchorHost; node && node !== common; node = node.parentElement) depth += 1;
+            if (depth > 10) continue;
+            if (depth >= bestDepth) continue;
+
+            let before = getDirectChildUnder(common, sidePanel);
+            const dimLayer = before?.previousElementSibling;
+            if (
+                dimLayer instanceof HTMLElement
+                && String(dimLayer.className).includes('bg-bg_dimmed')
+            ) before = dimLayer;
+
+            bestContext = { parent: common, before };
+            bestDepth = depth;
+        }
+
+        if (bestContext) return bestContext;
+
+        // 사이드 패널 선택자가 바뀌어도 전체 높이의 positioned 채팅 셸 안에는 남는다.
+        const anchorRect = anchorHost.getBoundingClientRect();
+        const minShellHeight = Math.min(360, window.innerHeight * 0.55);
+        let ancestor = anchorHost.parentElement;
+        for (let depth = 0; ancestor && depth < 10; depth += 1, ancestor = ancestor.parentElement) {
+            if (ancestor === document.body || ancestor === document.documentElement) break;
+            if (ancestor.closest('[role="dialog"], [aria-modal="true"]')) continue;
+            const style = window.getComputedStyle(ancestor);
+            const rect = ancestor.getBoundingClientRect();
+            if (style.position === 'static') continue;
+            if (rect.width + 2 < anchorRect.width || rect.height < minShellHeight) continue;
+            return { parent: ancestor, before: null };
+        }
+
+        // 라디오존데처럼 호스트 자체가 원래 positioned 상태일 때만 최종 폴백으로 쓴다.
+        return window.getComputedStyle(anchorHost).position !== 'static'
+            ? { parent: anchorHost, before: null }
+            : null;
+    }
+
+    function bindUiGeometryObserver(anchorHost, mountParent) {
+        if (typeof ResizeObserver !== 'function') return;
+        if (!uiResizeObserver) {
+            uiResizeObserver = new ResizeObserver(() => {
+                if (uiGeometryFrame !== null) return;
+                uiGeometryFrame = window.requestAnimationFrame(() => {
+                    uiGeometryFrame = null;
+                    attachUiAboveComposer();
+                });
+            });
+        }
+        uiResizeObserver.disconnect();
+        uiResizeObserver.observe(anchorHost);
+        if (mountParent !== anchorHost) uiResizeObserver.observe(mountParent);
     }
 
     function detachUiInlineHost() {
@@ -1431,7 +1586,13 @@
             currentUiInlineHost.removeAttribute('data-cdcg-guard-space');
             currentUiInlineHost.style.removeProperty('--cdcg-base-padding-top');
         }
+        uiResizeObserver?.disconnect();
+        if (uiGeometryFrame !== null) {
+            window.cancelAnimationFrame(uiGeometryFrame);
+            uiGeometryFrame = null;
+        }
         currentUiInlineHost = null;
+        currentUiMountParent = null;
     }
 
     function syncGuardReservedSpace(host, shouldReserve) {
@@ -1447,24 +1608,46 @@
         host.setAttribute('data-cdcg-guard-space', '1');
     }
 
-    function syncInlineThemeFromComposer(host) {
+    function syncInlineThemeFromComposer(host, hasSgbLayout) {
         if (!(host instanceof HTMLElement) || !ui.host) return;
-        const source = host.querySelector('[data-sgb-input-box]')
-            || getVisibleChatEditor(host)
-            || getVisibleComposer();
+        const editor = getVisibleChatEditor(host) || getVisibleChatEditor();
+        const nativeSurface = editor instanceof HTMLElement
+            ? (
+                editor.closest('div.flex.w-full.flex-col.rounded-lg.border')
+                || editor.closest('div[class*="rounded"][class*="border"]')
+                || getComposerFromEditor(editor)
+            )
+            : null;
+        const source = hasSgbLayout
+            ? (host.querySelector('[data-sgb-input-box]') || nativeSurface || editor)
+            : (nativeSurface || getVisibleComposer() || editor);
         if (!(source instanceof HTMLElement)) return;
         const style = window.getComputedStyle(source);
         const backgroundColor = style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)'
             ? style.backgroundColor
             : (getPageTheme() === 'dark' ? 'rgba(24, 24, 27, .76)' : 'rgba(250, 250, 250, .82)');
+        const borderRadius = style.borderRadius || '6px';
         ui.host.style.setProperty('--cdcg-inline-bg-color', backgroundColor);
         ui.host.style.setProperty('--cdcg-inline-bg-image', style.backgroundImage || 'none');
         ui.host.style.setProperty('--cdcg-inline-border', style.borderTopColor || style.borderColor || 'transparent');
-        ui.host.style.setProperty('--cdcg-inline-radius', style.borderRadius || '6px');
+        ui.host.style.setProperty('--cdcg-inline-radius', borderRadius);
         ui.host.style.setProperty(
             '--cdcg-inline-backdrop',
             style.backdropFilter || style.webkitBackdropFilter || 'none',
         );
+    }
+
+    function hideGuardUi() {
+        detachUiInlineHost();
+        state.panelOpen = false;
+        if (ui.panel) ui.panel.hidden = true;
+        if (ui.pill) ui.pill.setAttribute('aria-expanded', 'false');
+        if (ui.host) {
+            ui.host.hidden = true;
+            if (document.body && ui.host.parentNode !== document.body) {
+                document.body.appendChild(ui.host);
+            }
+        }
     }
 
     function attachUiAboveComposer() {
@@ -1472,72 +1655,111 @@
         const nextHost = findUiInlineHost();
 
         if (!nextHost) {
-            detachUiInlineHost();
+            hideGuardUi();
+            return false;
+        }
+
+        const mountContext = findUiMountContext(nextHost);
+        const nextMountParent = mountContext?.parent;
+        if (!(nextMountParent instanceof HTMLElement)) {
+            hideGuardUi();
+            return false;
+        }
+
+        const contextChanged = currentUiInlineHost !== nextHost
+            || currentUiMountParent !== nextMountParent;
+        if (contextChanged) detachUiInlineHost();
+
+        currentUiInlineHost = nextHost;
+        currentUiMountParent = nextMountParent;
+
+        const before = mountContext.before instanceof HTMLElement
+            && mountContext.before.parentElement === nextMountParent
+            ? mountContext.before
+            : null;
+        const hostAlreadyBefore = before
+            ? Boolean(
+                ui.host.parentElement === nextMountParent
+                && (ui.host.compareDocumentPosition(before) & Node.DOCUMENT_POSITION_FOLLOWING),
+            )
+            : ui.host.parentElement === nextMountParent;
+
+        if (!hostAlreadyBefore) {
             state.panelOpen = false;
             if (ui.panel) ui.panel.hidden = true;
             if (ui.pill) ui.pill.setAttribute('aria-expanded', 'false');
             ui.host.hidden = true;
-            return false;
+            if (before) nextMountParent.insertBefore(ui.host, before);
+            else nextMountParent.appendChild(ui.host);
         }
 
-        if (currentUiInlineHost && currentUiInlineHost !== nextHost) detachUiInlineHost();
-        currentUiInlineHost = nextHost;
-        if (document.body && ui.host.parentNode !== document.body) {
-            document.body.appendChild(ui.host);
-        }
+        if (contextChanged) bindUiGeometryObserver(nextHost, nextMountParent);
 
-        const radiosondeElement = nextHost.querySelector('#igx-live-popup')
-            || document.getElementById('igx-live-popup');
+        const radiosonde = document.getElementById('igx-live-popup');
+        const radiosondeElement = radiosonde instanceof HTMLElement
+            && radiosonde.parentElement === nextHost
+            ? radiosonde
+            : null;
         const hasRadiosondeRow = isVisibleElement(radiosondeElement);
         const hasSgbLayout = Boolean(
             nextHost.matches('[data-sgb-input-host], [data-sgb-input-box]')
             || nextHost.querySelector('[data-sgb-input-box]'),
         );
-        // SGB 환경에서는 기존처럼 라디오존데용 공간을 확보한다.
-        // 순정 환경에서는 실제 라디오존데의 화면 위치를 읽어 가드와 직접 충돌하지 않게 배치한다.
-        syncGuardReservedSpace(nextHost, hasRadiosondeRow && hasSgbLayout);
-        syncInlineThemeFromComposer(nextHost);
+        // 테마 유무와 관계없이 라디오존데 아래에 가드 한 줄의 공간을 확보한다.
+        syncGuardReservedSpace(nextHost, hasRadiosondeRow);
+        syncInlineThemeFromComposer(nextHost, hasSgbLayout);
 
-        const rect = nextHost.getBoundingClientRect();
-        const viewportHeight = window.visualViewport?.height || window.innerHeight;
+        const mountRect = nextMountParent.getBoundingClientRect();
+        const pureComposer = getVisibleComposer();
+        const anchorElement = hasSgbLayout
+            ? nextHost
+            : (pureComposer instanceof HTMLElement && nextHost.contains(pureComposer)
+                ? pureComposer
+                : nextHost);
+        const rect = anchorElement.getBoundingClientRect();
         const PILL_HEIGHT = 20;
         const PURE_COMPOSER_GAP = 8;
-        const STACK_GAP = 5;
+        const STACK_GAP = 4;
         let pillBottom;
+        let panelLift = 0;
 
-        if (hasSgbLayout) {
-            // ③ 테마 확프만 / ④ 테마 확프 + 라디오존데
-            // 기존에 문제 없던 위치 계산은 그대로 둔다.
-            const rowTopOffset = hasRadiosondeRow ? 28 : 6;
-            pillBottom = rect.top + rowTopOffset + PILL_HEIGHT;
-        } else if (hasRadiosondeRow) {
-            // ② 순정 + 라디오존데
-            // 라디오존데와 가드가 같은 '입력창 위' 좌표를 차지하지 않도록 실제 위치를 기준으로 스택한다.
+        if (hasRadiosondeRow) {
+            // 테마 확프 유무와 무관하게 라디오존데 → 가드 → 입력창 순서를 고정한다.
             const radioRect = radiosondeElement.getBoundingClientRect();
-
-            // 우선 테마+라디오존데와 같은 순서(라디오존데 → 가드 → 입력창)를 시도한다.
-            const belowRadioBottom = radioRect.bottom + STACK_GAP + PILL_HEIGHT;
-            const composerSafeBottom = rect.top - PURE_COMPOSER_GAP;
-
-            if (belowRadioBottom <= composerSafeBottom) {
-                pillBottom = belowRadioBottom;
-            } else {
-                // 사이 공간이 부족하면 레이아웃을 억지로 밀지 않고 가드를 라디오존데 위로 올린다.
-                // 이렇게 하면 화면 폭/확프 버전에 상관없이 둘이 겹치지 않는다.
-                pillBottom = Math.max(PILL_HEIGHT + 2, radioRect.top - STACK_GAP);
-            }
+            const radioBottomGap = radioRect.bottom + STACK_GAP;
+            pillBottom = radioBottomGap + PILL_HEIGHT;
+            panelLift = Math.max(0, radioRect.height + STACK_GAP);
+        } else if (hasSgbLayout) {
+            // 테마 확프만 사용하는 경우의 기존 입력창 안쪽 위치.
+            pillBottom = rect.top + 6 + PILL_HEIGHT;
         } else {
-            // ① 완전 순정
-            // 입력창 안쪽에 걸치지 않고 입력창 바로 위에 띄운다.
+            // 완전 순정에서는 입력창 바로 위에 띄운다.
             pillBottom = Math.max(PILL_HEIGHT + 2, rect.top - PURE_COMPOSER_GAP);
         }
 
-        const anchorX = Math.max(24, Math.min(window.innerWidth - 24, rect.left + rect.width / 2));
-        const anchorBottom = Math.max(8, viewportHeight - pillBottom);
-        ui.host.style.setProperty('--cdcg-anchor-x', `${anchorX}px`);
-        ui.host.style.setProperty('--cdcg-anchor-bottom', `${anchorBottom}px`);
-        ui.host.style.setProperty('--cdcg-anchor-width', `${rect.width}px`);
+        const pillTop = pillBottom - PILL_HEIGHT;
+        const originLeft = mountRect.left + nextMountParent.clientLeft;
+        const originTop = mountRect.top + nextMountParent.clientTop;
+        const localLeft = rect.left - originLeft + nextMountParent.scrollLeft;
+        const localTop = pillTop - originTop + nextMountParent.scrollTop;
+
+        ui.host.style.setProperty('--cdcg-inline-left', `${localLeft}px`);
+        ui.host.style.setProperty('--cdcg-inline-top', `${localTop}px`);
+        ui.host.style.setProperty('--cdcg-inline-width', `${rect.width}px`);
+        ui.host.style.setProperty('--cdcg-panel-lift', `${panelLift}px`);
+
+        const toastVisible = state.panelOpen
+            && ui.toast?.dataset.visible === 'true';
+        const toastReserve = toastVisible
+            ? Math.ceil(ui.toast.getBoundingClientRect().height) + 6
+            : 0;
+        const visibleTop = Math.max(0, mountRect.top);
+        ui.host.style.setProperty(
+            '--cdcg-panel-max-height',
+            `${Math.max(120, pillTop - visibleTop - 12 - panelLift - toastReserve)}px`,
+        );
         ui.host.hidden = false;
+        if (contextChanged) render();
         return true;
     }
 
@@ -1550,6 +1772,7 @@
             syncFormFromConfig();
             render();
         }
+        window.requestAnimationFrame(attachUiAboveComposer);
     }
 
     function syncFormFromConfig() {
@@ -1599,7 +1822,7 @@
     }
 
     function render() {
-        if (!ui.host?.isConnected) return;
+        if (!ui.host) return;
         const decision = getBudgetDecision();
         const { range } = decision;
         const blockReason = getBlockReason();
@@ -1671,8 +1894,12 @@
         ui.toast.textContent = message;
         ui.toast.dataset.kind = kind;
         ui.toast.dataset.visible = 'true';
+        window.requestAnimationFrame(attachUiAboveComposer);
         toastTimer = window.setTimeout(() => {
-            if (ui.toast) ui.toast.dataset.visible = 'false';
+            if (ui.toast) {
+                ui.toast.dataset.visible = 'false';
+                window.requestAnimationFrame(attachUiAboveComposer);
+            }
         }, kind === 'blocked' ? 5_000 : 3_500);
     }
 
