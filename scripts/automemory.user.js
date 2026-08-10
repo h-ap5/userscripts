@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 요약 추가
 // @namespace    https://crack.wrtn.ai/
-// @version      2.2.5
+// @version      2.2.6
 // @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API(Vertex JSON 포함)·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
 // @author       User
 // @match        https://crack.wrtn.ai/*
@@ -579,9 +579,89 @@ async function fetchRecentMessages(limit) {
         };
     }
 
+    // Firefox userscript sandboxes can expose Web APIs through an Xray-wrapped
+    // page window while JavaScript built-ins live in the userscript realm.
+    // Keep byte encoding local and only bridge plain ArrayBuffers at WebCrypto's
+    // boundary so TypedArray data is never read across realms.
+    function vertexUtf8Bytes(value) {
+        var text = String(value == null ? '' : value);
+        var output = [];
+        for (var i = 0; i < text.length; i++) {
+            var codePoint = text.charCodeAt(i);
+            if (codePoint >= 0xD800 && codePoint <= 0xDBFF) {
+                var next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+                if (next >= 0xDC00 && next <= 0xDFFF) {
+                    codePoint = 0x10000 + ((codePoint - 0xD800) << 10) + (next - 0xDC00);
+                    i++;
+                } else {
+                    codePoint = 0xFFFD;
+                }
+            } else if (codePoint >= 0xDC00 && codePoint <= 0xDFFF) {
+                codePoint = 0xFFFD;
+            }
+
+            if (codePoint < 0x80) {
+                output.push(codePoint);
+            } else if (codePoint < 0x800) {
+                output.push(0xC0 | (codePoint >> 6), 0x80 | (codePoint & 0x3F));
+            } else if (codePoint < 0x10000) {
+                output.push(
+                    0xE0 | (codePoint >> 12),
+                    0x80 | ((codePoint >> 6) & 0x3F),
+                    0x80 | (codePoint & 0x3F)
+                );
+            } else {
+                output.push(
+                    0xF0 | (codePoint >> 18),
+                    0x80 | ((codePoint >> 12) & 0x3F),
+                    0x80 | ((codePoint >> 6) & 0x3F),
+                    0x80 | (codePoint & 0x3F)
+                );
+            }
+        }
+        return new Uint8Array(output);
+    }
+
+    function vertexNeedsRealmBridge() {
+        return typeof globalThis === 'object'
+            && globalThis !== window;
+    }
+
+    function vertexBufferForCrypto(buffer) {
+        if (!vertexNeedsRealmBridge()) return buffer;
+        if (!(buffer instanceof globalThis.ArrayBuffer)) {
+            throw new Error('Firefox 격리 영역에서 Vertex 서명 데이터 형식을 확인하지 못했습니다.');
+        }
+        if (typeof cloneInto !== 'function') {
+            throw new Error('Firefox 격리 영역에서 필요한 cloneInto 기능을 사용할 수 없습니다. Firefox와 유저스크립트 관리자를 업데이트해주세요.');
+        }
+        try {
+            // The clone is handed straight to pristine Xray WebCrypto and is
+            // never published on window, the DOM, or a page callback.
+            return cloneInto(buffer, window);
+        } catch (e) {
+            throw new Error('Firefox 격리 영역에서 Vertex 서명 데이터를 준비하지 못했습니다. Firefox와 유저스크립트 관리자를 업데이트해주세요.');
+        }
+    }
+
+    function vertexBufferFromCrypto(buffer) {
+        if (!vertexNeedsRealmBridge()) return buffer;
+        if (typeof globalThis.structuredClone !== 'function') {
+            throw new Error('이 Firefox 버전에서는 Vertex 서명 결과를 안전하게 복사할 수 없습니다. Firefox를 업데이트해주세요.');
+        }
+        try {
+            var cloned = globalThis.structuredClone(buffer);
+            if (!(cloned instanceof globalThis.ArrayBuffer)) {
+                throw new Error('wrong realm');
+            }
+            return cloned;
+        } catch (e) {
+            throw new Error('Firefox 격리 영역에서 Vertex 서명 결과를 가져오지 못했습니다.');
+        }
+    }
+
     function vertexBase64Url(value) {
-        var bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
-        if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
+        var bytes = typeof value === 'string' ? vertexUtf8Bytes(value) : new Uint8Array(value);
         var binary = '';
         for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
         return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
@@ -615,6 +695,7 @@ async function fetchRecentMessages(limit) {
         if (!window.crypto || !window.crypto.subtle) {
             throw new Error('이 브라우저에서는 Vertex JWT 서명을 지원하지 않습니다.');
         }
+        var subtle = window.crypto.subtle;
 
         var issuedAt = now - 30;
         var jwtHeader = { alg:'RS256', typ:'JWT' };
@@ -628,23 +709,49 @@ async function fetchRecentMessages(limit) {
         };
         var signingInput = vertexBase64Url(JSON.stringify(jwtHeader)) + '.' + vertexBase64Url(JSON.stringify(jwtClaims));
         var cryptoKey;
+        var privateKeyBuffer;
+        var cryptoPrivateKeyBuffer;
         try {
-            cryptoKey = await window.crypto.subtle.importKey(
+            privateKeyBuffer = vertexPemToArrayBuffer(serviceAccount.privateKey);
+            cryptoPrivateKeyBuffer = vertexBufferForCrypto(privateKeyBuffer);
+            if (cryptoPrivateKeyBuffer !== privateKeyBuffer) {
+                try { new Uint8Array(privateKeyBuffer).fill(0); } catch (e) {}
+            }
+            cryptoKey = await subtle.importKey(
                 'pkcs8',
-                vertexPemToArrayBuffer(serviceAccount.privateKey),
+                cryptoPrivateKeyBuffer,
                 { name:'RSASSA-PKCS1-v1_5', hash:'SHA-256' },
                 false,
                 ['sign']
             );
         } catch (e) {
+            if (e && /^Firefox 격리 영역/.test(String(e.message || ''))) throw e;
             throw new Error('Vertex private_key를 불러오지 못했습니다. JSON 키 파일을 확인해주세요.');
+        } finally {
+            if (privateKeyBuffer) {
+                try { new Uint8Array(privateKeyBuffer).fill(0); } catch (e) {}
+            }
+            privateKeyBuffer = null;
+            cryptoPrivateKeyBuffer = null;
         }
-        var signature = await window.crypto.subtle.sign(
-            'RSASSA-PKCS1-v1_5',
-            cryptoKey,
-            new TextEncoder().encode(signingInput)
-        );
-        var assertion = signingInput + '.' + vertexBase64Url(signature);
+        var signingBuffer = vertexUtf8Bytes(signingInput).buffer;
+        var cryptoSigningBuffer = vertexBufferForCrypto(signingBuffer);
+        var signature;
+        try {
+            signature = await subtle.sign(
+                'RSASSA-PKCS1-v1_5',
+                cryptoKey,
+                cryptoSigningBuffer
+            );
+        } finally {
+            try { new Uint8Array(signingBuffer).fill(0); } catch (e) {}
+            signingBuffer = null;
+            cryptoSigningBuffer = null;
+        }
+        var localSignature = vertexBufferFromCrypto(signature);
+        var signaturePart = vertexBase64Url(localSignature);
+        if (!signaturePart) throw new Error('Vertex JWT 서명 결과가 비어 있습니다.');
+        var assertion = signingInput + '.' + signaturePart;
         var formBody = new URLSearchParams({
             grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',
             assertion:assertion
