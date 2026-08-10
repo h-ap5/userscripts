@@ -1,11 +1,18 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 요약 추가
 // @namespace    https://crack.wrtn.ai/
-// @version      2.2.4
-// @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
+// @version      2.2.5
+// @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API(Vertex JSON 포함)·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
 // @author       User
 // @match        https://crack.wrtn.ai/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @connect      oauth2.googleapis.com
+// @connect      googleapis.com
+// @sandbox      DOM
+// @inject-into  content
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -220,8 +227,85 @@ This requirement controls coverage only. It must not change or add any output fo
         if (key) localStorage.setItem(key, value || '');
     }
 
+    // 서비스 계정 JSON에는 장기 개인키가 포함되므로 페이지 localStorage에는 절대 저장하지 않는다.
+    // GM 저장소를 지원하지 않는 환경에서는 현재 스크립트 세션 메모리에만 보관한다.
+    var VERTEX_JSON_STORAGE_KEY = 'crack_ext_vertex_service_account_json_v1';
+    var VERTEX_LOCATION_STORAGE_KEY = 'crack_ext_vertex_location';
+    var VERTEX_PROJECT_STORAGE_KEY = 'crack_ext_vertex_project_id';
+    var VERTEX_SESSION_JSON = null;
+    var VERTEX_SESSION_PERSISTED = false;
+
+    function getSavedVertexJson() {
+        if (VERTEX_SESSION_JSON !== null) return VERTEX_SESSION_JSON;
+        try {
+            if (typeof GM_getValue === 'function') {
+                return String(GM_getValue(VERTEX_JSON_STORAGE_KEY, '') || '');
+            }
+        } catch (e) {}
+        return '';
+    }
+
+    function saveVertexJson(value, persist) {
+        var normalized = String(value || '');
+        VERTEX_SESSION_JSON = normalized;
+        VERTEX_SESSION_PERSISTED = false;
+        if (persist === false) return false;
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(VERTEX_JSON_STORAGE_KEY, normalized);
+                VERTEX_SESSION_PERSISTED = true;
+                return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    function hasPersistentVertexJson() {
+        try {
+            return typeof GM_getValue === 'function' && !!GM_getValue(VERTEX_JSON_STORAGE_KEY, '');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function deleteVertexJson() {
+        VERTEX_SESSION_JSON = '';
+        VERTEX_SESSION_PERSISTED = false;
+        try {
+            if (typeof GM_deleteValue === 'function') {
+                GM_deleteValue(VERTEX_JSON_STORAGE_KEY);
+                return true;
+            }
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(VERTEX_JSON_STORAGE_KEY, '');
+                return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    function releaseVertexSessionSecrets() {
+        VERTEX_SESSION_JSON = null;
+        VERTEX_SESSION_PERSISTED = false;
+        VERTEX_TOKEN_CACHE.clear();
+    }
+
+    function getSavedVertexLocation() {
+        return localStorage.getItem(VERTEX_LOCATION_STORAGE_KEY) || 'global';
+    }
+
+    function getSavedVertexProjectId() {
+        return localStorage.getItem(VERTEX_PROJECT_STORAGE_KEY) || '';
+    }
+
+    function saveVertexEndpointSettings(locationValue, projectIdValue) {
+        localStorage.setItem(VERTEX_LOCATION_STORAGE_KEY, String(locationValue || '').trim() || 'global');
+        localStorage.setItem(VERTEX_PROJECT_STORAGE_KEY, String(projectIdValue || '').trim());
+    }
+
     function getDefaultModel(provider) {
         if (provider === 'google') return 'gemini-3.1-pro-preview';
+        if (provider === 'vertex') return 'gemini-3.1-pro-preview';
         if (provider === 'deepseek') return 'deepseek-v4-flash';
         if (provider === 'firebase') return 'gemini-3.1-pro-preview';
         if (provider === 'openai') return 'gpt-5.6-luna';
@@ -412,6 +496,237 @@ async function fetchRecentMessages(limit) {
         }
     }
 
+    // ============== Vertex AI (서비스 계정 JSON) ==============
+    var VERTEX_OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+    var VERTEX_TOKEN_CACHE = new Map();
+
+    function getPrivilegedRequest() {
+        if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
+        return null;
+    }
+
+    function isAllowedVertexRequestUrl(url) {
+        try {
+            var parsed = new URL(url);
+            if (parsed.protocol !== 'https:') return false;
+            if (parsed.href === VERTEX_OAUTH_TOKEN_URL) return true;
+            return parsed.hostname === 'aiplatform.googleapis.com' ||
+                /^[a-z0-9-]+-aiplatform\.googleapis\.com$/.test(parsed.hostname);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function vertexHttpRequest(url, options) {
+        options = options || {};
+        if (!isAllowedVertexRequestUrl(url)) return Promise.reject(new Error('허용되지 않은 Vertex 요청 주소입니다.'));
+        var privilegedRequest = getPrivilegedRequest();
+        if (!privilegedRequest) return Promise.reject(new Error('GM_xmlhttpRequest를 사용할 수 없어 Vertex 연결을 중단했습니다.'));
+        return new Promise(function(resolve, reject) {
+            privilegedRequest({
+                method:options.method || 'GET',
+                url:url,
+                headers:options.headers || {},
+                data:options.body || null,
+                responseType:'text',
+                timeout:options.timeout || 90000,
+                anonymous:true,
+                nocache:true,
+                redirect:'error',
+                onload:function(result) {
+                    if (!isAllowedVertexRequestUrl(result.finalUrl || url)) {
+                        reject(new Error('Vertex 요청이 허용되지 않은 주소로 이동했습니다.'));
+                        return;
+                    }
+                    resolve({
+                        ok:result.status >= 200 && result.status < 300,
+                        status:result.status,
+                        text:function() { return Promise.resolve(String(result.responseText || '')); },
+                        json:function() { return Promise.resolve(JSON.parse(String(result.responseText || ''))); }
+                    });
+                },
+                onerror:function() { reject(new Error('Vertex 네트워크 오류')); },
+                ontimeout:function() { reject(new Error('Vertex 요청 시간 초과')); },
+                onabort:function() { reject(new Error('Vertex 요청이 취소되었습니다.')); }
+            });
+        });
+    }
+
+    function parseVertexServiceAccount(jsonText) {
+        var parsed;
+        try {
+            parsed = JSON.parse(String(jsonText || '').trim());
+        } catch (e) {
+            throw new Error('Vertex 서비스 계정 JSON을 해석할 수 없습니다.');
+        }
+        if (!parsed || parsed.type !== 'service_account') {
+            throw new Error('Vertex JSON의 type이 service_account가 아닙니다.');
+        }
+        if (!parsed.client_email || !parsed.private_key) {
+            throw new Error('Vertex JSON에 client_email 또는 private_key가 없습니다.');
+        }
+        if (!/-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----/.test(parsed.private_key)) {
+            throw new Error('Vertex JSON의 private_key 형식이 올바르지 않습니다.');
+        }
+        if (parsed.token_uri && parsed.token_uri !== VERTEX_OAUTH_TOKEN_URL) {
+            throw new Error('Vertex JSON의 token_uri가 Google OAuth 주소와 다릅니다.');
+        }
+        return {
+            projectId:String(parsed.project_id || '').trim(),
+            clientEmail:String(parsed.client_email).trim(),
+            privateKey:String(parsed.private_key),
+            privateKeyId:String(parsed.private_key_id || '').trim()
+        };
+    }
+
+    function vertexBase64Url(value) {
+        var bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+        if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
+        var binary = '';
+        for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    }
+
+    function vertexPemToArrayBuffer(pem) {
+        var base64 = String(pem || '')
+            .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+            .replace(/-----END PRIVATE KEY-----/g, '')
+            .replace(/[\r\n\s]/g, '');
+        var binary = atob(base64);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes.buffer;
+    }
+
+    function getVertexTokenCacheKey(serviceAccount) {
+        return serviceAccount.clientEmail + '|' + (serviceAccount.privateKeyId || 'default');
+    }
+
+    function clearVertexAccessToken(serviceAccount) {
+        VERTEX_TOKEN_CACHE.delete(getVertexTokenCacheKey(serviceAccount));
+    }
+
+    async function getVertexAccessToken(serviceAccount, forceRefresh) {
+        var cacheKey = getVertexTokenCacheKey(serviceAccount);
+        var cached = VERTEX_TOKEN_CACHE.get(cacheKey);
+        var now = Math.floor(Date.now() / 1000);
+        if (!forceRefresh && cached && cached.token && cached.expiry > now + 60) return cached.token;
+
+        if (!window.crypto || !window.crypto.subtle) {
+            throw new Error('이 브라우저에서는 Vertex JWT 서명을 지원하지 않습니다.');
+        }
+
+        var issuedAt = now - 30;
+        var jwtHeader = { alg:'RS256', typ:'JWT' };
+        if (serviceAccount.privateKeyId) jwtHeader.kid = serviceAccount.privateKeyId;
+        var jwtClaims = {
+            iss:serviceAccount.clientEmail,
+            scope:'https://www.googleapis.com/auth/cloud-platform',
+            aud:VERTEX_OAUTH_TOKEN_URL,
+            iat:issuedAt,
+            exp:issuedAt + 3600
+        };
+        var signingInput = vertexBase64Url(JSON.stringify(jwtHeader)) + '.' + vertexBase64Url(JSON.stringify(jwtClaims));
+        var cryptoKey;
+        try {
+            cryptoKey = await window.crypto.subtle.importKey(
+                'pkcs8',
+                vertexPemToArrayBuffer(serviceAccount.privateKey),
+                { name:'RSASSA-PKCS1-v1_5', hash:'SHA-256' },
+                false,
+                ['sign']
+            );
+        } catch (e) {
+            throw new Error('Vertex private_key를 불러오지 못했습니다. JSON 키 파일을 확인해주세요.');
+        }
+        var signature = await window.crypto.subtle.sign(
+            'RSASSA-PKCS1-v1_5',
+            cryptoKey,
+            new TextEncoder().encode(signingInput)
+        );
+        var assertion = signingInput + '.' + vertexBase64Url(signature);
+        var formBody = new URLSearchParams({
+            grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            assertion:assertion
+        }).toString();
+        var response = await vertexHttpRequest(VERTEX_OAUTH_TOKEN_URL, {
+            method:'POST',
+            headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+            body:formBody,
+            timeout:30000
+        });
+        if (!response.ok) {
+            var oauthError = await response.text();
+            try {
+                var oauthData = JSON.parse(oauthError);
+                oauthError = oauthData.error_description || oauthData.error || '';
+            } catch (e) {}
+            throw new Error('Vertex OAuth 토큰 교환 실패 (' + response.status + ')' + (oauthError ? ': ' + oauthError.slice(0, 300) : ''));
+        }
+        var tokenData = await response.json();
+        if (!tokenData || !tokenData.access_token) throw new Error('Vertex OAuth 응답에 access_token이 없습니다.');
+        if (tokenData.token_type && String(tokenData.token_type).toLowerCase() !== 'bearer') {
+            throw new Error('Vertex OAuth 응답의 token_type이 Bearer가 아닙니다.');
+        }
+        var expiresIn = Math.min(3600, Math.max(60, Number(tokenData.expires_in) || 3600));
+        VERTEX_TOKEN_CACHE.set(cacheKey, { token:tokenData.access_token, expiry:now + expiresIn });
+        return tokenData.access_token;
+    }
+
+    function resolveVertexEndpoint(locationValue, projectIdValue, modelValue) {
+        var locationId = String(locationValue || 'global').trim().toLowerCase() || 'global';
+        var projectId = String(projectIdValue || '').trim();
+        var modelId = String(modelValue || '').trim();
+        if (!/^[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(locationId)) {
+            throw new Error('Vertex Location 형식이 올바르지 않습니다. 예: global, us-central1');
+        }
+        if (!projectId) throw new Error('Vertex project_id가 없습니다. JSON 또는 Project ID 칸을 확인해주세요.');
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(projectId)) {
+            throw new Error('Vertex Project ID 형식이 올바르지 않습니다.');
+        }
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(modelId)) {
+            throw new Error('Vertex 모델 ID 형식이 올바르지 않습니다.');
+        }
+        if (modelId.toLowerCase().startsWith('gemini-3') || modelId.toLowerCase().includes('gemini-2.0-flash-thinking')) {
+            locationId = 'global';
+        }
+        var host = locationId === 'global' ? 'aiplatform.googleapis.com' : locationId + '-aiplatform.googleapis.com';
+        if (host !== 'aiplatform.googleapis.com' && !/^[a-z0-9-]+-aiplatform\.googleapis\.com$/.test(host)) {
+            throw new Error('허용되지 않은 Vertex 호스트입니다.');
+        }
+        return {
+            location:locationId,
+            url:'https://' + host + '/v1/projects/' + encodeURIComponent(projectId) +
+                '/locations/' + encodeURIComponent(locationId) +
+                '/publishers/google/models/' + encodeURIComponent(modelId) + ':generateContent'
+        };
+    }
+
+    function extractGeminiResponseText(data) {
+        var candidates = data && Array.isArray(data.candidates) ? data.candidates : [];
+        for (var i = 0; i < candidates.length; i++) {
+            var parts = candidates[i] && candidates[i].content && Array.isArray(candidates[i].content.parts)
+                ? candidates[i].content.parts : [];
+            var text = parts.filter(function(part) { return part && !part.thought; })
+                .map(function(part) { return typeof part.text === 'string' ? part.text : ''; }).join('');
+            if (text.trim()) return text;
+        }
+        return '';
+    }
+
+    function setGeminiUsage(provider, model, reasoningValue, usage) {
+        usage = usage || {};
+        setLastAiUsage(provider, model, reasoningValue, {
+            inputTokens:usage.promptTokenCount,
+            visibleOutputTokens:usage.candidatesTokenCount,
+            reasoningTokens:usage.thoughtsTokenCount,
+            outputTokens:(finiteNumber(usage.candidatesTokenCount) || 0) + (finiteNumber(usage.thoughtsTokenCount) || 0),
+            billableOutputTokens:(finiteNumber(usage.candidatesTokenCount) || 0) + (finiteNumber(usage.thoughtsTokenCount) || 0),
+            totalTokens:usage.totalTokenCount,
+            cachedInputTokens:usage.cachedContentTokenCount
+        });
+    }
+
     var LAST_AI_USAGE = null;
     var MODEL_PRICING_UPDATED_AT = '2026-07-21';
     var USD_KRW_FALLBACK = 1400;
@@ -488,7 +803,7 @@ async function fetchRecentMessages(limit) {
                 { v:'xhigh', t:'최대' }
             ]);
         }
-        if (provider === 'google' || provider === 'firebase') {
+        if (provider === 'google' || provider === 'firebase' || provider === 'vertex') {
             var m = String(model || '').toLowerCase();
             if (m.includes('2.5-pro')) {
                 return auto.concat([
@@ -585,8 +900,8 @@ async function fetchRecentMessages(limit) {
 
     function getGeminiGenerationConfig(model) {
         var m = String(model || '').toLowerCase();
-        // Gemini 3.6 Flash부터 샘플링 파라미터는 폐기되었으며 향후 오류가 될 수 있다.
-        if (m === 'gemini-3.6-flash' || m === 'gemini-3.5-flash-lite') return {};
+        // Gemini 3 계열은 모델별 고정/권장 샘플링 설정과 충돌하지 않도록 별도 값을 보내지 않는다.
+        if (m.startsWith('gemini-3')) return {};
         return { temperature:0.2, topK:40, topP:0.8 };
     }
 
@@ -653,7 +968,7 @@ async function fetchRecentMessages(limit) {
     }
 
     function getModelPricing(provider, model, inputTokens) {
-        var catalogProvider = provider === 'firebase' ? 'google' : provider;
+        var catalogProvider = (provider === 'firebase' || provider === 'vertex') ? 'google' : provider;
         var catalog = MODEL_PRICING_USD_PER_M[catalogProvider] || {};
         var price = catalog[String(model || '').toLowerCase()] || null;
         if (!price) return null;
@@ -662,7 +977,7 @@ async function fetchRecentMessages(limit) {
             input:useLong && price.longInput != null ? price.longInput : price.input,
             cachedInput:useLong && price.longCachedInput != null ? price.longCachedInput : price.cachedInput,
             output:useLong && price.longOutput != null ? price.longOutput : price.output,
-            estimated:!!price.estimated,
+            estimated:!!price.estimated || provider === 'vertex',
             longContext:!!useLong
         };
     }
@@ -760,6 +1075,110 @@ async function fetchRecentMessages(limit) {
         el.classList.remove('is-working');
     }
 
+    // DOM 격리 샌드박스에서는 원격 ESM을 직접 import할 수 없으므로 Firebase 호출만
+    // 고정된 page-world 모듈 브리지로 실행한다. Vertex 자격증명은 이 브리지에 전달하지 않는다.
+    function callFirebaseViaPage(request, timeoutMs) {
+        return new Promise(function(resolve, reject) {
+            var randomPart = window.crypto && typeof window.crypto.randomUUID === 'function'
+                ? window.crypto.randomUUID().replace(/-/g, '')
+                : Date.now().toString(36) + Math.random().toString(36).slice(2);
+            var channelId = 'crack-ext-firebase-bridge-' + randomPart;
+            var eventName = 'crack-ext-firebase-result-' + randomPart;
+            var channel = document.createElement('div');
+            var script = document.createElement('script');
+            var settled = false;
+            var timer;
+
+            channel.id = channelId;
+            channel.hidden = true;
+            channel.textContent = JSON.stringify(request);
+            (document.documentElement || document.body).appendChild(channel);
+
+            function cleanup() {
+                if (timer) clearTimeout(timer);
+                channel.removeEventListener(eventName, onResult);
+                if (script.isConnected) script.remove();
+                if (channel.isConnected) channel.remove();
+            }
+
+            function finishWithError(error) {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                reject(error instanceof Error ? error : new Error(String(error || 'Firebase 호출 실패')));
+            }
+
+            function onResult() {
+                if (settled) return;
+                try {
+                    var result = JSON.parse(channel.textContent || '{}');
+                    settled = true;
+                    cleanup();
+                    if (!result.ok) reject(new Error(result.error || 'Firebase AI 호출 실패'));
+                    else resolve({ text:String(result.text || ''), usageMetadata:result.usageMetadata || {} });
+                } catch (e) {
+                    finishWithError(new Error('Firebase 브리지 응답을 해석하지 못했습니다.'));
+                }
+            }
+
+            channel.addEventListener(eventName, onResult);
+            timer = setTimeout(function() {
+                finishWithError(new Error('Firebase AI 요청 시간 초과'));
+            }, timeoutMs || 90000);
+
+            script.type = 'module';
+            var nonceSource = document.querySelector('script[nonce]');
+            if (nonceSource && nonceSource.nonce) script.nonce = nonceSource.nonce;
+            script.onerror = function() {
+                finishWithError(new Error('Firebase SDK 모듈을 불러오지 못했습니다. 페이지 CSP를 확인해주세요.'));
+            };
+            script.textContent = `
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.8.0/firebase-app.js";
+import * as FirebaseAI from "https://www.gstatic.com/firebasejs/12.8.0/firebase-ai.js";
+const { getAI, getGenerativeModel, VertexAIBackend, HarmBlockThreshold, HarmCategory } = FirebaseAI;
+const ThinkingLevel = FirebaseAI.ThinkingLevel || {};
+const channel = document.getElementById(${JSON.stringify(channelId)});
+const eventName = ${JSON.stringify(eventName)};
+const finish = payload => {
+  if (!channel) return;
+  channel.textContent = JSON.stringify(payload);
+  channel.dispatchEvent(new Event(eventName));
+};
+try {
+  const req = JSON.parse(channel.textContent || "{}");
+  const app = initializeApp(req.firebaseConfig, req.appName);
+  const ai = getAI(app, { backend:new VertexAIBackend("global") });
+  const safetySettings = [
+    { category:HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold:HarmBlockThreshold.OFF },
+    { category:HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold:HarmBlockThreshold.OFF },
+    { category:HarmCategory.HARM_CATEGORY_HARASSMENT, threshold:HarmBlockThreshold.OFF },
+    { category:HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold:HarmBlockThreshold.OFF }
+  ];
+  const generationConfig = req.generationConfig || {};
+  if (req.thinkingConfig) {
+    if (req.thinkingConfig.thinkingLevel) {
+      const enumKey = String(req.thinkingConfig.thinkingLevel).toUpperCase();
+      generationConfig.thinkingConfig = { thinkingLevel:ThinkingLevel?.[enumKey] || req.thinkingConfig.thinkingLevel };
+    } else {
+      generationConfig.thinkingConfig = req.thinkingConfig;
+    }
+  }
+  const model = getGenerativeModel(ai, {
+    model:req.model,
+    systemInstruction:req.systemInstruction,
+    safetySettings,
+    generationConfig
+  });
+  const generated = await model.generateContent(req.prompt);
+  const response = await generated.response;
+  finish({ ok:true, text:response.text(), usageMetadata:response.usageMetadata || {} });
+} catch (error) {
+  finish({ ok:false, error:String(error && error.message || error || "Firebase AI 호출 실패").slice(0, 500) });
+}`;
+            (document.head || document.documentElement).appendChild(script);
+        });
+    }
+
     async function callAI(provider, config, chatLog, turns, style, isCompress, options) {
         options = options || {};
         LAST_AI_USAGE = null;
@@ -793,20 +1212,52 @@ async function fetchRecentMessages(limit) {
             });
             if (!response.ok) throw new Error(await readApiError(response, 'Gemini API 에러'));
             const data = await response.json();
-            const parts = data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts
-                ? data.candidates[0].content.parts : [];
-            const text = parts.filter(function(part) { return !part.thought; }).map(function(part) { return part.text || ''; }).join('');
+            const text = extractGeminiResponseText(data);
             if (!text.trim()) throw new Error('Gemini 응답에 텍스트가 없습니다.');
-            const usage = data.usageMetadata || {};
-            setLastAiUsage(provider, config.model, reasoningValue, {
-                inputTokens:usage.promptTokenCount,
-                visibleOutputTokens:usage.candidatesTokenCount,
-                reasoningTokens:usage.thoughtsTokenCount,
-                outputTokens:(finiteNumber(usage.candidatesTokenCount) || 0) + (finiteNumber(usage.thoughtsTokenCount) || 0),
-                billableOutputTokens:(finiteNumber(usage.candidatesTokenCount) || 0) + (finiteNumber(usage.thoughtsTokenCount) || 0),
-                totalTokens:usage.totalTokenCount,
-                cachedInputTokens:usage.cachedContentTokenCount
-            });
+            setGeminiUsage(provider, config.model, reasoningValue, data.usageMetadata);
+            return text;
+        }
+
+        if (provider === 'vertex') {
+            const serviceAccount = parseVertexServiceAccount(config.vertexJson);
+            const projectId = String(config.vertexProjectId || serviceAccount.projectId || '').trim();
+            const endpoint = resolveVertexEndpoint(config.vertexLocation || 'global', projectId, config.model);
+            const generationConfig = getGeminiGenerationConfig(config.model);
+            const thinkingConfig = getGeminiThinkingConfig(config.model, reasoningValue);
+            if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig;
+            const payload = {
+                systemInstruction:{ parts:[{ text:currentPrompt }] },
+                contents:[{ role:'user', parts:[{ text:reinforcedPrompt }] }],
+                generationConfig:generationConfig
+            };
+
+            async function sendVertexRequest(forceRefresh) {
+                const accessToken = await getVertexAccessToken(serviceAccount, forceRefresh);
+                return vertexHttpRequest(endpoint.url, {
+                    method:'POST',
+                    headers:{
+                        'Content-Type':'application/json',
+                        'Authorization':'Bearer ' + accessToken
+                    },
+                    body:JSON.stringify(payload),
+                    timeout:90000
+                });
+            }
+
+            let response = await sendVertexRequest(false);
+            if (response.status === 401) {
+                clearVertexAccessToken(serviceAccount);
+                response = await sendVertexRequest(true);
+            }
+            if (!response.ok) throw new Error(await readApiError(response, 'Vertex AI API 에러'));
+            const data = await response.json();
+            const text = extractGeminiResponseText(data);
+            if (!text.trim()) {
+                const feedback = data && data.promptFeedback && data.promptFeedback.blockReason;
+                const finishReason = data && data.candidates && data.candidates[0] && data.candidates[0].finishReason;
+                throw new Error('Vertex 응답에 텍스트가 없습니다.' + (feedback || finishReason ? ' (' + (feedback || finishReason) + ')' : ''));
+            }
+            setGeminiUsage(provider, config.model, reasoningValue, data.usageMetadata);
             return text;
         }
 
@@ -883,70 +1334,189 @@ async function fetchRecentMessages(limit) {
         if (provider === 'firebase') {
             const firebaseConfig = parseFirebaseConfig(config.firebaseScript);
             if (!firebaseConfig) throw new Error('Firebase 스크립트 형식이 올바르지 않습니다.');
-            const { initializeApp } = await import('https://www.gstatic.com/firebasejs/12.8.0/firebase-app.js');
-            const firebaseAiModule = await import('https://www.gstatic.com/firebasejs/12.8.0/firebase-ai.js');
-            const getAI = firebaseAiModule.getAI;
-            const getGenerativeModel = firebaseAiModule.getGenerativeModel;
-            const VertexAIBackend = firebaseAiModule.VertexAIBackend;
-            const HarmBlockThreshold = firebaseAiModule.HarmBlockThreshold;
-            const HarmCategory = firebaseAiModule.HarmCategory;
-            const ThinkingLevel = firebaseAiModule.ThinkingLevel || {};
-            const app = initializeApp(firebaseConfig, 'crack-ext-' + Date.now());
-            const ai = getAI(app, { backend:new VertexAIBackend('global') });
-            const safetySettings = [
-                { category:HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold:HarmBlockThreshold.OFF },
-                { category:HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold:HarmBlockThreshold.OFF },
-                { category:HarmCategory.HARM_CATEGORY_HARASSMENT, threshold:HarmBlockThreshold.OFF },
-                { category:HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold:HarmBlockThreshold.OFF }
-            ];
             const generationConfig = getGeminiGenerationConfig(config.model);
             const rawThinkingConfig = getGeminiThinkingConfig(config.model, reasoningValue);
-            if (rawThinkingConfig) {
-                if (rawThinkingConfig.thinkingLevel) {
-                    var enumKey = rawThinkingConfig.thinkingLevel.toUpperCase();
-                    generationConfig.thinkingConfig = { thinkingLevel:ThinkingLevel[enumKey] || rawThinkingConfig.thinkingLevel };
-                } else {
-                    generationConfig.thinkingConfig = rawThinkingConfig;
-                }
-            }
-            const modelWithSys = getGenerativeModel(ai, {
+            const bridgeResult = await callFirebaseViaPage({
+                firebaseConfig:firebaseConfig,
+                appName:'crack-ext-' + Date.now() + '-' + Math.random().toString(36).slice(2),
                 model:config.model,
                 systemInstruction:currentPrompt,
-                safetySettings:safetySettings,
-                generationConfig:generationConfig
-            });
-            const result = await modelWithSys.generateContent(reinforcedPrompt);
-            const response = await result.response;
-            const text = response.text();
+                prompt:reinforcedPrompt,
+                generationConfig:generationConfig,
+                thinkingConfig:rawThinkingConfig
+            }, 90000);
+            const text = bridgeResult.text;
             if (!text || !text.trim()) throw new Error('Firebase AI 응답에 텍스트가 없습니다.');
-            const usage = response.usageMetadata || {};
-            setLastAiUsage(provider, config.model, reasoningValue, {
-                inputTokens:usage.promptTokenCount,
-                visibleOutputTokens:usage.candidatesTokenCount,
-                reasoningTokens:usage.thoughtsTokenCount,
-                outputTokens:(finiteNumber(usage.candidatesTokenCount) || 0) + (finiteNumber(usage.thoughtsTokenCount) || 0),
-                billableOutputTokens:(finiteNumber(usage.candidatesTokenCount) || 0) + (finiteNumber(usage.thoughtsTokenCount) || 0),
-                totalTokens:usage.totalTokenCount,
-                cachedInputTokens:usage.cachedContentTokenCount
-            });
+            setGeminiUsage(provider, config.model, reasoningValue, bridgeResult.usageMetadata);
             return text;
         }
         throw new Error('알 수 없는 API 제공자');
     }
 
-    function parseFirebaseConfig(scriptStr) {
-        try {
-            const match = scriptStr.match(/firebaseConfig\s*=\s*(\{[\s\S]*?\});/);
-            if (match && match[1]) return new Function("return " + match[1])();
-            if (scriptStr.includes("apiKey")) {
-                const startIndex = scriptStr.indexOf("firebaseConfig = {");
-                if (startIndex !== -1) {
-                    const endIndex = scriptStr.indexOf("};", startIndex);
-                    if (endIndex !== -1) return new Function("return " + scriptStr.substring(startIndex + 18, endIndex + 1))();
+    function sanitizeFirebaseConfigObject(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+        var allowedKeys = ['apiKey','authDomain','databaseURL','projectId','storageBucket','messagingSenderId','appId','measurementId'];
+        var result = {};
+        allowedKeys.forEach(function(key) {
+            if (typeof value[key] === 'string') result[key] = value[key];
+        });
+        return result.apiKey && result.projectId ? result : null;
+    }
+
+    function extractFirebaseObjectLiteral(source, startAt) {
+        var open = source.indexOf('{', Math.max(0, startAt || 0));
+        if (open < 0) return '';
+        var depth = 0;
+        var quote = '';
+        var escaped = false;
+        for (var i = open; i < source.length; i++) {
+            var ch = source[i];
+            if (quote) {
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === quote) quote = '';
+                continue;
+            }
+            if (ch === '"' || ch === "'" || ch === '`') {
+                quote = ch;
+                continue;
+            }
+            if (ch === '{') depth++;
+            else if (ch === '}' && --depth === 0) return source.slice(open, i + 1);
+        }
+        return '';
+    }
+
+    function decodeFirebaseStaticString(raw, quote) {
+        if (quote === '"') {
+            try { return JSON.parse('"' + raw + '"'); } catch (e) { return null; }
+        }
+        if (quote === '`' && raw.includes('${')) return null;
+        var controls = { b:'\b', f:'\f', n:'\n', r:'\r', t:'\t', v:'\v', '0':'\0' };
+        return raw
+            .replace(/\\u([0-9a-fA-F]{4})/g, function(_, hex) { return String.fromCharCode(parseInt(hex, 16)); })
+            .replace(/\\x([0-9a-fA-F]{2})/g, function(_, hex) { return String.fromCharCode(parseInt(hex, 16)); })
+            .replace(/\\(.)/g, function(_, escaped) { return Object.prototype.hasOwnProperty.call(controls, escaped) ? controls[escaped] : escaped; });
+    }
+
+    function parseFirebaseTopLevelStaticStrings(objectLiteral) {
+        var parsed = {};
+        var source = String(objectLiteral || '');
+        var i = source[0] === '{' ? 1 : 0;
+
+        function skipSpaceAndComments() {
+            while (i < source.length) {
+                if (/\s|,/.test(source[i])) { i++; continue; }
+                if (source[i] === '/' && source[i + 1] === '/') {
+                    i += 2;
+                    while (i < source.length && source[i] !== '\n') i++;
+                    continue;
+                }
+                if (source[i] === '/' && source[i + 1] === '*') {
+                    i += 2;
+                    while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i++;
+                    i = Math.min(source.length, i + 2);
+                    continue;
+                }
+                break;
+            }
+        }
+
+        function readQuoted() {
+            var quote = source[i++];
+            var raw = '';
+            var escaped = false;
+            while (i < source.length) {
+                var ch = source[i++];
+                if (escaped) {
+                    raw += '\\' + ch;
+                    escaped = false;
+                } else if (ch === '\\') {
+                    escaped = true;
+                } else if (ch === quote) {
+                    return { raw:raw, quote:quote };
+                } else {
+                    raw += ch;
                 }
             }
-        } catch(e) {}
-        return null;
+            return null;
+        }
+
+        function skipValue() {
+            var depth = 0;
+            var quote = '';
+            var escaped = false;
+            while (i < source.length) {
+                var ch = source[i];
+                if (quote) {
+                    i++;
+                    if (escaped) escaped = false;
+                    else if (ch === '\\') escaped = true;
+                    else if (ch === quote) quote = '';
+                    continue;
+                }
+                if (ch === '"' || ch === "'" || ch === '`') { quote = ch; i++; continue; }
+                if (ch === '{' || ch === '[' || ch === '(') { depth++; i++; continue; }
+                if (ch === '}' || ch === ']' || ch === ')') {
+                    if (depth === 0) return;
+                    depth--;
+                    i++;
+                    continue;
+                }
+                if (ch === ',' && depth === 0) return;
+                i++;
+            }
+        }
+
+        while (i < source.length) {
+            skipSpaceAndComments();
+            if (source[i] === '}' || i >= source.length) break;
+
+            var key = '';
+            if (source[i] === '"' || source[i] === "'") {
+                var quotedKey = readQuoted();
+                if (!quotedKey) break;
+                key = decodeFirebaseStaticString(quotedKey.raw, quotedKey.quote) || '';
+            } else {
+                var keyMatch = source.slice(i).match(/^[A-Za-z_$][\w$]*/);
+                if (!keyMatch) { skipValue(); if (source[i] === ',') i++; continue; }
+                key = keyMatch[0];
+                i += key.length;
+            }
+
+            skipSpaceAndComments();
+            if (source[i] !== ':') { skipValue(); if (source[i] === ',') i++; continue; }
+            i++;
+            skipSpaceAndComments();
+
+            if (source[i] === '"' || source[i] === "'" || source[i] === '`') {
+                var quotedValue = readQuoted();
+                if (!quotedValue) break;
+                var decoded = decodeFirebaseStaticString(quotedValue.raw, quotedValue.quote);
+                if (decoded !== null) parsed[key] = decoded;
+            } else {
+                skipValue();
+            }
+            skipValue();
+            if (source[i] === ',') i++;
+        }
+        return parsed;
+    }
+
+    function parseFirebaseConfig(scriptStr) {
+        var source = String(scriptStr || '').trim();
+        if (!source) return null;
+        try {
+            if (source[0] === '{') {
+                var direct = sanitizeFirebaseConfigObject(JSON.parse(source));
+                if (direct) return direct;
+            }
+        } catch (e) {}
+
+        var assignmentIndex = source.search(/firebaseConfig\s*=/i);
+        var objectLiteral = extractFirebaseObjectLiteral(source, assignmentIndex >= 0 ? assignmentIndex : 0);
+        if (!objectLiteral) return null;
+        return sanitizeFirebaseConfigObject(parseFirebaseTopLevelStaticStrings(objectLiteral));
     }
 
     // ============== 내보내기 ==============
@@ -1335,6 +1905,15 @@ transition:border-color .2s,box-shadow .2s,background .2s!important;
 #ce-ai-result{min-height:150px;resize:vertical;line-height:1.7;padding:14px!important}
 #ce-ai-top-settings{display:grid;grid-template-columns:1.2fr 2fr 1.5fr .8fr;gap:12px;margin-bottom:12px}
 #ce-ai-secondary-settings{display:grid;grid-template-columns:1fr 1fr 2fr;gap:12px;margin-bottom:18px}
+#ce-ai-vertex-wrap{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(220px,1fr);gap:12px;margin:-2px 0 14px;padding:12px;border:1px solid var(--ce-line-soft);border-radius:11px;background:var(--ce-panel-2)}
+#ce-ai-vertex-json{min-height:104px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace!important;font-size:11px!important;line-height:1.45}
+.crack-ext-vertex-credential-actions{display:flex;align-items:center;gap:7px;margin-top:7px;flex-wrap:wrap}
+.crack-ext-vertex-status{flex:1 1 120px;color:var(--ce-ink-faint);font-size:10.5px;line-height:1.4}
+.crack-ext-vertex-status.is-saved{color:var(--ce-sage)}
+.crack-ext-vertex-status.is-error{color:var(--ce-rose)}
+.crack-ext-vertex-small-btn{padding:5px 9px!important;font-size:10.5px!important}
+.crack-ext-vertex-meta{display:grid;grid-template-columns:1fr;gap:10px;align-content:start}
+.crack-ext-vertex-note{grid-column:1/-1;margin-top:-3px;color:var(--ce-ink-faint);font-size:10.5px;line-height:1.5;word-break:keep-all}
 /* ── 턴 수 안내 ───────────────────────────── */
 .crack-ext-turn-field{
 position:relative;
@@ -1611,7 +2190,29 @@ body[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[
 body[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn:hover{background:rgba(226,168,75,.1)!important;border-color:rgba(226,168,75,.16)!important;color:#EDE5D6!important}
 body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating{background:#1D1A15!important;border-color:#3B342A!important;box-shadow:0 5px 18px rgba(0,0,0,.38)!important}
 @media(max-width:820px){
-#ce-ai-top-settings,#ce-ai-secondary-settings{grid-template-columns:1fr 1fr}
+#ce-ai-top-settings{
+grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(58px,.62fr);
+gap:8px;
+align-items:end;
+margin-bottom:10px;
+}
+#ce-ai-top-settings .ce-ai-provider-field{grid-column:1;grid-row:1}
+#ce-ai-top-settings .ce-ai-model-field{grid-column:2;grid-row:1}
+#ce-ai-top-settings .crack-ext-turn-field{grid-column:3;grid-row:1}
+#ce-ai-key-wrap,#ce-ai-firebase-wrap{grid-column:1/-1;grid-row:2}
+#ce-ai-secondary-settings{
+grid-template-columns:minmax(0,.75fr) minmax(0,.75fr) minmax(134px,1.5fr);
+gap:8px;
+align-items:start;
+margin-bottom:12px;
+}
+#ce-ai-secondary-settings .crack-ext-export-actions{gap:4px;flex-wrap:nowrap}
+#ce-ai-secondary-settings .crack-ext-export-btn{min-width:0;padding:7px 9px}
+#ce-ai-secondary-settings label{white-space:nowrap}
+#ce-ai-top-settings .crack-ext-turn-info-popover{left:auto;right:0;max-width:min(290px,calc(100vw - 32px))}
+#ce-ai-top-settings .crack-ext-turn-info-popover::before{left:auto;right:12px}
+#ce-ai-vertex-wrap{grid-template-columns:1fr}
+.crack-ext-vertex-meta{grid-template-columns:1fr 1fr}
 .crack-ext-editor-grid{grid-template-columns:1fr}
 .crack-ext-editor-pane+.crack-ext-editor-pane{border-left:0!important;border-top:1px dashed var(--ce-line-soft)!important}
 }
@@ -1627,7 +2228,6 @@ body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-th
 .crack-ext-prompt-header{align-items:flex-start}
 }
 @media(max-width:520px){
-#ce-ai-top-settings,#ce-ai-secondary-settings{grid-template-columns:1fr}
 .crack-ext-ai-modal-btns{flex-direction:column;align-items:stretch}
 #ce-ai-main-actions,.crack-ext-ai-footer-right{width:100%}
 #ce-ai-main-actions .crack-ext-ai-mbtn,.crack-ext-ai-footer-right .crack-ext-ai-mbtn{flex:1 1 auto;justify-content:center}
@@ -1643,6 +2243,7 @@ body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-th
 .crack-ext-editor-card-head{align-items:flex-start;padding:10px 12px}
 .crack-ext-editor-pane{padding:12px}
 .crack-ext-editor-actions{justify-content:flex-end}
+#ce-ai-secondary-settings .crack-ext-export-btn{padding:6px 5px;font-size:10px}
 }
 /* 모바일 가로 화면: 편집 툴바가 카드 조작 영역을 덮지 않도록 일반 스크롤로 전환 */
 @media (max-height:520px) and (max-width:760px){
@@ -1768,16 +2369,20 @@ body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-th
     function updateModelOptions(provider) {
         var sel = document.getElementById('ce-ai-model');
         if (!sel) return;
-        var savedModel = localStorage.getItem('crack_ext_' + provider + '_model') || '';
+        var modelStorageKey = 'crack_ext_' + provider + '_model';
+        var savedModel = localStorage.getItem(modelStorageKey) || '';
+        if ((provider === 'google' || provider === 'firebase' || provider === 'vertex') && savedModel === 'gemini-3-pro-preview') {
+            savedModel = 'gemini-3.1-pro-preview';
+            localStorage.setItem(modelStorageKey, savedModel);
+        }
         sel.innerHTML = '';
         var models = [];
-        if (provider === 'google') {
+        if (provider === 'google' || provider === 'vertex') {
             models = [
                 {v:'gemini-3.6-flash', t:'3.6 Flash'},
                 {v:'gemini-3.5-flash', t:'3.5 Flash'},
                 {v:'gemini-3.1-pro-preview', t:'3.1 Pro'},
                 {v:'gemini-3.1-flash-lite', t:'3.1 Flash-Lite'},
-                {v:'gemini-3-pro-preview', t:'3.0 Pro'},
                 {v:'gemini-3-flash-preview', t:'3.0 Flash'},
                 {v:'gemini-2.5-pro', t:'2.5 Pro'},
                 {v:'gemini-2.5-flash', t:'2.5 Flash'},
@@ -1897,8 +2502,9 @@ body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-th
             if (returnToMain) {
                 if (parentOverlay && parentOverlay.isConnected) parentOverlay.style.display = 'flex';
                 else showMainModal();
-            } else if (parentOverlay && parentOverlay.isConnected) {
-                parentOverlay.remove();
+            } else {
+                if (parentOverlay && parentOverlay.isConnected) parentOverlay.remove();
+                releaseVertexSessionSecrets();
             }
         }
         xCloseBtn.onclick = function() { exitEditor(false); };
@@ -2155,6 +2761,7 @@ body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-th
         function closeAll() {
             overlay.remove();
             if (parentOverlay && parentOverlay.isConnected) parentOverlay.remove();
+            releaseVertexSessionSecrets();
         }
         btnBack.onclick = returnToMain;
         btnXClose.onclick = closeAll;
@@ -2229,15 +2836,27 @@ if (mainModel && mainProvider) {
             var model = localStorage.getItem('crack_ext_' + provider + '_model') || getDefaultModel(provider);
             var apiKey = getSavedApiKey(provider);
             var firebaseScript = localStorage.getItem('crack_ext_firebase_script') || '';
+            var vertexJson = getSavedVertexJson();
+            var vertexLocation = getSavedVertexLocation();
+            var vertexProjectId = getSavedVertexProjectId();
             var reasoning = localStorage.getItem(getReasoningStorageKey(provider, model)) || 'auto';
 
             btnStart.disabled = true;
             btnStart.innerHTML = UI_ICONS.flask + '<span>압축 중...</span>';
 
             try {
-                var config = { apiKey:apiKey, model:model, firebaseScript:firebaseScript, reasoning:reasoning };
+                var config = {
+                    apiKey:apiKey,
+                    model:model,
+                    firebaseScript:firebaseScript,
+                    vertexJson:vertexJson,
+                    vertexLocation:vertexLocation,
+                    vertexProjectId:vertexProjectId,
+                    reasoning:reasoning
+                };
                 var result = await callAI(provider, config, combinedText, 0, 'concise', true);
                 var finalized = await finalizeGeneratedMemoryResult(provider, config, result, true);
+                releaseVertexSessionSecrets();
                 overlay.remove();
                 if (parentOverlay && parentOverlay.isConnected) parentOverlay.remove();
                 showMainModal(finalized.text, true);
@@ -2264,6 +2883,8 @@ if (mainModel && mainProvider) {
 
         var savedProvider = localStorage.getItem('crack_ext_api_provider') || 'google';
         var savedFirebaseScript = localStorage.getItem('crack_ext_firebase_script') || '';
+        var savedVertexLocation = getSavedVertexLocation();
+        var savedVertexProjectId = getSavedVertexProjectId();
         var savedTurns = localStorage.getItem('crack_ext_turn_count') || '15';
         var savedStyle = localStorage.getItem('crack_ext_summary_style') || 'concise';
         var currentKey = getSavedApiKey(savedProvider);
@@ -2281,15 +2902,16 @@ if (mainModel && mainProvider) {
         html += '<div class="crack-ext-ai-modal-header"><h3><span class="crack-ext-head-glyph" aria-hidden="true">' + UI_ICONS.memory + '</span><span class="crack-ext-head-title">AI 요약 / 장기 기억 추가' + (isCompressResult ? ' <span class="crack-ext-badge crack-ext-badge-compress">2차 압축 결과</span>' : '') + '</span></h3><div class="crack-ext-ai-modal-header-actions"><button class="crack-ext-ai-close-btn" id="ce-ai-x-close" type="button" aria-label="창 닫기" title="창 닫기">' + UI_ICONS.close + '</button></div></div>';
 
         html += '<div class="crack-flex-ai-row" id="ce-ai-top-settings">';
-        html += '<div class="fg" style="flex:1.2;"><label>API</label><select id="ce-ai-provider">' +
+        html += '<div class="fg ce-ai-provider-field" style="flex:1.2;"><label>API</label><select id="ce-ai-provider">' +
             '<option value="google"' + (savedProvider === 'google' ? ' selected' : '') + '>Google</option>' +
+            '<option value="vertex"' + (savedProvider === 'vertex' ? ' selected' : '') + '>Vertex JSON</option>' +
             '<option value="deepseek"' + (savedProvider === 'deepseek' ? ' selected' : '') + '>DeepSeek</option>' +
             '<option value="openai"' + (savedProvider === 'openai' ? ' selected' : '') + '>OpenAI</option>' +
             '<option value="firebase"' + (savedProvider === 'firebase' ? ' selected' : '') + '>Firebase</option>' +
             '</select></div>';
-        html += '<div class="fg" id="ce-ai-key-wrap" style="flex:2;' + (savedProvider === 'firebase' ? 'display:none' : '') + '"><label>API Key</label><input type="password" id="ce-ai-key" value="' + escapeHtml(currentKey) + '"></div>';
+        html += '<div class="fg" id="ce-ai-key-wrap" style="flex:2;' + (savedProvider === 'firebase' || savedProvider === 'vertex' ? 'display:none' : '') + '"><label>API Key</label><input type="password" id="ce-ai-key" value="' + escapeHtml(currentKey) + '"></div>';
         html += '<div class="fg" id="ce-ai-firebase-wrap" style="flex:2;' + (savedProvider === 'firebase' ? '' : 'display:none') + '"><label>Firebase Script</label><input type="text" id="ce-ai-firebase-script" value=""></div>';
-        html += '<div class="fg" style="flex:1.5;"><label>모델</label><select id="ce-ai-model"></select></div>';
+        html += '<div class="fg ce-ai-model-field" style="flex:1.5;"><label>모델</label><select id="ce-ai-model"></select></div>';
         html += '<div class="fg crack-ext-turn-field" style="flex:.8;">' +
     '<label class="crack-ext-turn-label">' +
         '<span>턴 수</span>' +
@@ -2301,6 +2923,17 @@ if (mainModel && mainProvider) {
         '<span>일반적인 대화 30턴을 원하면 <b>60턴</b>으로 설정하세요.</span>' +
     '</div>' +
 '</div>';
+        html += '</div>';
+
+        html += '<div id="ce-ai-vertex-wrap"' + (savedProvider === 'vertex' ? '' : ' style="display:none"') + '>';
+        html += '<div class="fg"><label>서비스 계정 JSON</label>';
+        html += '<div class="crack-ext-vertex-credential-actions"><span class="crack-ext-vertex-status" id="ce-ai-vertex-status"></span><button class="crack-ext-ai-mbtn crack-ext-vertex-small-btn" id="ce-ai-vertex-use" type="button">JSON 입력 (세션)</button><button class="crack-ext-ai-mbtn crack-ext-vertex-small-btn" id="ce-ai-vertex-save" type="button">JSON 저장/교체</button><button class="crack-ext-ai-mbtn crack-ext-vertex-small-btn" id="ce-ai-vertex-clear" type="button">저장 삭제</button></div>';
+        html += '</div>';
+        html += '<div class="crack-ext-vertex-meta">';
+        html += '<div class="fg"><label>Location</label><input type="text" id="ce-ai-vertex-location" spellcheck="false" placeholder="global"></div>';
+        html += '<div class="fg"><label>Project ID (선택)</label><input type="text" id="ce-ai-vertex-project" spellcheck="false" placeholder="JSON의 project_id 자동 사용"></div>';
+        html += '</div>';
+        html += '<div class="crack-ext-vertex-note">JSON은 사이트 DOM이 아닌 브라우저 입력창에서 받으며 원문을 다시 표시하지 않습니다. 세션 입력은 창을 닫을 때 폐기되고, 저장/교체는 userscript의 GM 저장소에 보관합니다. 기본 Location은 global이며 Project ID를 비우면 JSON 값을 사용합니다. Gemini 3 계열은 global로 자동 연결됩니다.</div>';
         html += '</div>';
 
         html += '<div class="crack-flex-ai-row" id="ce-ai-secondary-settings">';
@@ -2375,11 +3008,18 @@ if (mainModel && mainProvider) {
         var selReasoning = overlay.querySelector('#ce-ai-reasoning');
         var inputKey = overlay.querySelector('#ce-ai-key');
         var inputFirebase = overlay.querySelector('#ce-ai-firebase-script');
+        var inputVertexLocation = overlay.querySelector('#ce-ai-vertex-location');
+        var inputVertexProject = overlay.querySelector('#ce-ai-vertex-project');
+        var vertexCredentialStatus = overlay.querySelector('#ce-ai-vertex-status');
+        var btnVertexUse = overlay.querySelector('#ce-ai-vertex-use');
+        var btnVertexSave = overlay.querySelector('#ce-ai-vertex-save');
+        var btnVertexClear = overlay.querySelector('#ce-ai-vertex-clear');
         var inputTurns = overlay.querySelector('#ce-ai-turns');
         var btnTurnInfo = overlay.querySelector('#ce-ai-turn-info');
         var turnInfoPopover = overlay.querySelector('#ce-ai-turn-info-popover');
         var keyWrap = overlay.querySelector('#ce-ai-key-wrap');
         var firebaseWrap = overlay.querySelector('#ce-ai-firebase-wrap');
+        var vertexWrap = overlay.querySelector('#ce-ai-vertex-wrap');
         var topSettings = overlay.querySelector('#ce-ai-top-settings');
         var secondarySettings = overlay.querySelector('#ce-ai-secondary-settings');
         // 턴 수 안내 팝업
@@ -2408,6 +3048,8 @@ if (btnTurnInfo && turnInfoPopover) {
         // 저장된 Firebase 코드는 HTML 속성에 끼워 넣지 않고 DOM 값으로 복원한다.
         // 설정 안의 큰따옴표가 value 속성을 중간에서 닫아 내용을 잘라먹는 문제를 방지한다.
         inputFirebase.value = savedFirebaseScript;
+        inputVertexLocation.value = savedVertexLocation;
+        inputVertexProject.value = savedVertexProjectId;
         updateModelOptions(savedProvider);
         if (prefillText && LAST_AI_USAGE) { reasoningUsageEl.textContent = formatReasoningUsage(LAST_AI_USAGE); reasoningUsageEl.title = getUsageTooltip(LAST_AI_USAGE); }
 
@@ -2416,6 +3058,74 @@ if (btnTurnInfo && turnInfoPopover) {
             reasoningUsageEl.title = meta ? getUsageTooltip(meta) : '';
             reasoningUsageEl.classList.toggle('is-working', !!working);
         }
+
+        function updateVertexCredentialStatus(message, tone) {
+            var availableJson = getSavedVertexJson();
+            var isPersistent = VERTEX_SESSION_JSON !== null ? VERTEX_SESSION_PERSISTED : hasPersistentVertexJson();
+            vertexCredentialStatus.classList.toggle('is-saved', tone === 'saved' || (!message && !!availableJson));
+            vertexCredentialStatus.classList.toggle('is-error', tone === 'error');
+            vertexCredentialStatus.textContent = message || (availableJson
+                ? (isPersistent ? '✓ JSON 저장됨 · 원문은 표시하지 않음' : '✓ 현재 세션 JSON 사용 가능')
+                : '저장된 Vertex JSON 없음');
+            btnVertexClear.disabled = !availableJson && !isPersistent;
+        }
+
+        function commitVertexJsonInput(persist, showSuccessToast, rawOverride) {
+            var rawJson = String(rawOverride || '').trim() || getSavedVertexJson();
+            if (!rawJson) throw new Error('서비스 계정 JSON을 입력해주세요.');
+            parseVertexServiceAccount(rawJson);
+            var persisted = saveVertexJson(rawJson, persist !== false);
+            VERTEX_TOKEN_CACHE.clear();
+            updateVertexCredentialStatus(
+                persist !== false && persisted ? '✓ JSON 저장됨 · 원문은 표시하지 않음' : '✓ 현재 세션에서만 JSON 사용',
+                'saved'
+            );
+            if (showSuccessToast) showToast(persist !== false && persisted ? 'Vertex JSON을 안전 저장소에 저장했습니다.' : 'Vertex JSON을 현재 세션에 등록했습니다.');
+            return { json:rawJson, persisted:persisted };
+        }
+
+        updateVertexCredentialStatus();
+
+        async function requestVertexJson(persist) {
+            var rawJson = window.prompt(
+                persist ? '영구 저장할 Google Cloud 서비스 계정 JSON 전체를 붙여넣으세요.' : '이번 창에서만 사용할 Google Cloud 서비스 계정 JSON 전체를 붙여넣으세요.',
+                ''
+            );
+            if (rawJson === null) return null;
+            try {
+                var result = commitVertexJsonInput(persist, true, rawJson);
+                if (persist && !result.persisted) {
+                    await showUiAlert('GM 저장소를 사용할 수 없어 이 창 세션에만 보관합니다.', '세션 보관', { tone:'warning' });
+                }
+                return result;
+            } catch (err) {
+                updateVertexCredentialStatus('JSON 확인 필요: ' + err.message, 'error');
+                await showUiAlert(err.message, 'Vertex JSON 오류', { tone:'danger' });
+                return null;
+            }
+        }
+        btnVertexUse.onclick = function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            requestVertexJson(false);
+        };
+        btnVertexSave.onclick = async function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            await requestVertexJson(true);
+        };
+        btnVertexClear.onclick = async function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var confirmed = await showUiConfirm('저장된 Vertex 서비스 계정 JSON과 현재 토큰을 삭제할까요?', 'Vertex JSON 삭제', { confirmText:'삭제', danger:true });
+            if (!confirmed) return;
+            var clearedPersistently = deleteVertexJson();
+            VERTEX_TOKEN_CACHE.clear();
+            updateVertexCredentialStatus(clearedPersistently ? '저장된 Vertex JSON을 삭제했습니다.' : '현재 세션의 Vertex JSON을 삭제했습니다.', '');
+            if (!clearedPersistently && hasPersistentVertexJson()) {
+                await showUiAlert('GM 저장소에서 JSON을 삭제하지 못했습니다. userscript 관리자 저장소를 확인해주세요.', '삭제 실패', { tone:'danger' });
+            }
+        };
 
         function getSelectedPromptSlot() {
             var slots = loadPromptSlots(promptMode);
@@ -2464,6 +3174,7 @@ if (btnTurnInfo && turnInfoPopover) {
             btnPromptBack.style.display = enabled ? 'inline-block' : 'none';
             topSettings.style.display = enabled ? 'none' : '';
             secondarySettings.style.display = enabled ? 'none' : '';
+            vertexWrap.style.display = enabled ? 'none' : (selProvider.value === 'vertex' ? 'grid' : 'none');
             mainActions.style.display = enabled ? 'none' : 'flex';
             mainFooter.classList.toggle('is-prompt-editing', enabled);
             btnSave.style.display = enabled ? 'none' : 'block';
@@ -2479,6 +3190,12 @@ if (btnTurnInfo && turnInfoPopover) {
                 var firebaseValue = inputFirebase.value || '';
                 if ((localStorage.getItem('crack_ext_firebase_script') || '') !== firebaseValue) {
                     localStorage.setItem('crack_ext_firebase_script', firebaseValue);
+                }
+            } else if (provider === 'vertex') {
+                var vertexLocationValue = inputVertexLocation.value.trim() || 'global';
+                var vertexProjectValue = inputVertexProject.value.trim();
+                if (getSavedVertexLocation() !== vertexLocationValue || getSavedVertexProjectId() !== vertexProjectValue) {
+                    saveVertexEndpointSettings(vertexLocationValue, vertexProjectValue);
                 }
             } else {
                 var apiKeyValue = inputKey.value || '';
@@ -2498,19 +3215,32 @@ if (btnTurnInfo && turnInfoPopover) {
                 localStorage.setItem('crack_ext_firebase_script', firebaseValue);
             }
         });
+        bindAutoSave(inputVertexLocation, function() { saveVisibleCredentials('vertex'); });
+        bindAutoSave(inputVertexProject, function() { saveVisibleCredentials('vertex'); });
 
-        selProvider.onchange = function() {
+        selProvider.onchange = async function() {
+            var requestedProvider = selProvider.value;
+            if (activeCredentialProvider === 'vertex' && requestedProvider !== 'vertex') VERTEX_TOKEN_CACHE.clear();
             saveVisibleCredentials(activeCredentialProvider);
-            var provider = selProvider.value;
+            var provider = requestedProvider;
             activeCredentialProvider = provider;
             localStorage.setItem('crack_ext_api_provider', provider);
             if (provider === 'firebase') {
                 keyWrap.style.display = 'none';
                 firebaseWrap.style.display = 'block';
+                vertexWrap.style.display = 'none';
                 inputFirebase.value = localStorage.getItem('crack_ext_firebase_script') || '';
+            } else if (provider === 'vertex') {
+                keyWrap.style.display = 'none';
+                firebaseWrap.style.display = 'none';
+                vertexWrap.style.display = 'grid';
+                inputVertexLocation.value = getSavedVertexLocation();
+                inputVertexProject.value = getSavedVertexProjectId();
+                updateVertexCredentialStatus();
             } else {
                 keyWrap.style.display = 'block';
                 firebaseWrap.style.display = 'none';
+                vertexWrap.style.display = 'none';
                 inputKey.value = getSavedApiKey(provider);
             }
             updateModelOptions(provider);
@@ -2812,6 +3542,7 @@ if (btnTurnInfo && turnInfoPopover) {
         async function closeMainModal() {
             if (hasUnsavedPromptText() && !(await showUiConfirm('저장하지 않은 프롬프트 수정이 있습니다. 창을 닫을까요?', '저장하지 않은 변경사항', { confirmText:'닫기', danger:true }))) return;
             if (!isGenerating) saveAiResultDraft(isPromptMode ? tempResultContent : txtResult.value, resultMode);
+            releaseVertexSessionSecrets();
             overlay.remove();
         }
         btnXClose.onclick = function(e) { e.stopPropagation(); closeMainModal(); };
@@ -2819,8 +3550,20 @@ if (btnTurnInfo && turnInfoPopover) {
             if (e.target === overlay) closeMainModal();
         });
 
-        btnCompress.onclick = function(e) {
+        btnCompress.onclick = async function(e) {
             e.stopPropagation();
+            if (selProvider.value === 'vertex') {
+                try {
+                    if (!getSavedVertexJson()) throw new Error('Vertex JSON을 입력하거나 저장해주세요.');
+                } catch (err) {
+                    updateVertexCredentialStatus('JSON 확인 필요: ' + err.message, 'error');
+                    await showUiAlert(err.message, 'Vertex JSON 오류', { tone:'danger' });
+                    return;
+                }
+            }
+            saveVisibleCredentials(activeCredentialProvider);
+            localStorage.setItem('crack_ext_api_provider', selProvider.value);
+            localStorage.setItem('crack_ext_' + selProvider.value + '_model', selModel.value);
             overlay.style.display = 'none';
             showCompressModal(overlay);
         };
@@ -2835,14 +3578,18 @@ if (btnTurnInfo && turnInfoPopover) {
             var provider = selProvider.value;
             var apiKey = inputKey.value.trim();
             var firebaseScript = inputFirebase.value.trim();
+            var vertexJson = getSavedVertexJson();
+            var vertexLocation = inputVertexLocation.value.trim() || 'global';
+            var vertexProjectId = inputVertexProject.value.trim();
             var model = selModel.value;
             var turnsVal = parseInt(inputTurns.value, 10);
             var turns = isNaN(turnsVal) ? 15 : turnsVal;
             var style = selStyle.value;
             var reasoning = selReasoning.value || 'auto';
 
-            if (provider !== 'firebase' && !apiKey) { await showUiAlert('API Key를 입력해주세요.', 'API Key 필요', { tone:'warning' }); return; }
+            if (provider !== 'firebase' && provider !== 'vertex' && !apiKey) { await showUiAlert('API Key를 입력해주세요.', 'API Key 필요', { tone:'warning' }); return; }
             if (provider === 'firebase' && !firebaseScript) { await showUiAlert('Firebase 스크립트를 입력해주세요.', 'Firebase 설정 필요', { tone:'warning' }); return; }
+            if (provider === 'vertex' && !vertexJson) { await showUiAlert('서비스 계정 JSON을 입력하거나 저장해주세요.', 'Vertex JSON 필요', { tone:'warning' }); return; }
 
             localStorage.setItem('crack_ext_api_provider', provider);
             localStorage.setItem('crack_ext_' + provider + '_model', model);
@@ -2851,6 +3598,9 @@ if (btnTurnInfo && turnInfoPopover) {
             localStorage.setItem(getReasoningStorageKey(provider, model), reasoning);
             saveApiKey(provider, apiKey);
             if (provider === 'firebase') localStorage.setItem('crack_ext_firebase_script', firebaseScript);
+            if (provider === 'vertex') {
+                saveVertexEndpointSettings(vertexLocation, vertexProjectId);
+            }
 
             saveAiResultDraft(txtResult.value, resultMode);
             isGenerating = true;
@@ -2866,7 +3616,15 @@ if (btnTurnInfo && turnInfoPopover) {
             try {
                 var chatLog = await fetchRecentMessages(turns);
                 if (!chatLog) throw new Error('내역을 불러올 수 없습니다.');
-                var config = { apiKey:apiKey, model:model, firebaseScript:firebaseScript, reasoning:reasoning };
+                var config = {
+                    apiKey:apiKey,
+                    model:model,
+                    firebaseScript:firebaseScript,
+                    vertexJson:vertexJson,
+                    vertexLocation:vertexLocation,
+                    vertexProjectId:vertexProjectId,
+                    reasoning:reasoning
+                };
                 var finalResult = await callAI(provider, config, chatLog, turns, style, false);
                 updateReasoningUsage(LAST_AI_USAGE, false);
                 var finalizedResult = await finalizeGeneratedMemoryResult(provider, config, finalResult, false);
@@ -2916,6 +3674,7 @@ if (btnTurnInfo && turnInfoPopover) {
             if (successCount > 0) {
                 clearAiResultDraft();
                 showToast(successCount + '개의 요약이 장기 기억에 추가되었습니다.');
+                releaseVertexSessionSecrets();
                 overlay.remove();
                 var dialogEl = document.querySelector('[role="dialog"]');
                 if (dialogEl) refreshCurrentTab(dialogEl);
