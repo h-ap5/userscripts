@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 요약 추가
 // @namespace    https://crack.wrtn.ai/
-// @version      2.2.7
+// @version      2.2.8
 // @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API(Vertex JSON 포함)·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
 // @author       User
 // @match        https://crack.wrtn.ai/*
@@ -3816,26 +3816,158 @@ if (btnTurnInfo && turnInfoPopover) {
         }
     }
 
-    function injectTopHeaderBtn() {
-        var existing = document.querySelector('.crack-ext-header-ai-btn');
-        if (existing) return;
+    var topHeaderContainerCache = null;
+    var topHeaderContainerRoute = '';
+    var topHeaderAiBtn = null;
+    var topHeaderFallbackTimer = 0;
+    var TOP_HEADER_FALLBACK_DELAY = 700;
 
+    function getTopHeaderBandLimit() {
+        return Math.min(180, Math.max(96, window.innerHeight * 0.2));
+    }
+
+    function isExcludedHeaderArea(el) {
+        if (!el || !el.closest) return true;
+        return !!el.closest('.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"],form');
+    }
+
+    function isUsableTopHeaderContainer(el) {
+        if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
+        if (el.querySelector('textarea,[contenteditable="true"]')) return false;
+
+        var rect = el.getBoundingClientRect();
+        if (rect.width < 48 || rect.height < 16 || rect.height > 120) return false;
+        if (rect.bottom < 0 || rect.top > getTopHeaderBandLimit()) return false;
+
+        var style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
+    }
+
+    function isVisibleTopHeaderControl(el) {
+        if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
+        var rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8 || rect.bottom < 0) return false;
+        if (rect.top > getTopHeaderBandLimit() || rect.bottom > getTopHeaderBandLimit() + 32) return false;
+        var style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
+    }
+
+    function countVisibleTopHeaderControls(el) {
+        var controls = el.querySelectorAll('button,[role="button"]');
+        var count = 0;
+        for (var i = 0; i < controls.length; i++) {
+            if (isVisibleTopHeaderControl(controls[i])) count++;
+        }
+        return count;
+    }
+
+    function scoreTopHeaderCandidate(el) {
+        if (!isUsableTopHeaderContainer(el)) return -Infinity;
+        var rect = el.getBoundingClientRect();
+        var controls = countVisibleTopHeaderControls(el);
+        var viewportWidth = Math.max(window.innerWidth || 0, 1);
+        var score = controls * 30 - rect.width * 0.35 - rect.height * 0.15;
+        score += Math.max(0, Math.min(40, (rect.left / viewportWidth) * 40));
+        if (rect.right >= viewportWidth * 0.72) score += 55;
+        if (topHeaderAiBtn && topHeaderAiBtn.parentElement === el) score += 500;
+        return score;
+    }
+
+    function findBestSelectorCandidate(selector) {
+        var found = [];
+        try { found = document.querySelectorAll(selector); } catch (e) { return null; }
+        var best = null;
+        var bestScore = -Infinity;
+        for (var i = 0; i < found.length; i++) {
+            var score = scoreTopHeaderCandidate(found[i]);
+            if (score > bestScore) {
+                best = found[i];
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    function findGeometricTopActionGroup() {
+        // 채팅 화면에서만 클래스명에 의존하지 않는 최종 탐색을 사용한다.
+        if (!getChatId()) return null;
+
+        var controls = document.querySelectorAll('button,[role="button"]');
+        var candidates = [];
+        var seen = new Set();
+        for (var i = 0; i < controls.length; i++) {
+            if (!isVisibleTopHeaderControl(controls[i])) continue;
+            var parent = controls[i].parentElement;
+            var depth = 0;
+            while (parent && parent !== document.body && depth < 6) {
+                if (!seen.has(parent) && isUsableTopHeaderContainer(parent)) {
+                    var display = window.getComputedStyle(parent).display;
+                    var controlCount = countVisibleTopHeaderControls(parent);
+                    if ((display === 'flex' || display === 'inline-flex' || display === 'grid') && controlCount >= 2 && controlCount <= 10) {
+                        seen.add(parent);
+                        candidates.push(parent);
+                    }
+                }
+                parent = parent.parentElement;
+                depth++;
+            }
+        }
+
+        var best = null;
+        var bestScore = -Infinity;
+        for (var j = 0; j < candidates.length; j++) {
+            var score = scoreTopHeaderCandidate(candidates[j]);
+            if (score > bestScore) {
+                best = candidates[j];
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    function findTopHeaderContainer() {
+        var currentRoute = getChatId() || location.pathname || 'current';
+        if (topHeaderContainerRoute === currentRoute && isUsableTopHeaderContainer(topHeaderContainerCache)) return topHeaderContainerCache;
+        topHeaderContainerCache = null;
+        topHeaderContainerRoute = currentRoute;
+
+        // 구체적인 제목창 액션 영역부터 찾고, 현재 Crack 클래스가 바뀐 경우에는
+        // 화면 상단의 우측 버튼 그룹을 기하학적으로 찾는다.
         var selectors = [
             '.absolute.z-\\[5\\] .flex.gap-3.items-center',
             'header .flex.items-center',
+            'header [role="toolbar"]',
+            '[role="banner"] [role="toolbar"]',
             '[class*="z-[5]"] [class*="items-center"]',
-            'main + div header',
-            'header'
+            'main + div header'
         ];
 
-        var headerContainer = null;
         for (var i = 0; i < selectors.length; i++) {
-            try {
-                var found = document.querySelector(selectors[i]);
-                if (found) { headerContainer = found; break; }
-            } catch (e) {}
+            var candidate = findBestSelectorCandidate(selectors[i]);
+            if (candidate) {
+                topHeaderContainerCache = candidate;
+                return candidate;
+            }
         }
 
+        var geometric = findGeometricTopActionGroup();
+        if (geometric) {
+            topHeaderContainerCache = geometric;
+            return geometric;
+        }
+
+        var broadSelectors = ['header', '[role="banner"]'];
+        for (var j = 0; j < broadSelectors.length; j++) {
+            var broad = findBestSelectorCandidate(broadSelectors[j]);
+            if (broad) {
+                topHeaderContainerCache = broad;
+                return broad;
+            }
+        }
+        return null;
+    }
+
+    function createTopHeaderBtn() {
         var aiBtn = document.createElement('button');
         aiBtn.className = 'crack-ext-header-ai-btn';
         aiBtn.type = 'button';
@@ -3846,13 +3978,71 @@ if (btnTurnInfo && turnInfoPopover) {
             e.preventDefault();
             showMainModal();
         });
+        return aiBtn;
+    }
+
+    function getOrCreateTopHeaderBtn(headerContainer) {
+        var buttons = Array.prototype.slice.call(document.querySelectorAll('.crack-ext-header-ai-btn'));
+        var aiBtn = topHeaderAiBtn;
+
+        if (!aiBtn && headerContainer) {
+            for (var i = 0; i < buttons.length; i++) {
+                if (buttons[i].parentElement === headerContainer) { aiBtn = buttons[i]; break; }
+            }
+        }
+        if (!aiBtn) {
+            for (var j = 0; j < buttons.length; j++) {
+                if (buttons[j].classList.contains('crack-ext-floating')) { aiBtn = buttons[j]; break; }
+            }
+        }
+        if (!aiBtn && buttons.length) aiBtn = buttons[0];
+        if (!aiBtn) aiBtn = createTopHeaderBtn();
+        topHeaderAiBtn = aiBtn;
+
+        for (var k = 0; k < buttons.length; k++) {
+            if (buttons[k] !== aiBtn) buttons[k].remove();
+        }
+        return aiBtn;
+    }
+
+    function cancelTopHeaderFallback() {
+        if (!topHeaderFallbackTimer) return;
+        clearTimeout(topHeaderFallbackTimer);
+        topHeaderFallbackTimer = 0;
+    }
+
+    function placeTopHeaderBtnAsFloatingAfterGrace() {
+        if (topHeaderFallbackTimer) return;
+        topHeaderFallbackTimer = setTimeout(function() {
+            topHeaderFallbackTimer = 0;
+            var headerContainer = findTopHeaderContainer();
+            if (headerContainer) {
+                injectTopHeaderBtn();
+                return;
+            }
+
+            var aiBtn = getOrCreateTopHeaderBtn(null);
+            if (aiBtn.isConnected && !aiBtn.classList.contains('crack-ext-floating') && isUsableTopHeaderContainer(aiBtn.parentElement)) return;
+            if (!aiBtn.classList.contains('crack-ext-floating')) aiBtn.classList.add('crack-ext-floating');
+            if (aiBtn.parentElement !== document.body) document.body.appendChild(aiBtn);
+        }, TOP_HEADER_FALLBACK_DELAY);
+    }
+
+    function injectTopHeaderBtn() {
+        var headerContainer = findTopHeaderContainer();
+        var aiBtn = getOrCreateTopHeaderBtn(headerContainer);
 
         if (headerContainer) {
-            headerContainer.prepend(aiBtn);
-        } else {
-            aiBtn.classList.add('crack-ext-floating');
-            document.body.appendChild(aiBtn);
+            cancelTopHeaderFallback();
+            if (aiBtn.classList.contains('crack-ext-floating')) aiBtn.classList.remove('crack-ext-floating');
+            if (aiBtn.parentElement !== headerContainer) headerContainer.prepend(aiBtn);
+            return;
         }
+
+        // SPA 전환 중 잠깐 헤더가 사라진 경우에는 즉시 하단으로 내리지 않는다.
+        // 헤더가 실제로 없는 상태가 일정 시간 유지될 때만 floating을 사용한다.
+        if (aiBtn.isConnected && !aiBtn.classList.contains('crack-ext-floating') && isUsableTopHeaderContainer(aiBtn.parentElement)) return;
+        placeTopHeaderBtnAsFloatingAfterGrace();
     }
 
     function inject() { injectAiStyles(); injectTopHeaderBtn(); }
@@ -3862,7 +4052,19 @@ if (btnTurnInfo && turnInfoPopover) {
         var injectScheduled = false;
 
         function needsInjection() {
-            return !document.getElementById('crack-ext-ai-css') || !document.querySelector('.crack-ext-header-ai-btn');
+            if (!document.getElementById('crack-ext-ai-css')) return true;
+
+            var buttons = document.querySelectorAll('.crack-ext-header-ai-btn');
+            if (buttons.length !== 1) return true;
+
+            var aiBtn = buttons[0];
+            var headerContainer = findTopHeaderContainer();
+            if (headerContainer) {
+                return aiBtn.parentElement !== headerContainer || aiBtn.classList.contains('crack-ext-floating');
+            }
+
+            if (aiBtn.classList.contains('crack-ext-floating')) return false;
+            return !isUsableTopHeaderContainer(aiBtn.parentElement);
         }
 
         function scheduleInject(force) {
@@ -3875,15 +4077,23 @@ if (btnTurnInfo && turnInfoPopover) {
             });
         }
 
-        // SPA에서 헤더가 교체되어 요약 버튼이 사라진 경우에만 다시 주입한다.
+        // 버튼 유무뿐 아니라 현재 제목창 안에 있는지까지 검사한다.
+        // floating 버튼이 먼저 생겨도 새 헤더가 렌더되면 같은 노드를 즉시 위로 옮긴다.
         var obs = new MutationObserver(function() {
             if (needsInjection()) scheduleInject();
         });
         obs.observe(document.body, { childList: true, subtree: true });
 
         scheduleInject(true);
-        // Observer가 놓치는 예외 상황을 위한 저빈도 안전망.
-        setInterval(function() { scheduleInject(); }, 10000);
+        window.addEventListener('resize', function() {
+            topHeaderContainerCache = null;
+            scheduleInject();
+        }, { passive:true });
+        // Observer가 놓치는 클래스 전환이나 예외 상황을 위한 저빈도 안전망.
+        setInterval(function() {
+            topHeaderContainerCache = null;
+            scheduleInject();
+        }, 5000);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
