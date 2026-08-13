@@ -1,8 +1,11 @@
 // ==UserScript==
-// @name         📝 크랙 요약 메모리 편집 & AI 자동 요약 추가
+// @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.2.8
-// @description  크랙 내부 장기기억 요약·일괄편집·다중 AI API(Vertex JSON 포함)·프롬프트 슬롯·추론/토큰/예상비용·내보내기·테마형 알림·API키 자동저장
+// @version      2.2.9
+// @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
+// @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
+// @homepageURL  https://github.com/h-ap5/userscripts
+// @description  크랙 내부 장기기억 요약·누적형 자동 정리·구간/상한 압축·일괄편집·다중 AI API(Vertex JSON 포함)·자동 전용 프롬프트 슬롯·추론/토큰/비용기록·내보내기
 // @author       User
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_xmlhttpRequest
@@ -37,6 +40,84 @@
     // 제목·본문 제한은 미리보기와 저장 검증에만 사용하며, AI의 출력 형식에는 개입하지 않습니다.
     const GENERATED_TITLE_MAX = 20;
     const GENERATED_SUMMARY_MAX = 300;
+    const AUTO_MEMORY_SETTINGS_KEY = 'crack_ext_auto_memory_settings_v1';
+    const AUTO_MEMORY_STATE_PREFIX = 'crack_ext_auto_memory_state_v1:';
+    const AUTO_MEMORY_LOCK_PREFIX = 'crack_ext_auto_memory_lock_v1:';
+    const AUTO_MEMORY_LOCK_MS = 600000;
+    const AUTO_MEMORY_LOCK_HEARTBEAT_MS = 60000;
+    const AUTO_MEMORY_RETRY_DELAYS = Object.freeze([60000, 300000]);
+    const AUTO_MEMORY_RESPONSE_DEBOUNCE_MS = 4000;
+    const AUTO_MEMORY_SLOT_RECHECK_DELAYS = Object.freeze([10000, 20000, 40000, 60000]);
+    const AUTO_MEMORY_WAKE_THROTTLE_MS = 15000;
+    const AUTO_MEMORY_SESSION_ID = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    const AUTO_MEMORY_DEFAULTS = Object.freeze({
+        enabled:false,
+        intervalTurns:10,
+        readTurns:10,
+        excludeRecentTurns:1,
+        contextCards:5,
+        midMergeTurns:10,
+        maxCards:20,
+        compactTarget:16,
+        protectUserAdded:true
+    });
+    let AUTO_MEMORY_BUSY = false;
+    let AUTO_MEMORY_RESPONSE_TIMER = 0;
+    let AUTO_MEMORY_SLOT_TIMER = 0;
+    let AUTO_MEMORY_RETRY_TIMER = 0;
+    let AUTO_MEMORY_SLOT_RECHECK_INDEX = 0;
+    let AUTO_MEMORY_LAST_WAKE_AT = 0;
+
+    const AUTO_MEMORY_CONTINUITY_REQUIREMENT = `[BATCH CONTINUITY]
+Batch cuts are artificial. Treat trusted memories as authoritative prior state. Preserve unchanged facts. Continue, revise, or merge the same event; fix premature endings and overlap. Split only when the narrative thread truly changes. Return the complete deduplicated replacement set for EDITABLE, RECOVERY, and NEW content only.`;
+
+    const AUTO_MEMORY_SCOPE_REQUIREMENT = `[AUTOMATION SCOPE OVERRIDE]
+For this automatic run, output coverage is limited to EDITABLE TRUSTED MEMORIES, RECOVERY MEMORIES, and NEW DIALOGUE. PROTECTED TRUSTED MEMORIES are reference-only, outside FULL INPUT COVERAGE, and must never be copied or paraphrased into output cards.`;
+
+    const AUTO_MEMORY_REWRITE_REQUIREMENT = `[AUTO MEMORY REWRITE]
+- Disposable native slots are storage IDs only. Ignore their old title and body as facts.
+- Protected memories are context only. Do not repeat or rewrite their unchanged content.
+- Recovery memories lost their live slot. Merge every still-valid fact from them into the replacement.
+- Editable memories must be returned as a complete updated replacement together with the new dialogue.
+- If new dialogue continues the same event, revise and extend the prior memory instead of duplicating it.
+- Remove duplicate, obsolete, or redundant restatements without dropping causal, relational, contractual, identity, or world-state facts.`;
+
+    const AUTO_MEMORY_FORMAT_REQUIREMENT = `[AUTO-SAVE FORMAT — AUTOMATION OVERRIDE]
+For this automatic run, this block overrides any conflicting output-format instruction.
+Return cards only as:
+[title]
+summary
+Title: 1–20 characters. Summary: exactly one line, 1–300 characters. Put one blank line between cards. No fences, numbering, commentary, or summary starting with "[". Return cards oldest to newest.`;
+
+    const AUTO_MEMORY_SYSTEM_REQUIREMENTS = [
+        AUTO_MEMORY_SCOPE_REQUIREMENT,
+        AUTO_MEMORY_CONTINUITY_REQUIREMENT,
+        AUTO_MEMORY_REWRITE_REQUIREMENT,
+        AUTO_MEMORY_FORMAT_REQUIREMENT
+    ].join('\n\n');
+
+    const AUTO_MEMORY_APPEND_SYSTEM_REQUIREMENTS = `[AUTOMATION APPEND MODE — HIGHEST PRIORITY]
+This automatic run is append-first, not a global rewrite.
+- SEALED MEMORIES and PROTECTED MEMORIES are reference-only. Never copy, rewrite, merge, or delete them.
+- OPEN TAIL may be updated only when NEW DIALOGUE directly continues, corrects, or concludes that same causal event. Otherwise keep it unchanged.
+- Independent new event arcs must become separate newCards in chronological order. Do not merge independent arcs merely to fit capacity.
+- FRESH assistant slots are empty storage containers. Ignore their old title/body as facts.
+- RECOVERY MEMORIES contain facts from a managed card whose live slot changed or disappeared. Preserve every still-valid fact in an updated tail or new card.
+- If all essential independent arcs cannot fit in FRESH SLOT CAPACITY, return WAIT_FOR_SLOT. Never partially save or omit later facts.
+- Batch endings are artificial. Do not invent closure.
+
+[AUTOMATION JSON FORMAT — OVERRIDES USER OUTPUT FORMAT]
+Return exactly one JSON object and no markdown fence, commentary, or surrounding text:
+{"version":1,"decision":"APPLY","tail":{"action":"KEEP","title":"","summary":""},"newCards":[{"title":"...","summary":"..."}]}
+decision is APPLY or WAIT_FOR_SLOT.
+tail.action is KEEP or UPDATE. KEEP requires empty title and summary. UPDATE requires the complete replacement title and summary for OPEN TAIL.
+If there is no OPEN TAIL, tail.action must be KEEP.
+WAIT_FOR_SLOT requires KEEP with empty fields and an empty newCards array.
+Each JSON title value is raw title text without "[" or "]". Brackets requested by the user prompt are presentation delimiters only; omit them inside JSON. Each title is 1–20 characters. Each summary is one physical line, 1–300 characters, with no carriage return or line feed. Do not start a summary with "[".
+For APPLY, return at least one real UPDATE or one newCards entry.`;
+
+    const AUTO_MEMORY_COMPACTION_REQUIREMENT = `[AUTOMATION COMPACTION OVERRIDE]
+Only the memories under EDITABLE COMPACTION TARGETS belong in the replacement output. PROTECTED CONTEXT is reference-only and must not be copied as a separate card. Follow the run-specific output count or range, and return cards oldest to newest. Preserve independent anchors, causal links, relationships, promises, identity, and world-state facts before trimming detail.`;
 
     // 사용자 프롬프트의 형식에는 관여하지 않고, 전달된 입력 전체를 끝까지 처리하도록 요구합니다.
     const BUILTIN_FULL_COVERAGE_REQUIREMENT = `[FULL INPUT COVERAGE — HIGHEST PRIORITY]
@@ -102,19 +183,23 @@ This requirement controls coverage only. It must not change or add any output fo
     // ============== 프롬프트 슬롯 / API 설정 ==============
     const PROMPT_SLOT_KEYS = {
         main: 'crack_ext_prompt_slots_main_v2',
+        auto: 'crack_ext_prompt_slots_auto_v2',
         compress: 'crack_ext_prompt_slots_compress_v2'
     };
     const PROMPT_ACTIVE_KEYS = {
         main: 'crack_ext_active_prompt_main_v2',
+        auto: 'crack_ext_active_prompt_auto_v2',
         compress: 'crack_ext_active_prompt_compress_v2'
     };
     const LEGACY_PROMPT_KEYS = {
         main: 'crack_ext_custom_prompt',
+        auto: 'crack_ext_auto_prompt',
         compress: 'crack_ext_compress_prompt'
     };
 
     function getDefaultPrompt(mode) {
-        return mode === 'compress' ? COMPRESS_PROMPT : DEFAULT_PROMPT;
+        if (mode === 'compress') return COMPRESS_PROMPT;
+        return DEFAULT_PROMPT;
     }
 
     function migrateBuiltInDefaultPrompt(mode, slots) {
@@ -122,7 +207,7 @@ This requirement controls coverage only. It must not change or add any output fo
         var slot = slots.find(function(item) { return item && item.id === defaultId; });
         if (!slot || slot.name !== '기본 프롬프트') return false;
         var prompt = slot.prompt || '';
-        var isLegacyMain = mode === 'main' && prompt.includes('분리 필수 조건') && prompt.includes('장소 이동') && prompt.includes('병합 금지');
+        var isLegacyMain = (mode === 'main' || mode === 'auto') && prompt.includes('분리 필수 조건') && prompt.includes('장소 이동') && prompt.includes('병합 금지');
         var isLegacyCompress = mode === 'compress' && prompt.includes('대괄호 안 제목은 공백 포함 20자 이내') && prompt.includes('180자 미만 항목');
         if (!isLegacyMain && !isLegacyCompress) return false;
         slot.prompt = getDefaultPrompt(mode);
@@ -162,18 +247,34 @@ This requirement controls coverage only. It must not change or add any output fo
             prompt: defaultPrompt
         };
         var slots = [defaultSlot];
-        var legacy = localStorage.getItem(LEGACY_PROMPT_KEYS[mode]);
-        if (legacy && legacy.trim() && legacy.trim() !== defaultPrompt.trim()) {
-            var legacySlot = {
-                id: makePromptSlotId(mode),
-                name: '기존 사용자 프롬프트',
-                prompt: legacy
-            };
-            slots.push(legacySlot);
-            localStorage.setItem(PROMPT_ACTIVE_KEYS[mode], legacySlot.id);
-        } else {
-            localStorage.setItem(PROMPT_ACTIVE_KEYS[mode], defaultSlot.id);
+        var preferredSlot = defaultSlot;
+        if (mode === 'auto') {
+            var inheritedMain = getActivePromptSlot('main');
+            if (inheritedMain && inheritedMain.prompt.trim() && inheritedMain.prompt.trim() !== defaultPrompt.trim()) {
+                preferredSlot = {
+                    id: makePromptSlotId(mode),
+                    name: '현재 1차 프롬프트 복사',
+                    prompt: inheritedMain.prompt
+                };
+                slots.push(preferredSlot);
+            }
         }
+        var legacy = localStorage.getItem(LEGACY_PROMPT_KEYS[mode]);
+        if (legacy && legacy.trim()) {
+            var matchingLegacySlot = slots.find(function(slot) { return slot.prompt.trim() === legacy.trim(); });
+            if (matchingLegacySlot) {
+                preferredSlot = matchingLegacySlot;
+            } else {
+                var legacySlot = {
+                    id: makePromptSlotId(mode),
+                    name: '기존 사용자 프롬프트',
+                    prompt: legacy
+                };
+                slots.push(legacySlot);
+                preferredSlot = legacySlot;
+            }
+        }
+        localStorage.setItem(PROMPT_ACTIVE_KEYS[mode], preferredSlot.id);
         savePromptSlots(mode, slots);
         return slots;
     }
@@ -314,8 +415,12 @@ This requirement controls coverage only. It must not change or add any output fo
 
     // ============== 유틸 함수 ==============
     function getChatId() {
-        const m = location.pathname.match(/\/episodes\/([a-f0-9]+)/);
-        return m ? m[1] : null;
+        const patterns = [/\/episodes\/([a-f0-9-]+)/i, /\/chats\/([a-f0-9-]+)/i, /\/c\/([a-f0-9-]+)/i];
+        for (var i = 0; i < patterns.length; i++) {
+            var match = location.pathname.match(patterns[i]);
+            if (match) return match[1];
+        }
+        return null;
     }
 
     function getAiResultDraftKey() {
@@ -341,6 +446,199 @@ This requirement controls coverage only. It must not change or add any output fo
         AI_RESULT_DRAFTS.delete(getAiResultDraftKey());
     }
 
+    function clampInteger(value, min, max, fallback) {
+        var parsed = parseInt(value, 10);
+        if (!Number.isFinite(parsed)) parsed = fallback;
+        return Math.max(min, Math.min(max, parsed));
+    }
+
+    function hashText(value) {
+        var text = String(value || '');
+        var hash = 2166136261;
+        for (var i = 0; i < text.length; i++) {
+            hash ^= text.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return (hash >>> 0).toString(36);
+    }
+
+    function getAutoMemorySettings() {
+        var saved = {};
+        try { saved = JSON.parse(localStorage.getItem(AUTO_MEMORY_SETTINGS_KEY) || '{}') || {}; } catch (e) {}
+        if (!Number.isFinite(Number(saved.settingsVersion)) || Number(saved.settingsVersion) < 2) {
+            if (saved.intervalTurns == null || Number(saved.intervalTurns) === 5) saved.intervalTurns = 10;
+            if (saved.readTurns == null || Number(saved.readTurns) === 5) saved.readTurns = 10;
+            if (saved.midMergeTurns == null) saved.midMergeTurns = 10;
+        }
+        var settings = Object.assign({}, AUTO_MEMORY_DEFAULTS, saved);
+        settings.settingsVersion = 2;
+        settings.enabled = !!settings.enabled;
+        settings.intervalTurns = clampInteger(settings.intervalTurns, 1, 50, AUTO_MEMORY_DEFAULTS.intervalTurns);
+        settings.readTurns = clampInteger(settings.readTurns, 1, 50, AUTO_MEMORY_DEFAULTS.readTurns);
+        settings.excludeRecentTurns = clampInteger(settings.excludeRecentTurns, 0, 10, AUTO_MEMORY_DEFAULTS.excludeRecentTurns);
+        settings.contextCards = clampInteger(settings.contextCards, 3, 5, AUTO_MEMORY_DEFAULTS.contextCards);
+        settings.midMergeTurns = clampInteger(settings.midMergeTurns, 0, 500, AUTO_MEMORY_DEFAULTS.midMergeTurns);
+        settings.maxCards = clampInteger(settings.maxCards, 5, 20, AUTO_MEMORY_DEFAULTS.maxCards);
+        settings.compactTarget = clampInteger(settings.compactTarget, 1, settings.maxCards, Math.min(AUTO_MEMORY_DEFAULTS.compactTarget, settings.maxCards));
+        settings.protectUserAdded = settings.protectUserAdded !== false;
+        return settings;
+    }
+
+    function saveAutoMemorySettings(settings) {
+        var normalized = Object.assign({}, AUTO_MEMORY_DEFAULTS, settings || {});
+        normalized = getNormalizedAutoMemorySettings(normalized);
+        localStorage.setItem(AUTO_MEMORY_SETTINGS_KEY, JSON.stringify(normalized));
+        notifyAutoMemoryStatus(getChatId());
+        setTimeout(function() { refreshAutoMemorySchedule(false); }, 0);
+        return normalized;
+    }
+
+    function getNormalizedAutoMemorySettings(settings) {
+        var source = settings || {};
+        var maxCards = clampInteger(source.maxCards, 5, 20, AUTO_MEMORY_DEFAULTS.maxCards);
+        return {
+            settingsVersion:2,
+            enabled:!!source.enabled,
+            intervalTurns:clampInteger(source.intervalTurns, 1, 50, AUTO_MEMORY_DEFAULTS.intervalTurns),
+            readTurns:clampInteger(source.readTurns, 1, 50, AUTO_MEMORY_DEFAULTS.readTurns),
+            excludeRecentTurns:clampInteger(source.excludeRecentTurns, 0, 10, AUTO_MEMORY_DEFAULTS.excludeRecentTurns),
+            contextCards:clampInteger(source.contextCards, 3, 5, AUTO_MEMORY_DEFAULTS.contextCards),
+            midMergeTurns:clampInteger(source.midMergeTurns, 0, 500, AUTO_MEMORY_DEFAULTS.midMergeTurns),
+            maxCards:maxCards,
+            compactTarget:clampInteger(source.compactTarget, 1, maxCards, Math.min(AUTO_MEMORY_DEFAULTS.compactTarget, maxCards)),
+            protectUserAdded:source.protectUserAdded !== false
+        };
+    }
+
+    function makeAutoMemoryState() {
+        return {
+            version:2,
+            initialized:false,
+            lastScheduleTurnKey:'',
+            lastProcessedTurnKey:'',
+            pendingCutoffTurnKey:'',
+            nativeHashes:{},
+            managedHashes:{},
+            managedCards:{},
+            pendingNativeIds:[],
+            pendingDeleteIds:[],
+            pendingApply:null,
+            waitingForSlot:false,
+            observedNewTurns:0,
+            openTailId:'',
+            midSegmentIds:[],
+            processedSinceMidMerge:0,
+            forceFullCompact:false,
+            fullBeforeRoutine:false,
+            needsV2InventoryMigration:false,
+            lastSuccessAt:0,
+            lastAutoUsage:null,
+            autoUsageCalls:0,
+            autoUsageTotalUsd:0,
+            lastStatus:'',
+            lastError:'',
+            consecutiveFailures:0,
+            retryAfter:0,
+            autoPaused:false
+        };
+    }
+
+    function getAutoMemoryState(chatId) {
+        var state = makeAutoMemoryState();
+        if (!chatId) return state;
+        var saved = {};
+        try {
+            saved = JSON.parse(localStorage.getItem(AUTO_MEMORY_STATE_PREFIX + chatId) || '{}') || {};
+            state = Object.assign(state, saved);
+        } catch (e) {}
+        var savedVersion = Number(saved.version) || 0;
+        if (Object.keys(saved).length && savedVersion < 2) state.needsV2InventoryMigration = true;
+        if (state.pendingApply && state.pendingApply.operationMode == null && state.pendingApply.mutationStarted === false) {
+            state.pendingApply = null;
+            state.lastStatus = '구버전 미적용 저장 계획 폐기 · 누적형 구조로 재계획 대기';
+        }
+        if (!state.nativeHashes || typeof state.nativeHashes !== 'object') state.nativeHashes = {};
+        if (!state.managedHashes || typeof state.managedHashes !== 'object') state.managedHashes = {};
+        if (!state.managedCards || typeof state.managedCards !== 'object') state.managedCards = {};
+        if (!Array.isArray(state.pendingNativeIds)) state.pendingNativeIds = [];
+        if (!Array.isArray(state.pendingDeleteIds)) state.pendingDeleteIds = [];
+        if (!Array.isArray(state.midSegmentIds)) state.midSegmentIds = [];
+        state.midSegmentIds = Array.from(new Set(state.midSegmentIds.map(String).filter(Boolean)));
+        state.openTailId = String(state.openTailId || '');
+        state.processedSinceMidMerge = Math.max(0, Number(state.processedSinceMidMerge) || 0);
+        state.forceFullCompact = !!state.forceFullCompact;
+        state.fullBeforeRoutine = !!state.fullBeforeRoutine;
+        state.needsV2InventoryMigration = !!state.needsV2InventoryMigration;
+        state.version = 2;
+        if (state.pendingApply != null && typeof state.pendingApply !== 'object') state.pendingApply = { invalid:true };
+        state.waitingForSlot = !!state.waitingForSlot;
+        state.consecutiveFailures = clampInteger(state.consecutiveFailures, 0, 3, 0);
+        state.retryAfter = Number(state.retryAfter) || 0;
+        state.autoPaused = !!state.autoPaused;
+        if (!state.lastAutoUsage || typeof state.lastAutoUsage !== 'object') state.lastAutoUsage = null;
+        state.autoUsageCalls = Math.max(0, Number(state.autoUsageCalls) || 0);
+        state.autoUsageTotalUsd = Math.max(0, Number(state.autoUsageTotalUsd) || 0);
+        return state;
+    }
+
+    function saveAutoMemoryState(chatId, state) {
+        if (!chatId) return;
+        localStorage.setItem(AUTO_MEMORY_STATE_PREFIX + chatId, JSON.stringify(state));
+        notifyAutoMemoryStatus(chatId, state);
+    }
+
+    function notifyAutoMemoryStatus(chatId, state) {
+        try {
+            window.dispatchEvent(new CustomEvent('crack-ext-auto-memory-status', { detail:{ chatId:chatId || getChatId(), state:state || null } }));
+        } catch (e) {}
+    }
+
+    function resetAutoMemoryState(chatId) {
+        if (!chatId) return;
+        localStorage.removeItem(AUTO_MEMORY_STATE_PREFIX + chatId);
+        notifyAutoMemoryStatus(chatId);
+    }
+
+    function acquireAutoMemoryLock(chatId) {
+        if (!chatId) return false;
+        var key = AUTO_MEMORY_LOCK_PREFIX + chatId;
+        var now = Date.now();
+        try {
+            var current = JSON.parse(localStorage.getItem(key) || 'null');
+            if (current && current.owner !== AUTO_MEMORY_SESSION_ID && current.expiresAt > now) return false;
+            var next = { owner:AUTO_MEMORY_SESSION_ID, expiresAt:now + AUTO_MEMORY_LOCK_MS };
+            localStorage.setItem(key, JSON.stringify(next));
+            var confirmed = JSON.parse(localStorage.getItem(key) || 'null');
+            return !!confirmed && confirmed.owner === AUTO_MEMORY_SESSION_ID;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function releaseAutoMemoryLock(chatId) {
+        if (!chatId) return;
+        var key = AUTO_MEMORY_LOCK_PREFIX + chatId;
+        try {
+            var current = JSON.parse(localStorage.getItem(key) || 'null');
+            if (current && current.owner === AUTO_MEMORY_SESSION_ID) localStorage.removeItem(key);
+        } catch (e) {}
+    }
+
+    function renewAutoMemoryLock(chatId) {
+        if (!chatId) return false;
+        var key = AUTO_MEMORY_LOCK_PREFIX + chatId;
+        try {
+            var current = JSON.parse(localStorage.getItem(key) || 'null');
+            if (!current || current.owner !== AUTO_MEMORY_SESSION_ID) return false;
+            current.expiresAt = Date.now() + AUTO_MEMORY_LOCK_MS;
+            localStorage.setItem(key, JSON.stringify(current));
+            var confirmed = JSON.parse(localStorage.getItem(key) || 'null');
+            return !!confirmed && confirmed.owner === AUTO_MEMORY_SESSION_ID;
+        } catch (e) {
+            return false;
+        }
+    }
+
     function getToken() {
         const m = document.cookie.match(/(^| )access_token=([^;]+)/);
         return m ? m[2] : null;
@@ -353,10 +651,12 @@ This requirement controls coverage only. It must not change or add any output fo
         return d.innerHTML;
     }
 
-    function apiCall(method, path, body) {
-        const token = getToken(), chatId = getChatId();
+    function apiCall(method, path, body, options) {
+        options = options || {};
+        const token = getToken(), chatId = String(options.chatId || getChatId() || '');
         if (!token || !chatId) {
-            showUiAlert('인증 정보 또는 채팅 ID를 찾을 수 없습니다.', '연결 정보 없음', { tone:'warning' });
+            if (options.strict) return Promise.reject(new Error('인증 정보 또는 채팅 ID를 찾을 수 없습니다.'));
+            if (!options.silent) showUiAlert('인증 정보 또는 채팅 ID를 찾을 수 없습니다.', '연결 정보 없음', { tone:'warning' });
             return Promise.resolve(null);
         }
         const opts = {
@@ -369,23 +669,54 @@ This requirement controls coverage only. It must not change or add any output fo
         if (body) opts.body = JSON.stringify(body);
         return fetch(API_BASE + '/' + chatId + path, opts)
             .then(r => {
-                if (!r.ok) return r.text().then(t => { console.error('API Error:', r.status, t); return null; });
-                return r.text().then(t => t ? JSON.parse(t) : { result: 'SUCCESS' });
+                if (!r.ok) return r.text().then(t => {
+                    console.error('API Error:', r.status, t);
+                    if (options.strict) throw new Error('Crack API ' + r.status + ': ' + (t || '요청 실패'));
+                    return null;
+                });
+                return r.text().then(t => {
+                    if (!t) return { result:'SUCCESS' };
+                    try { return JSON.parse(t); }
+                    catch (e) {
+                        if (options.strict) throw new Error('Crack API 응답 JSON을 읽지 못했습니다.');
+                        console.error('API JSON Error:', e);
+                        return null;
+                    }
+                });
             })
-            .catch(e => { showUiAlert('네트워크 오류: ' + e.message, '네트워크 오류', { tone:'danger' }); return null; });
+            .catch(e => {
+                if (options.strict) throw e;
+                if (!options.silent) showUiAlert('네트워크 오류: ' + e.message, '네트워크 오류', { tone:'danger' });
+                else console.warn('[AutoMemory] network error:', e);
+                return null;
+            });
     }
 
-    async function fetchSummaries() {
+async function fetchSummaries(options) {
+    options = options || {};
     let allSummaries = [];
     let cursor = null;
+    let seenCursors = new Set();
     while (true) {
-        let path = '/summaries?limit=20&type=longTerm';
+        let path = '/summaries?limit=20&type=longTerm&orderBy=newest&filter=all';
         if (cursor) path += '&cursor=' + encodeURIComponent(cursor);
-        let res = await apiCall('GET', path);
-        if (!res || !res.data || !res.data.summaries || res.data.summaries.length === 0) break;
+        let res = await apiCall('GET', path, null, options);
+        if (!res || !res.data || !Array.isArray(res.data.summaries)) {
+            if (options.strict) throw new Error('장기기억 목록 응답 형식이 올바르지 않습니다.');
+            break;
+        }
+        if (res.data.summaries.length === 0) {
+            if (options.strict && res.data.nextCursor) throw new Error('장기기억 페이지 응답이 불완전합니다.');
+            break;
+        }
         allSummaries = allSummaries.concat(res.data.summaries);
         if (res.data.nextCursor) {
-            cursor = res.data.nextCursor;
+            cursor = String(res.data.nextCursor);
+            if (seenCursors.has(cursor)) {
+                if (options.strict) throw new Error('장기기억 페이지 커서가 반복되었습니다.');
+                break;
+            }
+            seenCursors.add(cursor);
         } else {
             break;
         }
@@ -393,29 +724,61 @@ This requirement controls coverage only. It must not change or add any output fo
     return allSummaries;
 }
 
-async function fetchRecentMessages(limit) {
+async function fetchRecentMessageObjects(limit, options) {
+    options = options || {};
     let allMessages = [];
     let cursor = null;
+    let seenCursors = new Set();
     let requestedLimit = parseInt(limit, 10);
     if (isNaN(requestedLimit)) requestedLimit = 15;
     const isUnlimited = requestedLimit === 0;
+    const stopKeys = new Set((options.stopKeys || []).map(String).filter(Boolean));
+    const hasStopKeys = stopKeys.size > 0;
+    let stopKeysSatisfied = false;
     while (true) {
         let fetchLimit = isUnlimited ? 50 : Math.min(requestedLimit - allMessages.length, 50);
         let path = '/messages?limit=' + fetchLimit;
         if (cursor) path += '&cursor=' + encodeURIComponent(cursor);
-        let res = await apiCall('GET', path);
-        if (!res || !res.data || !res.data.messages || res.data.messages.length === 0) break;
+        let res = await apiCall('GET', path, null, options);
+        if (!res || !res.data || !Array.isArray(res.data.messages)) {
+            if (options.strict) throw new Error('대화 로그 응답 형식이 올바르지 않습니다.');
+            break;
+        }
+        if (res.data.messages.length === 0) {
+            if (options.strict && res.data.nextCursor) throw new Error('대화 로그 페이지 응답이 불완전합니다.');
+            break;
+        }
         allMessages = allMessages.concat(res.data.messages);
+        if (stopKeys.size) {
+            res.data.messages.forEach(function(message) {
+                var stableId = getMessageStableId(message);
+                if (stableId) stopKeys.delete(stableId);
+                if (message && message.turnId) stopKeys.delete(String(message.turnId));
+            });
+        }
         if (!isUnlimited && allMessages.length >= requestedLimit) break;
+        if (isUnlimited && hasStopKeys && !stopKeys.size) {
+            if (stopKeysSatisfied || !res.data.nextCursor) break;
+            stopKeysSatisfied = true;
+        }
         if (res.data.nextCursor) {
-            cursor = res.data.nextCursor;
+            cursor = String(res.data.nextCursor);
+            if (seenCursors.has(cursor)) {
+                if (options.strict) throw new Error('대화 로그 페이지 커서가 반복되었습니다.');
+                break;
+            }
+            seenCursors.add(cursor);
         } else {
             break;
         }
     }
     if (!isUnlimited) allMessages = allMessages.slice(0, requestedLimit);
-    if (allMessages.length === 0) return null;
-    let msgs = allMessages.reverse();
+    return allMessages.reverse();
+}
+
+async function fetchRecentMessages(limit) {
+    let msgs = await fetchRecentMessageObjects(limit);
+    if (!msgs || msgs.length === 0) return null;
     return msgs.map(m => (m.role === 'user' ? 'User' : 'Character') + ': ' + m.content).join('\n\n');
 }
 
@@ -1108,11 +1471,12 @@ async function fetchRecentMessages(limit) {
 
     function calculateUsageCost(meta) {
         if (!meta) return null;
-        var input = finiteNumber(meta.inputTokens) || 0;
+        var input = finiteNumber(meta.inputTokens);
+        var output = finiteNumber(meta.billableOutputTokens);
+        if (output == null) output = finiteNumber(meta.outputTokens);
+        if (input == null || output == null) return null;
         var cached = Math.min(finiteNumber(meta.cachedInputTokens) || 0, input);
         var uncached = Math.max(0, input - cached);
-        var output = finiteNumber(meta.billableOutputTokens);
-        if (output == null) output = finiteNumber(meta.outputTokens) || 0;
         var pricing = getModelPricing(meta.provider, meta.model, input);
         if (!pricing) return null;
         var usd = ((uncached * pricing.input) + (cached * (pricing.cachedInput != null ? pricing.cachedInput : pricing.input)) + (output * pricing.output)) / 1000000;
@@ -1171,7 +1535,7 @@ async function fetchRecentMessages(limit) {
             var krw = Math.max(0, Math.round(meta.costUsd * (meta.usdKrwRate || USD_KRW_FALLBACK)));
             parts.push('예상 ' + formatUsd(meta.costUsd) + ' ≈ ₩' + krw.toLocaleString('ko-KR'));
         } else {
-            parts.push('비용 단가 미등록');
+            parts.push('비용 계산 불가');
         }
         return parts.join(' · ');
     }
@@ -1189,6 +1553,48 @@ async function fetchRecentMessages(limit) {
         if (meta.pricingEstimated) lines.push('이 모델 단가는 가장 가까운 공식 모델 단가로 추정했습니다.');
         lines.push('무료 티어, 캐시 정책, 지역 처리, 부가세 및 공급자 청구 반올림에 따라 실제 비용과 다를 수 있습니다.');
         return lines.join('\n');
+    }
+
+    function recordAutoMemoryUsage(state, meta) {
+        if (!state || !meta) return;
+        var saved = {};
+        [
+            'provider', 'model', 'requested', 'requestedLabel', 'inputTokens', 'outputTokens',
+            'visibleOutputTokens', 'billableOutputTokens', 'reasoningTokens', 'totalTokens',
+            'cachedInputTokens', 'usdKrwRate', 'fxFallback', 'fxSource', 'costUsd',
+            'pricingEstimated', 'longContextPricing'
+        ].forEach(function(key) {
+            if (meta[key] != null) saved[key] = meta[key];
+        });
+        saved.recordedAt = Date.now();
+        state.lastAutoUsage = saved;
+        state.autoUsageCalls = Math.max(0, Number(state.autoUsageCalls) || 0) + 1;
+        if (Number.isFinite(meta.costUsd)) state.autoUsageTotalUsd = Math.max(0, Number(state.autoUsageTotalUsd) || 0) + meta.costUsd;
+    }
+
+    function formatAutoMemoryUsage(state) {
+        var meta = state && state.lastAutoUsage;
+        if (!meta) return '자동 AI 비용 · 아직 호출 기록 없음';
+        var parts = ['자동 AI ' + (Number(state.autoUsageCalls) || 1).toLocaleString('ko-KR') + '회'];
+        if (meta.model) parts.push('마지막 ' + meta.model);
+        if (meta.totalTokens != null) parts.push(Number(meta.totalTokens).toLocaleString('ko-KR') + '토큰');
+        if (meta.costUsd != null) {
+            var lastKrw = Math.max(0, Math.round(meta.costUsd * (meta.usdKrwRate || USD_KRW_FALLBACK)));
+            parts.push('마지막 예상 ' + formatUsd(meta.costUsd) + ' ≈ ₩' + lastKrw.toLocaleString('ko-KR'));
+        } else {
+            parts.push('마지막 비용 계산 불가');
+        }
+        if (state.autoUsageTotalUsd > 0) {
+            var rate = meta.usdKrwRate || USD_KRW_FALLBACK;
+            var totalKrw = Math.max(0, Math.round(state.autoUsageTotalUsd * rate));
+            parts.push('누적 예상 ' + formatUsd(state.autoUsageTotalUsd) + ' ≈ ₩' + totalKrw.toLocaleString('ko-KR'));
+        }
+        return parts.join(' · ');
+    }
+
+    function getAutoMemoryUsageTooltip(state) {
+        if (!state || !state.lastAutoUsage) return '자동 장기기억 AI 호출이 완료되면 채팅별 예상 비용을 기록합니다.';
+        return getUsageTooltip(state.lastAutoUsage) + '\n자동 정리 누적 호출: ' + (Number(state.autoUsageCalls) || 1).toLocaleString('ko-KR') + '회';
     }
 
     function updateVisibleAiUsage() {
@@ -1306,7 +1712,7 @@ try {
     async function callAI(provider, config, chatLog, turns, style, isCompress, options) {
         options = options || {};
         LAST_AI_USAGE = null;
-        const promptMode = isCompress ? 'compress' : 'main';
+        const promptMode = options.promptMode === 'auto' ? 'auto' : (isCompress ? 'compress' : 'main');
         const currentPrompt = options.systemPrompt || buildSystemPrompt(getActivePromptText(promptMode));
         const reasoningValue = config.reasoning || 'auto';
 
@@ -1324,6 +1730,7 @@ try {
             const generationConfig = getGeminiGenerationConfig(config.model);
             const thinkingConfig = getGeminiThinkingConfig(config.model, reasoningValue);
             if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig;
+            if (options.jsonMode) generationConfig.responseMimeType = 'application/json';
             const payload = {
                 system_instruction: { parts:[{ text:currentPrompt }] },
                 contents: [{ role:'user', parts:[{ text:reinforcedPrompt }] }],
@@ -1349,6 +1756,7 @@ try {
             const generationConfig = getGeminiGenerationConfig(config.model);
             const thinkingConfig = getGeminiThinkingConfig(config.model, reasoningValue);
             if (thinkingConfig) generationConfig.thinkingConfig = thinkingConfig;
+            if (options.jsonMode) generationConfig.responseMimeType = 'application/json';
             const payload = {
                 systemInstruction:{ parts:[{ text:currentPrompt }] },
                 contents:[{ role:'user', parts:[{ text:reinforcedPrompt }] }],
@@ -1460,6 +1868,7 @@ try {
             if (!firebaseConfig) throw new Error('Firebase 스크립트 형식이 올바르지 않습니다.');
             const generationConfig = getGeminiGenerationConfig(config.model);
             const rawThinkingConfig = getGeminiThinkingConfig(config.model, reasoningValue);
+            if (options.jsonMode) generationConfig.responseMimeType = 'application/json';
             const bridgeResult = await callFirebaseViaPage({
                 firebaseConfig:firebaseConfig,
                 appName:'crack-ext-' + Date.now() + '-' + Math.random().toString(36).slice(2),
@@ -1704,6 +2113,27 @@ try {
 .crack-ext-ai-mbtn-save{background:#4CAF50!important;color:#fff!important;border-color:#4CAF50!important;font-size:11px!important;padding:6px 12px!important}
 .crack-flex-ai-row{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap}
 .crack-flex-ai-row .fg{flex:1;min-width:100px}
+.crack-ext-auto-panel{margin:0 0 16px;border:1px solid var(--ce-line,#ddd);border-radius:12px;background:var(--ce-card,#fafafa);overflow:hidden}
+.crack-ext-auto-panel>summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px;cursor:pointer;color:var(--ce-ink,#222);font-size:.875rem;font-weight:700;list-style:none}
+.crack-ext-auto-panel>summary::-webkit-details-marker{display:none}
+.crack-ext-auto-panel>summary::after{content:"+";flex:0 0 auto;color:var(--ce-ink-faint,#888);font-size:1.25rem;font-weight:400;line-height:1}
+.crack-ext-auto-panel[open]>summary::after{content:"−"}
+.crack-ext-auto-summary-status{min-width:0;margin-left:auto;color:var(--ce-ink-faint,#777);font-size:.875rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crack-ext-auto-body{padding:0 16px 16px;border-top:1px solid var(--ce-line-soft,#eee)}
+.crack-ext-auto-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;padding-top:16px}
+.crack-ext-auto-field{min-width:0}
+.crack-ext-auto-field label{display:block!important;margin:0 0 8px!important;color:var(--ce-ink-dim,#555)!important;font-size:.875rem!important;font-weight:600!important;line-height:1.3}
+.crack-ext-auto-field input[type="number"]{height:40px!important;padding:8px 10px!important;font-variant-numeric:tabular-nums}
+.crack-ext-auto-toggle-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:16px 0 0}
+.crack-ext-auto-check{display:inline-flex!important;align-items:center!important;justify-content:flex-start!important;gap:8px!important;width:auto!important;margin:0!important;color:var(--ce-ink-dim,#555)!important;font-size:.875rem!important;font-weight:600!important}
+.crack-ext-auto-check input[type="checkbox"]{width:18px!important;height:18px!important;min-width:18px!important;margin:0!important;padding:0!important;accent-color:var(--ce-sage,#4f8069)}
+.crack-ext-auto-note{margin:16px 0 0;padding:12px 16px;border-left:3px solid var(--ce-sage,#4f8069);background:var(--ce-sage-glow,rgba(79,128,105,.13));color:var(--ce-ink-dim,#555);font-size:.875rem;line-height:1.6}
+.crack-ext-auto-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:16px}
+.crack-ext-auto-status{flex:1 1 240px;min-width:0;color:var(--ce-ink-faint,#777);font-size:.875rem;line-height:1.6;word-break:break-word}
+.crack-ext-auto-usage{margin-top:10px;padding-top:10px;border-top:1px dashed var(--ce-line-soft,#eee);color:var(--ce-ink-dim,#555);font-size:.8125rem;line-height:1.55;word-break:break-word;font-variant-numeric:tabular-nums}
+#ce-auto-run:not(:disabled){background:var(--ce-sage-glow,rgba(79,128,105,.13))!important;color:var(--ce-sage,#4f8069)!important;border-color:color-mix(in srgb,var(--ce-sage,#4f8069) 42%,transparent)!important}
+@media(max-width:760px){.crack-ext-auto-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.crack-ext-auto-summary-status{display:none}}
+@media(max-width:430px){.crack-ext-auto-grid{grid-template-columns:1fr}.crack-ext-auto-actions .crack-ext-ai-mbtn{flex:1 1 auto}.crack-ext-auto-status{flex-basis:100%}}
 #ce-ai-preview-container{margin-top:10px}
 #ce-ai-card-nav{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px;font-size:12px;font-weight:bold}
 #ce-ai-card-nav button{cursor:pointer;background:#f0f0f0;border:1px solid #ddd;border-radius:6px;padding:4px 10px;font-size:11px;color:#333}
@@ -1716,7 +2146,6 @@ try {
 .crack-ext-header-ai-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:0 8px!important;height:29px!important;border-radius:7px!important;background:transparent!important;color:#514e49!important;font-weight:680!important;font-size:11.5px!important;border:1px solid transparent!important;cursor:pointer;white-space:nowrap!important;box-shadow:none!important;opacity:1;transition:background .18s,border-color .18s,color .18s!important}
 .crack-ext-header-ai-btn:hover{background:rgba(31,29,26,.055)!important;border-color:rgba(31,29,26,.07)!important;color:#353330!important;opacity:1}
 .crack-ext-header-ai-btn .crack-ext-header-ai-icon{display:block;width:14px;height:14px;color:#6f6b65;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
-.crack-ext-header-ai-btn.crack-ext-floating{position:fixed!important;right:18px!important;bottom:82px!important;z-index:99999999!important;height:36px!important;padding:0 12px!important;border-radius:999px!important;box-shadow:0 4px 14px rgba(0,0,0,.14)!important;background:#fff!important}
 .crack-ext-export-btn{padding:5px 10px;border-radius:6px;border:1px solid #ddd;background:#fff;color:#333;cursor:pointer;font-size:11px;transition:background 0.2s}
 .crack-ext-export-btn:hover{background:#f0f0f0}
 .crack-ext-compress-list{max-height:250px;overflow-y:auto;border:1px solid #ddd;border-radius:8px;padding:8px;margin-top:4px}
@@ -2308,11 +2737,9 @@ transition:border-color .25s,box-shadow .25s,opacity .25s;
 .crack-ext-header-ai-btn{color:#6E5F4C!important}
 .crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#9D6D2B!important}
 .crack-ext-header-ai-btn:hover{background:rgba(182,120,34,.09)!important;border-color:rgba(182,120,34,.15)!important;color:#8F5B18!important}
-.crack-ext-header-ai-btn.crack-ext-floating{background:#FFFBF4!important;border:1px solid #D8CAB7!important;box-shadow:0 5px 18px rgba(61,43,23,.18)!important}
 body[data-theme="dark"] .crack-ext-header-ai-btn,html[data-theme="dark"] .crack-ext-header-ai-btn,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn{color:#C9BBA5!important}
 body[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#D5A052!important}
 body[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn:hover{background:rgba(226,168,75,.1)!important;border-color:rgba(226,168,75,.16)!important;color:#EDE5D6!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating{background:#1D1A15!important;border-color:#3B342A!important;box-shadow:0 5px 18px rgba(0,0,0,.38)!important}
 @media(max-width:820px){
 #ce-ai-top-settings{
 grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(58px,.62fr);
@@ -2562,20 +2989,1321 @@ margin-bottom:12px;
         return item && (item.id || item._id || item.summaryId || item.summary_id);
     }
 
-    async function updateExistingSummary(item, title, summary) {
+    async function updateExistingSummary(item, title, summary, options) {
         var id = getSummaryId(item);
         if (!id) throw new Error('장기기억 ID를 찾을 수 없습니다.');
-        var res = await apiCall('PATCH', '/summaries/' + encodeURIComponent(id), { title: title, summary: summary });
+        var res = await apiCall('PATCH', '/summaries/' + encodeURIComponent(id), { title: title, summary: summary }, options || {});
         if (!res) throw new Error('수정 요청이 실패했습니다.');
         return res;
     }
 
-    async function deleteExistingSummary(item) {
+    async function deleteExistingSummary(item, options) {
         var id = getSummaryId(item);
         if (!id) throw new Error('장기기억 ID를 찾을 수 없습니다.');
-        var res = await apiCall('DELETE', '/summaries/' + encodeURIComponent(id));
+        var res = await apiCall('DELETE', '/summaries/' + encodeURIComponent(id), null, options || {});
         if (!res) throw new Error('삭제 요청이 실패했습니다.');
         return res;
+    }
+
+    function isUserAddedSummary(item) {
+        return !!item && (String(item.createdBy || '').toLowerCase() === 'user' || String(item.badge || '').trim() === '추가');
+    }
+
+    function isNativeSummary(item) {
+        return !!item && String(item.createdBy || '').toLowerCase() === 'assistant' && String(item.badge || '').trim() !== '추가';
+    }
+
+    function summaryFingerprint(item) {
+        return hashText(String(item && item.title || '').trim() + '\n' + String(item && item.summary || '').trim());
+    }
+
+    function summaryTime(item, preferCreated) {
+        var value = preferCreated ? (item && (item.createdAt || item.updatedAt)) : (item && (item.updatedAt || item.createdAt));
+        var parsed = Date.parse(value || '');
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function sortSummariesOldest(items) {
+        return (items || []).slice().sort(function(a, b) {
+            return summaryTime(a, true) - summaryTime(b, true) || String(getSummaryId(a) || '').localeCompare(String(getSummaryId(b) || ''));
+        });
+    }
+
+    function getMessageText(message) {
+        var value = message && (message.content != null ? message.content : message.message != null ? message.message : message.text);
+        if (typeof value === 'string') return value.trim();
+        if (value == null) return '';
+        try { return JSON.stringify(value); } catch (e) { return String(value); }
+    }
+
+    function getMessageStableId(message) {
+        return String(message && (message._id || message.id || message.messageId || message.turnId || message.createdAt) || '');
+    }
+
+    function isIncompleteAssistantMessage(message) {
+        var status = String(message && (message.status || message.generationStatus || message.state) || '').toLowerCase();
+        return ['pending', 'queued', 'streaming', 'generating', 'processing', 'in_progress', 'in-progress'].includes(status);
+    }
+
+    function buildCompletedDialogueTurns(messages) {
+        var turns = [];
+        var current = null;
+
+        function pushCurrent() {
+            if (!current || current.incomplete || !current.userText || !current.assistantParts.length) return;
+            var assistantText = current.assistantParts.join('\n\n').trim();
+            if (!assistantText) return;
+            var key = current.assistantId || current.turnId || hashText(current.userText + '\n' + assistantText);
+            turns.push({
+                key:String(key),
+                userText:current.userText,
+                assistantText:assistantText,
+                text:'User: ' + current.userText + '\n\nCharacter: ' + assistantText
+            });
+        }
+
+        (messages || []).forEach(function(message) {
+            var role = String(message && message.role || '').toLowerCase();
+            var text = getMessageText(message);
+            if (!text) return;
+            if (role === 'user') {
+                pushCurrent();
+                current = { userText:text, assistantParts:[], assistantId:'', turnId:String(message.turnId || ''), incomplete:false };
+                return;
+            }
+            if ((role === 'assistant' || role === 'character' || role === 'bot') && current) {
+                if (isIncompleteAssistantMessage(message)) {
+                    current.incomplete = true;
+                    return;
+                }
+                current.assistantParts.push(text);
+                current.assistantId = getMessageStableId(message) || current.assistantId;
+                current.turnId = String(message.turnId || current.turnId || '');
+            }
+        });
+        pushCurrent();
+        return turns;
+    }
+
+    function findTurnIndex(turns, key) {
+        if (!key) return -1;
+        for (var i = 0; i < turns.length; i++) if (turns[i].key === key) return i;
+        return -1;
+    }
+
+    function formatDialogueTurns(turns) {
+        return (turns || []).map(function(turn, index) {
+            return '[Dialogue turn ' + (index + 1) + ']\n' + turn.text;
+        }).join('\n\n');
+    }
+
+    function formatMemoryCardsForPrompt(items) {
+        if (!items || !items.length) return '(none)';
+        return sortSummariesOldest(items).map(function(item) {
+            return '[' + String(item.title || '').trim() + ']\n' + String(item.summary || '').trim();
+        }).join('\n\n');
+    }
+
+    function makeManagedCardSnapshot(item) {
+        return {
+            title:String(item && item.title || '').trim(),
+            summary:String(item && item.summary || '').trim(),
+            createdAt:String(item && item.createdAt || ''),
+            updatedAt:String(item && item.updatedAt || ''),
+            createdBy:String(item && item.createdBy || ''),
+            badge:String(item && item.badge || '')
+        };
+    }
+
+    function getSavedAutoAiRuntime() {
+        var provider = localStorage.getItem('crack_ext_api_provider') || 'google';
+        var model = localStorage.getItem('crack_ext_' + provider + '_model') || getDefaultModel(provider);
+        var apiKey = getSavedApiKey(provider);
+        var firebaseScript = localStorage.getItem('crack_ext_firebase_script') || '';
+        var vertexJson = getSavedVertexJson();
+        if (provider !== 'firebase' && provider !== 'vertex' && !apiKey) throw new Error('자동 정리에 사용할 API Key가 없습니다.');
+        if (provider === 'firebase' && !firebaseScript) throw new Error('자동 정리에 사용할 Firebase 설정이 없습니다.');
+        if (provider === 'vertex' && !vertexJson) throw new Error('자동 정리에 사용할 Vertex JSON이 없습니다.');
+        return {
+            provider:provider,
+            style:localStorage.getItem('crack_ext_summary_style') || 'concise',
+            config:{
+                apiKey:apiKey,
+                model:model,
+                firebaseScript:firebaseScript,
+                vertexJson:vertexJson,
+                vertexLocation:getSavedVertexLocation(),
+                vertexProjectId:getSavedVertexProjectId(),
+                reasoning:localStorage.getItem(getReasoningStorageKey(provider, model)) || 'auto'
+            }
+        };
+    }
+
+    function syncAutoNativeState(summaries, state, initialize) {
+        var nativeItems = (summaries || []).filter(isNativeSummary);
+        var currentIds = new Set(nativeItems.map(function(item) { return String(getSummaryId(item)); }));
+        var pending = new Set((state.pendingNativeIds || []).filter(function(id) { return currentIds.has(String(id)); }).map(String));
+
+        nativeItems.forEach(function(item) {
+            var id = String(getSummaryId(item) || '');
+            if (!id) return;
+            var fingerprint = summaryFingerprint(item);
+            if (!initialize && (!Object.prototype.hasOwnProperty.call(state.nativeHashes, id) || state.nativeHashes[id] !== fingerprint)) pending.add(id);
+            state.nativeHashes[id] = fingerprint;
+            if (state.managedHashes[id] === fingerprint && !state.managedCards[id]) state.managedCards[id] = makeManagedCardSnapshot(item);
+        });
+
+        Object.keys(state.nativeHashes).forEach(function(id) {
+            if (!currentIds.has(id)) delete state.nativeHashes[id];
+        });
+        Object.keys(state.managedHashes).forEach(function(id) {
+            var item = (summaries || []).find(function(summary) { return String(getSummaryId(summary)) === id; });
+            if (!item) delete state.managedHashes[id];
+        });
+        state.pendingNativeIds = initialize ? [] : Array.from(pending);
+    }
+
+    function adoptStableNativeSummaries(summaries, state, includeAll) {
+        var pendingIds = new Set((state.pendingNativeIds || []).map(String));
+        var adopted = [];
+        sortSummariesOldest((summaries || []).filter(isNativeSummary)).forEach(function(item) {
+            var id = String(getSummaryId(item) || '');
+            if (!id || (!includeAll && pendingIds.has(id))) return;
+            var fingerprint = summaryFingerprint(item);
+            state.nativeHashes[id] = fingerprint;
+            state.managedHashes[id] = fingerprint;
+            state.managedCards[id] = makeManagedCardSnapshot(item);
+            adopted.push(item);
+        });
+        var managedNow = sortSummariesOldest((summaries || []).filter(function(item) {
+            var id = String(getSummaryId(item) || '');
+            return id && state.managedHashes[id] === summaryFingerprint(item);
+        }));
+        if (managedNow.length) {
+            state.openTailId = String(getSummaryId(managedNow[managedNow.length - 1]) || '');
+            state.midSegmentIds = managedNow.slice(-5).map(function(item) { return String(getSummaryId(item) || ''); });
+        }
+        state.needsV2InventoryMigration = false;
+        return adopted;
+    }
+
+    function getLatestNativeBatch(nativeItems) {
+        var sorted = (nativeItems || []).slice().sort(function(a, b) { return summaryTime(b, true) - summaryTime(a, true); });
+        if (!sorted.length) return [];
+        var newest = summaryTime(sorted[0], true);
+        if (!newest) return sorted.slice(0, Math.min(4, sorted.length));
+        return sorted.filter(function(item) { return Math.abs(newest - summaryTime(item, true)) <= 60000; });
+    }
+
+    function collectAutoMemoryInventory(summaries, state, settings) {
+        var items = summaries || [];
+        var byId = new Map();
+        items.forEach(function(item) {
+            var id = String(getSummaryId(item) || '');
+            if (id) byId.set(id, item);
+        });
+
+        var managedLive = [];
+        var recoveryContext = [];
+        Object.keys(state.managedCards || {}).forEach(function(id) {
+            var snapshot = state.managedCards[id];
+            if (!snapshot || !snapshot.title || !snapshot.summary) return;
+            var current = byId.get(String(id));
+            if (current && state.managedHashes[id] === summaryFingerprint(current)) {
+                if (canAutoMutateSummary(current, settings)) managedLive.push(current);
+                return;
+            }
+            recoveryContext.push(Object.assign({ _id:id, __orphanedManaged:!current }, snapshot));
+        });
+        managedLive = sortSummariesOldest(managedLive);
+        var managedIds = new Set(managedLive.map(function(item) { return String(getSummaryId(item)); }));
+
+        var openTail = managedLive.find(function(item) { return String(getSummaryId(item)) === String(state.openTailId || ''); }) || null;
+        if (!openTail && managedLive.length) {
+            openTail = managedLive[managedLive.length - 1];
+            state.openTailId = String(getSummaryId(openTail) || '');
+        }
+        if (openTail && !state.midSegmentIds.length) state.midSegmentIds = [String(getSummaryId(openTail))];
+
+        var pendingIds = new Set((state.pendingNativeIds || []).map(String));
+        var freshSlots = sortSummariesOldest(items.filter(function(item) {
+            var id = String(getSummaryId(item) || '');
+            return id && pendingIds.has(id) && isNativeSummary(item) && !managedIds.has(id);
+        }));
+
+        var contextCandidates = items.filter(function(item) { return settings.protectUserAdded && isUserAddedSummary(item); })
+            .concat(managedLive.filter(function(item) { return !openTail || String(getSummaryId(item)) !== String(getSummaryId(openTail)); }));
+        var contextById = new Map();
+        sortSummariesOldest(contextCandidates).slice(-settings.contextCards).forEach(function(item) {
+            contextById.set(String(getSummaryId(item)), item);
+        });
+
+        return {
+            byId:byId,
+            managedLive:managedLive,
+            managedIds:managedIds,
+            openTail:openTail,
+            freshSlots:freshSlots,
+            protectedContext:sortSummariesOldest(Array.from(contextById.values())),
+            recoveryContext:sortSummariesOldest(recoveryContext),
+            recoveryIds:recoveryContext.map(function(item) { return String(getSummaryId(item)); })
+        };
+    }
+
+    function makeSlotFingerprintMap(items) {
+        return (items || []).reduce(function(map, item) {
+            map[String(getSummaryId(item))] = summaryFingerprint(item);
+            return map;
+        }, {});
+    }
+
+    function selectRoutineAppendPlan(summaries, state, settings) {
+        var inventory = collectAutoMemoryInventory(summaries, state, settings);
+        if (!inventory.openTail && !inventory.freshSlots.length) return null;
+        var targets = (inventory.openTail ? [inventory.openTail] : []).concat(inventory.freshSlots);
+        return {
+            mode:'routine',
+            openTail:inventory.openTail,
+            freshSlots:inventory.freshSlots,
+            protectedContext:inventory.protectedContext,
+            recoveryContext:inventory.recoveryContext,
+            recoveryIds:inventory.recoveryIds,
+            rewriteSlots:targets,
+            slotFingerprints:makeSlotFingerprintMap(targets),
+            currentManagedIds:inventory.managedLive.map(function(item) { return String(getSummaryId(item)); })
+        };
+    }
+
+    function selectMidMergePlan(summaries, state, settings) {
+        var inventory = collectAutoMemoryInventory(summaries, state, settings);
+        var liveById = new Map(inventory.managedLive.map(function(item) { return [String(getSummaryId(item)), item]; }));
+        var openTailId = inventory.openTail ? String(getSummaryId(inventory.openTail)) : '';
+        var segmentIds = Array.from(new Set((state.midSegmentIds || []).map(String).filter(function(id) { return liveById.has(id); })));
+        var editable = segmentIds.filter(function(id) { return id !== openTailId; }).map(function(id) { return liveById.get(id); });
+        editable = sortSummariesOldest(editable);
+        if (editable.length < 2) return null;
+
+        var editableIds = new Set(editable.map(function(item) { return String(getSummaryId(item)); }));
+        var contextById = new Map(inventory.protectedContext.filter(function(item) {
+            return !editableIds.has(String(getSummaryId(item)));
+        }).map(function(item) { return [String(getSummaryId(item)), item]; }));
+        if (inventory.openTail) contextById.set(openTailId, inventory.openTail);
+        inventory.managedLive.slice(-settings.contextCards).forEach(function(item) {
+            var id = String(getSummaryId(item));
+            if (!editableIds.has(id)) contextById.set(id, item);
+        });
+        return {
+            mode:'mid',
+            editableTrusted:editable,
+            protectedContext:sortSummariesOldest(Array.from(contextById.values())),
+            recoveryContext:[],
+            recoveryIds:[],
+            rewriteSlots:editable,
+            slotFingerprints:makeSlotFingerprintMap(editable),
+            slotLimit:editable.length,
+            expectedCount:null,
+            allowedDeleteIds:editable.map(function(item) { return String(getSummaryId(item)); }),
+            openTailId:openTailId
+        };
+    }
+
+    function selectFullCompactPlan(summaries, state, settings) {
+        var inventory = collectAutoMemoryInventory(summaries, state, settings);
+        var mutable = sortSummariesOldest((summaries || []).filter(function(item) { return canAutoMutateSummary(item, settings); }));
+        if (!mutable.length) return null;
+        var mutableIds = new Set(mutable.map(function(item) { return String(getSummaryId(item)); }));
+        var protectedContext = sortSummariesOldest((summaries || []).filter(function(item) {
+            return !mutableIds.has(String(getSummaryId(item)));
+        }));
+        var untouchedCount = protectedContext.length;
+        var desiredCount = Math.max(1, settings.compactTarget - untouchedCount);
+        if (untouchedCount + desiredCount > settings.maxCards) throw new Error('보호된 [추가] 카드만으로 최대 슬롯 수에 도달해 전체 압축이 불가능합니다.');
+        var userEditable = mutable.filter(function(item) { return isUserAddedSummary(item); });
+        var editableById = new Map(inventory.managedLive.concat(userEditable).map(function(item) { return [String(getSummaryId(item)), item]; }));
+        var editableTrusted = sortSummariesOldest(Array.from(editableById.values()));
+        var informationSourceCount = editableTrusted.length + inventory.recoveryContext.length;
+        var expectedCount = Math.min(mutable.length, desiredCount, Math.max(1, informationSourceCount));
+        if (untouchedCount + expectedCount > settings.maxCards) throw new Error('보호된 [추가] 카드 때문에 최대 슬롯 수를 맞출 수 없습니다.');
+        return {
+            mode:'full',
+            editableTrusted:editableTrusted,
+            protectedContext:protectedContext,
+            recoveryContext:inventory.recoveryContext,
+            recoveryIds:inventory.recoveryIds,
+            rewriteSlots:mutable,
+            slotFingerprints:makeSlotFingerprintMap(mutable),
+            slotLimit:expectedCount,
+            expectedCount:expectedCount,
+            allowedDeleteIds:mutable.map(function(item) { return String(getSummaryId(item)); })
+        };
+    }
+
+    function buildAutoAppendInput(plan, dialogueTurns) {
+        return '[SEALED MEMORIES — CONTEXT ONLY]\n' + formatMemoryCardsForPrompt(plan.protectedContext) + '\n\n' +
+            '[OPEN TAIL — UPDATE ONLY FOR A DIRECT CONTINUATION]\n' + formatMemoryCardsForPrompt(plan.openTail ? [plan.openTail] : []) + '\n\n' +
+            '[RECOVERY MEMORIES — PRESERVE ALL STILL-VALID FACTS]\n' + formatMemoryCardsForPrompt(plan.recoveryContext) + '\n\n' +
+            '[FRESH SLOT CAPACITY]\n' + plan.freshSlots.length + ' existing assistant storage slot(s) are available for newCards. Their old contents are not facts.\n\n' +
+            '[NEW DIALOGUE]\n' + formatDialogueTurns(dialogueTurns) + '\n\n' +
+            '[DECISION]\nPreserve old anchors first. Update only the directly continued OPEN TAIL; append independent events as newCards. If essential newCards would exceed capacity, return WAIT_FOR_SLOT without partial work.';
+    }
+
+    function buildAutoCompactionInput(plan) {
+        var countInstruction = plan.expectedCount == null
+            ? 'Return 1 to ' + plan.slotLimit + ' cards. Let the active second-compression prompt decide the useful grouping; never pad or force an arbitrary half-size result.'
+            : 'Return exactly ' + plan.expectedCount + ' cards.';
+        return '[PROTECTED CONTEXT — REFERENCE ONLY]\n' + formatMemoryCardsForPrompt(plan.protectedContext) + '\n\n' +
+            '[RECOVERY MEMORIES — MERGE STILL-VALID FACTS WHEN PRESENT]\n' + formatMemoryCardsForPrompt(plan.recoveryContext) + '\n\n' +
+            '[EDITABLE COMPACTION TARGETS — REPLACE ONLY THESE]\n' + formatMemoryCardsForPrompt(plan.editableTrusted) + '\n\n' +
+            '[OUTPUT COUNT]\n' + countInstruction + ' Preserve independent anchors; compress overlap and repeated detail first.';
+    }
+
+    function validateAutoCardData(card, label) {
+        if (!card || typeof card !== 'object' || Array.isArray(card)) throw new Error(label + ' 카드 형식이 올바르지 않습니다.');
+        var keys = Object.keys(card).sort().join(',');
+        if (keys !== 'summary,title') throw new Error(label + ' 카드에는 title과 summary만 있어야 합니다.');
+        if (typeof card.title !== 'string' || typeof card.summary !== 'string' || card.title !== card.title.trim() || card.summary !== card.summary.trim()) {
+            throw new Error(label + ' 카드 제목과 본문은 앞뒤 공백 없는 문자열이어야 합니다.');
+        }
+        var title = card.title;
+        var wrappedTitle = title.match(/^\[([^\[\]\r\n]+)\]$/);
+        if (wrappedTitle) title = wrappedTitle[1].trim();
+        if (!title || !card.summary) throw new Error(label + ' 카드에 빈 제목 또는 본문이 있습니다.');
+        if (/[\[\]]/.test(title)) throw new Error(label + ' JSON 제목에는 [ 또는 ] 문자를 넣을 수 없습니다: ' + title);
+        if (title.length > GENERATED_TITLE_MAX) throw new Error(label + ' 제목이 ' + GENERATED_TITLE_MAX + '자를 초과했습니다: ' + title);
+        if (card.summary.length > GENERATED_SUMMARY_MAX) throw new Error(label + ' 본문이 ' + GENERATED_SUMMARY_MAX + '자를 초과했습니다: ' + card.title);
+        if (/\r|\n/.test(title) || /\r|\n/.test(card.summary)) throw new Error(label + ' 카드에는 줄바꿈을 넣을 수 없습니다.');
+        if (card.summary.charAt(0) === '[') throw new Error(label + ' 본문은 [ 문자로 시작할 수 없습니다: ' + card.title);
+        return { title:title, summary:card.summary };
+    }
+
+    function validateAutoAppendResult(rawText, plan) {
+        var cleaned = String(rawText || '').trim();
+        if (!cleaned || cleaned.length > 65536 || cleaned.indexOf('```') !== -1) throw new Error('AI가 자동 누적 JSON 형식 외의 텍스트를 반환했습니다.');
+        var parsed;
+        try { parsed = JSON.parse(cleaned); } catch (err) { throw new Error('AI 자동 누적 결과가 올바른 JSON이 아닙니다.'); }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('AI 자동 누적 결과는 JSON 객체여야 합니다.');
+        if (Object.keys(parsed).sort().join(',') !== 'decision,newCards,tail,version' || parsed.version !== 1 || !Array.isArray(parsed.newCards)) {
+            throw new Error('AI 자동 누적 JSON의 필수 필드가 올바르지 않습니다.');
+        }
+        if (!parsed.tail || typeof parsed.tail !== 'object' || Array.isArray(parsed.tail) || Object.keys(parsed.tail).sort().join(',') !== 'action,summary,title') {
+            throw new Error('AI 자동 누적 JSON의 tail 필드가 올바르지 않습니다.');
+        }
+        var action = parsed.tail.action;
+        if (!['KEEP', 'UPDATE'].includes(action)) throw new Error('tail.action은 KEEP 또는 UPDATE여야 합니다.');
+        if (parsed.decision === 'WAIT_FOR_SLOT') {
+            if (action !== 'KEEP' || parsed.tail.title !== '' || parsed.tail.summary !== '' || parsed.newCards.length) {
+                throw new Error('WAIT_FOR_SLOT은 변경 내용을 함께 반환할 수 없습니다.');
+            }
+            return { waiting:true, tailAction:'KEEP', tailCard:null, newCards:[] };
+        }
+        if (parsed.decision !== 'APPLY') throw new Error('decision은 APPLY 또는 WAIT_FOR_SLOT이어야 합니다.');
+        var tailCard = null;
+        if (action === 'UPDATE') {
+            if (!plan.openTail) throw new Error('OPEN TAIL이 없는데 UPDATE를 요청했습니다.');
+            tailCard = validateAutoCardData({ title:parsed.tail.title, summary:parsed.tail.summary }, 'OPEN TAIL');
+            var openTailId = String(getSummaryId(plan.openTail) || '');
+            if (hashText(tailCard.title + '\n' + tailCard.summary) === String(plan.slotFingerprints[openTailId] || '')) {
+                tailCard = null;
+                action = 'KEEP';
+            }
+        } else if (parsed.tail.title !== '' || parsed.tail.summary !== '') {
+            throw new Error('tail.action KEEP일 때 title과 summary는 빈 문자열이어야 합니다.');
+        }
+        if (parsed.newCards.length > plan.freshSlots.length) {
+            return { waiting:true, tailAction:'KEEP', tailCard:null, newCards:[] };
+        }
+        var newCards = parsed.newCards.map(function(card, index) { return validateAutoCardData(card, '새 ' + (index + 1) + '번'); });
+        if (!tailCard && !newCards.length) throw new Error('APPLY 결과에 실제 UPDATE 또는 새 카드가 없습니다.');
+        var signatures = new Set();
+        (tailCard ? [tailCard] : []).concat(newCards).forEach(function(card) {
+            var signature = card.title.toLowerCase() + '\n' + card.summary.replace(/\s+/g, ' ').toLowerCase();
+            if (signatures.has(signature)) throw new Error('중복된 자동 누적 카드가 있습니다: ' + card.title);
+            signatures.add(signature);
+        });
+        return { waiting:false, tailAction:action, tailCard:tailCard, newCards:newCards };
+    }
+
+    function validateAutoGeneratedCards(rawText, slotLimit, expectedCount) {
+        var cleaned = String(rawText || '').replace(/\r\n?/g, '\n').trim();
+        if (!cleaned || cleaned.indexOf('```') !== -1) throw new Error('AI가 자동 저장 형식 외의 텍스트를 반환했습니다.');
+        var blocks = cleaned.split(/\n{2,}/);
+        var cards = blocks.map(function(block) {
+            var match = block.match(/^\[([^\]\n]+)\]\n([^\n]+)$/);
+            if (!match) throw new Error('자동 저장 출력은 [제목] 다음 한 줄 본문 형식이어야 합니다.');
+            return { title:match[1].trim(), summary:match[2].trim() };
+        });
+        if (!cards.length) throw new Error('AI 요약 카드가 없습니다.');
+        if (cards.length > slotLimit) throw new Error('AI가 슬롯 한도 ' + slotLimit + '개를 초과했습니다.');
+        if (expectedCount != null && cards.length !== expectedCount) throw new Error('AI가 정확히 ' + expectedCount + '개 대신 ' + cards.length + '개를 반환했습니다.');
+        var seenTitles = new Set();
+        var seenCards = new Set();
+        cards.forEach(function(card) {
+            if (!card.title || !card.summary) throw new Error('빈 제목 또는 본문이 있습니다.');
+            if (card.title.length > GENERATED_TITLE_MAX) throw new Error('AI 제목이 ' + GENERATED_TITLE_MAX + '자를 초과했습니다: ' + card.title);
+            if (card.summary.length > GENERATED_SUMMARY_MAX) throw new Error('AI 본문이 ' + GENERATED_SUMMARY_MAX + '자를 초과했습니다: ' + card.title);
+            if (card.summary.charAt(0) === '[') throw new Error('AI 본문은 [ 문자로 시작할 수 없습니다: ' + card.title);
+            var titleSignature = card.title.toLowerCase();
+            var signature = card.title.toLowerCase() + '\n' + card.summary.replace(/\s+/g, ' ').toLowerCase();
+            if (seenTitles.has(titleSignature) || seenCards.has(signature)) throw new Error('중복된 AI 카드가 있습니다: ' + card.title);
+            seenTitles.add(titleSignature);
+            seenCards.add(signature);
+        });
+        return cards;
+    }
+
+    function canAutoMutateSummary(item, settings) {
+        return isNativeSummary(item) || (!settings.protectUserAdded && isUserAddedSummary(item));
+    }
+
+    function laterTurnKey(turns, currentKey, candidateKey) {
+        if (!currentKey) return candidateKey || '';
+        if (!candidateKey) return currentKey;
+        var currentIndex = findTurnIndex(turns, currentKey);
+        var candidateIndex = findTurnIndex(turns, candidateKey);
+        if (currentIndex < 0 || candidateIndex < 0) return currentKey;
+        return candidateIndex > currentIndex ? candidateKey : currentKey;
+    }
+
+    function createAutoApplyCommit(state, turns, batchTurns, manual, compactionOnly, metadata) {
+        var previousProcessedKey = String(state.lastProcessedTurnKey || '');
+        var commit = {
+            lastScheduleTurnKey:String(state.lastScheduleTurnKey || ''),
+            lastProcessedTurnKey:String(state.lastProcessedTurnKey || ''),
+            pendingCutoffTurnKey:String(state.pendingCutoffTurnKey || ''),
+            observedNewTurns:Number(state.observedNewTurns) || 0,
+            openTailId:String(state.openTailId || ''),
+            midSegmentIds:(state.midSegmentIds || []).map(String).filter(Boolean),
+            processedSinceMidMerge:Math.max(0, Number(state.processedSinceMidMerge) || 0),
+            forceFullCompact:!!state.forceFullCompact,
+            fullBeforeRoutine:!!state.fullBeforeRoutine
+        };
+        if (!compactionOnly && batchTurns.length) {
+            commit.lastProcessedTurnKey = laterTurnKey(turns, commit.lastProcessedTurnKey, batchTurns[batchTurns.length - 1].key);
+            if (commit.lastProcessedTurnKey === commit.pendingCutoffTurnKey) commit.pendingCutoffTurnKey = '';
+        }
+        if (manual) {
+            var manualKey = batchTurns[batchTurns.length - 1].key;
+            var previousScheduleKey = commit.lastScheduleTurnKey;
+            commit.lastScheduleTurnKey = laterTurnKey(turns, commit.lastScheduleTurnKey, manualKey);
+            commit.lastProcessedTurnKey = laterTurnKey(turns, commit.lastProcessedTurnKey, manualKey);
+            var pendingIndex = findTurnIndex(turns, commit.pendingCutoffTurnKey);
+            var processedIndex = findTurnIndex(turns, commit.lastProcessedTurnKey);
+            if (pendingIndex >= 0 && processedIndex >= pendingIndex) commit.pendingCutoffTurnKey = '';
+            if (commit.lastScheduleTurnKey !== previousScheduleKey) commit.observedNewTurns = 0;
+        }
+        if (!compactionOnly && commit.lastProcessedTurnKey !== previousProcessedKey) {
+            var previousIndex = findTurnIndex(turns, previousProcessedKey);
+            var nextIndex = findTurnIndex(turns, commit.lastProcessedTurnKey);
+            var processedDelta = previousIndex >= 0 && nextIndex >= previousIndex ? nextIndex - previousIndex : batchTurns.length;
+            commit.processedSinceMidMerge += Math.max(0, processedDelta);
+        }
+        Object.keys(metadata || {}).forEach(function(key) { commit[key] = metadata[key]; });
+        return commit;
+    }
+
+    function createPendingAutoApply(plan, cards, commit) {
+        var patches = cards.map(function(card, index) {
+            var slot = plan.rewriteSlots[index];
+            var id = String(getSummaryId(slot) || '');
+            return {
+                id:id,
+                beforeHash:String(plan.slotFingerprints[id] || ''),
+                afterHash:hashText(card.title + '\n' + card.summary),
+                title:card.title,
+                summary:card.summary
+            };
+        });
+        var deletes = plan.rewriteSlots.slice(cards.length).map(function(slot) {
+            var id = String(getSummaryId(slot) || '');
+            return { id:id, beforeHash:String(plan.slotFingerprints[id] || '') };
+        });
+        return {
+            version:1,
+            operationMode:String(plan.mode || 'legacy'),
+            phase:'patch',
+            patches:patches,
+            deletes:deletes,
+            allowedDeleteIds:Array.isArray(plan.allowedDeleteIds) ? plan.allowedDeleteIds.map(String) : null,
+            patchIndex:0,
+            deleteIndex:0,
+            mutationStarted:false,
+            recoveryIds:(plan.recoveryIds || []).slice(),
+            commit:commit,
+            createdAt:Date.now()
+        };
+    }
+
+    function getRoutineCommitMetadata(state, plan, result) {
+        var liveIds = new Set((plan.currentManagedIds || []).map(String));
+        var segmentIds = Array.from(new Set((state.midSegmentIds || []).map(String).filter(function(id) { return liveIds.has(id); })));
+        var currentTailId = plan.openTail ? String(getSummaryId(plan.openTail) || '') : '';
+        if (currentTailId && !segmentIds.includes(currentTailId)) segmentIds.push(currentTailId);
+        var newIds = plan.freshSlots.slice(0, result.newCards.length).map(function(item) { return String(getSummaryId(item) || ''); }).filter(Boolean);
+        newIds.forEach(function(id) { if (!segmentIds.includes(id)) segmentIds.push(id); });
+        return {
+            openTailId:newIds.length ? newIds[newIds.length - 1] : currentTailId,
+            midSegmentIds:segmentIds
+        };
+    }
+
+    function createPendingAutoAppend(plan, result, commit) {
+        var patches = [];
+        if (result.tailAction === 'UPDATE') {
+            var tailId = String(getSummaryId(plan.openTail) || '');
+            patches.push({
+                id:tailId,
+                beforeHash:String(plan.slotFingerprints[tailId] || ''),
+                afterHash:hashText(result.tailCard.title + '\n' + result.tailCard.summary),
+                title:result.tailCard.title,
+                summary:result.tailCard.summary
+            });
+        }
+        result.newCards.forEach(function(card, index) {
+            var slot = plan.freshSlots[index];
+            var id = String(getSummaryId(slot) || '');
+            patches.push({
+                id:id,
+                beforeHash:String(plan.slotFingerprints[id] || ''),
+                afterHash:hashText(card.title + '\n' + card.summary),
+                title:card.title,
+                summary:card.summary
+            });
+        });
+        var deletes = (commit.pendingCutoffTurnKey ? [] : plan.freshSlots.slice(result.newCards.length)).map(function(slot) {
+            var id = String(getSummaryId(slot) || '');
+            return { id:id, beforeHash:String(plan.slotFingerprints[id] || '') };
+        });
+        return {
+            version:1,
+            operationMode:'routine',
+            phase:'patch',
+            patches:patches,
+            deletes:deletes,
+            allowedDeleteIds:plan.freshSlots.map(function(item) { return String(getSummaryId(item) || ''); }),
+            patchIndex:0,
+            deleteIndex:0,
+            mutationStarted:false,
+            recoveryIds:(plan.recoveryIds || []).slice(),
+            commit:commit,
+            createdAt:Date.now()
+        };
+    }
+
+    function validatePendingAutoApply(pending) {
+        if (!pending || pending.version !== 1 || !Array.isArray(pending.patches) || !Array.isArray(pending.deletes) || !pending.commit) {
+            throw new Error('미완료 저장 상태가 손상되었습니다. 자동으로 변경하지 않습니다.');
+        }
+        if (pending.patches.length < 1 || !['patch', 'delete', 'verify'].includes(pending.phase)) {
+            throw new Error('미완료 저장 단계가 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+        }
+        if (!Number.isInteger(pending.patchIndex) || pending.patchIndex < 0 || pending.patchIndex > pending.patches.length ||
+            !Number.isInteger(pending.deleteIndex) || pending.deleteIndex < 0 || pending.deleteIndex > pending.deletes.length) {
+            throw new Error('미완료 저장 위치가 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+        }
+        if (typeof pending.commit.lastScheduleTurnKey !== 'string' || typeof pending.commit.lastProcessedTurnKey !== 'string' ||
+            typeof pending.commit.pendingCutoffTurnKey !== 'string' || !Number.isFinite(Number(pending.commit.observedNewTurns))) {
+            throw new Error('미완료 저장 기준점이 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+        }
+        if (pending.operationMode != null && !['legacy', 'routine', 'mid', 'full'].includes(String(pending.operationMode))) {
+            throw new Error('미완료 저장 모드가 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+        }
+        if (pending.allowedDeleteIds != null) {
+            if (!Array.isArray(pending.allowedDeleteIds)) throw new Error('미완료 삭제 허용목록이 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+            var allowedDeleteIds = new Set(pending.allowedDeleteIds.map(String));
+            if (pending.deletes.some(function(entry) { return !entry || !allowedDeleteIds.has(String(entry.id)); })) {
+                throw new Error('허용되지 않은 카드가 DELETE 계획에 포함되어 자동으로 변경하지 않습니다.');
+            }
+        }
+        if (pending.commit.openTailId != null && typeof pending.commit.openTailId !== 'string') throw new Error('미완료 꼬리 카드 상태가 올바르지 않습니다.');
+        if (pending.commit.midSegmentIds != null && !Array.isArray(pending.commit.midSegmentIds)) throw new Error('미완료 중간 병합 상태가 올바르지 않습니다.');
+        if (pending.commit.processedSinceMidMerge != null && !Number.isFinite(Number(pending.commit.processedSinceMidMerge))) throw new Error('미완료 중간 병합 턴수가 올바르지 않습니다.');
+        if (pending.commit.forceFullCompact != null && typeof pending.commit.forceFullCompact !== 'boolean') throw new Error('미완료 전체 압축 상태가 올바르지 않습니다.');
+        if (pending.commit.fullBeforeRoutine != null && typeof pending.commit.fullBeforeRoutine !== 'boolean') throw new Error('미완료 전체 압축 순서 상태가 올바르지 않습니다.');
+        var ids = new Set();
+        pending.patches.forEach(function(entry) {
+            if (!entry || !entry.id || !entry.beforeHash || !entry.afterHash || !entry.title || !entry.summary ||
+                entry.afterHash !== hashText(String(entry.title).trim() + '\n' + String(entry.summary).trim()) ||
+                String(entry.title).trim().length > GENERATED_TITLE_MAX || String(entry.summary).trim().length > GENERATED_SUMMARY_MAX || ids.has(String(entry.id))) {
+                throw new Error('미완료 PATCH 계획이 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+            }
+            if (/\r|\n/.test(String(entry.title)) || /\r|\n/.test(String(entry.summary))) {
+                throw new Error('미완료 PATCH 내용에 허용되지 않은 줄바꿈이 있습니다. 자동으로 변경하지 않습니다.');
+            }
+            ids.add(String(entry.id));
+        });
+        pending.deletes.forEach(function(entry) {
+            if (!entry || !entry.id || !entry.beforeHash || ids.has(String(entry.id))) {
+                throw new Error('미완료 DELETE 계획이 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+            }
+            ids.add(String(entry.id));
+        });
+        if (!Array.isArray(pending.recoveryIds)) pending.recoveryIds = [];
+        if (typeof pending.mutationStarted !== 'boolean') pending.mutationStarted = pending.patchIndex > 0 || pending.deleteIndex > 0 || pending.phase !== 'patch';
+        return pending;
+    }
+
+    function assertPendingDeletePreflight(pending, byId, settings) {
+        pending.patches.forEach(function(entry) {
+            var item = byId.get(String(entry.id));
+            if (!item || summaryFingerprint(item) !== entry.afterHash) {
+                throw new Error('DELETE 전 PATCH 전체 검증에 실패했습니다: ' + entry.id);
+            }
+        });
+        for (var index = pending.deleteIndex; index < pending.deletes.length; index++) {
+            var entry = pending.deletes[index];
+            var item = byId.get(String(entry.id));
+            if (!item) continue;
+            if (summaryFingerprint(item) !== entry.beforeHash) throw new Error('DELETE 대상이 외부에서 변경되어 중단했습니다: ' + entry.id);
+            if (!canAutoMutateSummary(item, settings)) throw new Error('보호된 카드가 DELETE 대상에 포함되어 중단했습니다.');
+        }
+    }
+
+    async function resumePendingAutoApply(chatId, state, settings) {
+        var pending = validatePendingAutoApply(state.pendingApply);
+        if (!renewAutoMemoryLock(chatId)) throw new Error('자동 저장 잠금을 잃어 변경을 중단했습니다.');
+        var summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+        var byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
+
+        while (pending.patchIndex < pending.patches.length) {
+            var patch = pending.patches[pending.patchIndex];
+            var current = byId.get(String(patch.id));
+            if (!current) throw new Error('PATCH 대상 슬롯이 사라져 저장을 중단했습니다: ' + patch.id);
+            var currentHash = summaryFingerprint(current);
+            if (currentHash !== patch.afterHash) {
+                if (currentHash !== patch.beforeHash) throw new Error('PATCH 대상이 외부에서 변경되어 중단했습니다: ' + patch.id);
+                if (!canAutoMutateSummary(current, settings)) throw new Error('보호된 카드가 PATCH 대상에 포함되어 중단했습니다.');
+                if (!renewAutoMemoryLock(chatId)) throw new Error('PATCH 직전 자동 저장 잠금을 잃어 중단했습니다.');
+                pending.mutationStarted = true;
+                saveAutoMemoryState(chatId, state);
+                await updateExistingSummary(current, patch.title, patch.summary, { silent:true, strict:true, chatId:chatId });
+                summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+                byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
+                current = byId.get(String(patch.id));
+                if (!current || summaryFingerprint(current) !== patch.afterHash) throw new Error('PATCH 결과 검증에 실패했습니다. DELETE는 시작하지 않았습니다.');
+            }
+            state.managedHashes[patch.id] = patch.afterHash;
+            state.managedCards[patch.id] = makeManagedCardSnapshot(current);
+            if (isNativeSummary(current)) state.nativeHashes[patch.id] = patch.afterHash;
+            pending.patchIndex++;
+            saveAutoMemoryState(chatId, state);
+        }
+
+        summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+        byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
+        assertPendingDeletePreflight(pending, byId, settings);
+        if (pending.phase === 'patch') {
+            pending.phase = 'delete';
+            saveAutoMemoryState(chatId, state);
+        }
+
+        while (pending.deleteIndex < pending.deletes.length) {
+            summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+            byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
+            assertPendingDeletePreflight(pending, byId, settings);
+            var deletion = pending.deletes[pending.deleteIndex];
+            var deleteTarget = byId.get(String(deletion.id));
+            if (deleteTarget) {
+                if (summaryFingerprint(deleteTarget) !== deletion.beforeHash) throw new Error('DELETE 대상이 외부에서 변경되어 중단했습니다: ' + deletion.id);
+                if (!canAutoMutateSummary(deleteTarget, settings)) throw new Error('보호된 카드가 DELETE 대상에 포함되어 중단했습니다.');
+                if (!renewAutoMemoryLock(chatId)) throw new Error('DELETE 직전 자동 저장 잠금을 잃어 중단했습니다.');
+                pending.mutationStarted = true;
+                saveAutoMemoryState(chatId, state);
+                await deleteExistingSummary(deleteTarget, { silent:true, strict:true, chatId:chatId });
+                summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+                byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
+                if (byId.has(String(deletion.id))) throw new Error('DELETE 결과 검증에 실패했습니다: ' + deletion.id);
+            }
+            delete state.nativeHashes[deletion.id];
+            delete state.managedHashes[deletion.id];
+            delete state.managedCards[deletion.id];
+            pending.deleteIndex++;
+            saveAutoMemoryState(chatId, state);
+        }
+
+        if (pending.phase === 'delete') {
+            pending.phase = 'verify';
+            saveAutoMemoryState(chatId, state);
+        }
+
+        summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+        byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
+        pending.patches.forEach(function(entry) {
+            var item = byId.get(String(entry.id));
+            if (!item || summaryFingerprint(item) !== entry.afterHash) throw new Error('최종 PATCH 검증에 실패했습니다: ' + entry.id);
+            state.managedHashes[entry.id] = entry.afterHash;
+            state.managedCards[entry.id] = makeManagedCardSnapshot(item);
+            if (isNativeSummary(item)) state.nativeHashes[entry.id] = entry.afterHash;
+        });
+        pending.deletes.forEach(function(entry) {
+            if (byId.has(String(entry.id))) throw new Error('최종 DELETE 검증에 실패했습니다: ' + entry.id);
+        });
+
+        var handledIds = new Set(pending.patches.concat(pending.deletes).map(function(entry) { return String(entry.id); }));
+        var patchedIdSet = new Set(pending.patches.map(function(entry) { return String(entry.id); }));
+        state.pendingNativeIds = state.pendingNativeIds.filter(function(id) { return !handledIds.has(String(id)); });
+        pending.recoveryIds.forEach(function(id) {
+            if (patchedIdSet.has(String(id))) return;
+            delete state.managedHashes[id];
+            delete state.managedCards[id];
+        });
+        ['lastScheduleTurnKey', 'lastProcessedTurnKey', 'pendingCutoffTurnKey', 'observedNewTurns', 'openTailId', 'midSegmentIds', 'processedSinceMidMerge', 'forceFullCompact', 'fullBeforeRoutine'].forEach(function(key) {
+            if (Object.prototype.hasOwnProperty.call(pending.commit, key)) state[key] = pending.commit[key];
+        });
+        state.midSegmentIds = Array.from(new Set((state.midSegmentIds || []).map(String).filter(function(id) { return byId.has(id); })));
+        if (state.openTailId && !byId.has(String(state.openTailId))) state.openTailId = state.midSegmentIds.length ? state.midSegmentIds[state.midSegmentIds.length - 1] : '';
+        var shouldNotifyUpdate = !!pending.mutationStarted;
+        var result = { patched:pending.patches.length, deleted:pending.deletes.length, deleteFailures:0, total:summaries.length };
+        state.pendingApply = null;
+        saveAutoMemoryState(chatId, state);
+        if (shouldNotifyUpdate) showToast('요약 메모리가 업데이트되었습니다 · 수정 ' + result.patched + '개 · 삭제 ' + result.deleted + '개');
+        return result;
+    }
+
+    async function discardPendingAutoApply(chatId, state) {
+        var pending = state.pendingApply;
+        if (!pending) return false;
+        pending = validatePendingAutoApply(pending);
+        if (pending.mutationStarted) {
+            if (!renewAutoMemoryLock(chatId)) throw new Error('미완료 계획 정리 잠금을 잃어 중단했습니다.');
+            var summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+            var byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
+            pending.patches.forEach(function(entry) {
+                var item = byId.get(String(entry.id));
+                if (!item) throw new Error('변경이 시작된 PATCH 슬롯이 사라져 계획을 폐기할 수 없습니다: ' + entry.id);
+                var fingerprint = summaryFingerprint(item);
+                if (fingerprint !== entry.beforeHash && fingerprint !== entry.afterHash) throw new Error('외부 변경된 PATCH 슬롯 때문에 계획을 폐기할 수 없습니다: ' + entry.id);
+                if (fingerprint === entry.afterHash) {
+                    state.managedHashes[entry.id] = entry.afterHash;
+                    state.managedCards[entry.id] = makeManagedCardSnapshot(item);
+                    if (isNativeSummary(item)) state.nativeHashes[entry.id] = entry.afterHash;
+                }
+            });
+            pending.deletes.forEach(function(entry) {
+                var item = byId.get(String(entry.id));
+                if (item && summaryFingerprint(item) !== entry.beforeHash) throw new Error('외부 변경된 DELETE 슬롯 때문에 계획을 폐기할 수 없습니다: ' + entry.id);
+                if (!item) {
+                    delete state.nativeHashes[entry.id];
+                    delete state.managedHashes[entry.id];
+                    delete state.managedCards[entry.id];
+                }
+            });
+        }
+        state.pendingApply = null;
+        clearAutoMemoryFailure(state);
+        state.lastStatus = '미완료 계획 폐기 · 같은 로그 재계획 대기';
+        saveAutoMemoryState(chatId, state);
+        return true;
+    }
+
+    function initializeAutoMemoryState(turns, summaries, state) {
+        var latestKey = turns.length ? turns[turns.length - 1].key : '';
+        state.initialized = true;
+        state.lastScheduleTurnKey = latestKey;
+        state.lastProcessedTurnKey = latestKey;
+        state.pendingCutoffTurnKey = '';
+        state.nativeHashes = {};
+        state.managedHashes = {};
+        state.managedCards = {};
+        state.pendingNativeIds = [];
+        state.pendingDeleteIds = [];
+        state.pendingApply = null;
+        state.waitingForSlot = false;
+        state.openTailId = '';
+        state.midSegmentIds = [];
+        state.processedSinceMidMerge = 0;
+        state.forceFullCompact = false;
+        state.fullBeforeRoutine = false;
+        state.needsV2InventoryMigration = false;
+        syncAutoNativeState(summaries, state, true);
+        adoptStableNativeSummaries(summaries, state, true);
+        state.observedNewTurns = 0;
+        state.lastStatus = '현재 대화를 기준점으로 저장함';
+        state.lastError = '';
+    }
+
+    function prepareScheduledAutoBatch(turns, state, settings) {
+        if (!turns.length) return { turns:[], waiting:true };
+        if (state.pendingCutoffTurnKey) {
+            var pendingIndex = findTurnIndex(turns, state.pendingCutoffTurnKey);
+            var processedIndex = findTurnIndex(turns, state.lastProcessedTurnKey);
+            if (pendingIndex < 0 || (state.lastProcessedTurnKey && processedIndex < 0)) throw new Error('대화 기준점이 조회 범위 밖으로 밀려났습니다. 기준점을 초기화해주세요.');
+            var pendingTurns = turns.slice(processedIndex + 1, pendingIndex + 1);
+            if (!pendingTurns.length) {
+                state.pendingCutoffTurnKey = '';
+                return { turns:[], waiting:true };
+            }
+            return { turns:pendingTurns.slice(0, settings.readTurns), waiting:false };
+        }
+
+        var scheduleIndex = findTurnIndex(turns, state.lastScheduleTurnKey);
+        if (state.lastScheduleTurnKey && scheduleIndex < 0) throw new Error('실행 기준점이 조회 범위 밖으로 밀려났습니다. 기준점을 초기화해주세요.');
+        var newTurns = turns.slice(scheduleIndex + 1);
+        state.observedNewTurns = newTurns.length;
+        if (newTurns.length < settings.intervalTurns) return { turns:[], waiting:true };
+
+        state.lastScheduleTurnKey = turns[turns.length - 1].key;
+        state.observedNewTurns = 0;
+        var cutoffIndex = turns.length - 1 - settings.excludeRecentTurns;
+        var processedAt = findTurnIndex(turns, state.lastProcessedTurnKey);
+        if (cutoffIndex <= processedAt) return { turns:[], waiting:true };
+        state.pendingCutoffTurnKey = turns[cutoffIndex].key;
+        var eligible = turns.slice(processedAt + 1, cutoffIndex + 1);
+        return { turns:eligible.slice(0, settings.readTurns), waiting:!eligible.length };
+    }
+
+    function prepareManualAutoBatch(turns, settings, state) {
+        var cutoffIndex = turns.length - 1 - settings.excludeRecentTurns;
+        if (cutoffIndex < 0) return [];
+        if (state && state.lastProcessedTurnKey) {
+            var processedIndex = findTurnIndex(turns, state.lastProcessedTurnKey);
+            if (processedIndex < 0) throw new Error('처리 기준점이 조회 범위 밖으로 밀려났습니다. 기준점을 초기화해주세요.');
+            var pendingEnd = state.pendingCutoffTurnKey ? findTurnIndex(turns, state.pendingCutoffTurnKey) : cutoffIndex;
+            if (state.pendingCutoffTurnKey && pendingEnd < 0) throw new Error('보류 기준점이 조회 범위 밖으로 밀려났습니다. 기준점을 초기화해주세요.');
+            pendingEnd = Math.min(cutoffIndex, pendingEnd);
+            if (pendingEnd > processedIndex) return turns.slice(processedIndex + 1, Math.min(pendingEnd + 1, processedIndex + 1 + settings.readTurns));
+        }
+        var startIndex = Math.max(0, cutoffIndex - settings.readTurns + 1);
+        return turns.slice(startIndex, cutoffIndex + 1);
+    }
+
+    function getAutoMemoryStatusText(chatId) {
+        var settings = getAutoMemorySettings();
+        if (!settings.enabled) return '꺼짐 · 수동 요약은 기존대로 사용 가능';
+        if (!chatId) return '채팅방에서만 작동함';
+        var state = getAutoMemoryState(chatId);
+        if (state.autoPaused) return '3회 오류 누적 · 자동 일시정지 · 원인: ' + (state.lastError || '알 수 없음') + ' (설정 저장 또는 지금 실행으로 재개)';
+        if (state.retryAfter > Date.now()) {
+            var retryMinutes = Math.max(1, Math.ceil((state.retryAfter - Date.now()) / 60000));
+            return retryMinutes + '분 후 자동 재시도 · ' + (state.lastError || state.lastStatus || '오류');
+        }
+        if (state.pendingApply) return '미완료 슬롯 저장 재개 대기 · ' + (state.lastError || state.lastStatus || '검증 중');
+        if (state.lastError) return '오류 · ' + state.lastError;
+        if (!state.initialized) return '첫 확인 대기 중';
+        if (state.pendingCutoffTurnKey) return '요약 대기/처리 중 · ' + (state.lastStatus || '슬롯 확인 중');
+        var remaining = Math.max(0, settings.intervalTurns - (state.observedNewTurns || 0));
+        var suffix = state.lastSuccessAt ? ' · 마지막 ' + new Date(state.lastSuccessAt).toLocaleString() : '';
+        return '다음 실행까지 ' + remaining + '대화턴' + suffix;
+    }
+
+    function clearAutoMemoryFailure(state) {
+        state.consecutiveFailures = 0;
+        state.retryAfter = 0;
+        state.autoPaused = false;
+        state.lastError = '';
+    }
+
+    function recordAutoMemoryFailure(state) {
+        state.consecutiveFailures = Math.min(3, (Number(state.consecutiveFailures) || 0) + 1);
+        if (state.consecutiveFailures >= 3) {
+            state.retryAfter = 0;
+            state.autoPaused = true;
+            return;
+        }
+        state.retryAfter = Date.now() + AUTO_MEMORY_RETRY_DELAYS[state.consecutiveFailures - 1];
+    }
+
+    function isMidMergeDue(state, settings) {
+        return settings.midMergeTurns > 0 && (Number(state.processedSinceMidMerge) || 0) >= settings.midMergeTurns;
+    }
+
+    function scheduleAutoMemoryMaintenanceIfNeeded(state, settings, totalCards) {
+        if (!settings.enabled) return;
+        if (state.forceFullCompact || Number(totalCards) > settings.maxCards || (!state.pendingCutoffTurnKey && isMidMergeDue(state, settings))) scheduleAutoMemoryResponseCheck(300);
+    }
+
+    async function runAutoMemory(manual) {
+        var settings = getAutoMemorySettings();
+        var chatId = getChatId();
+        var lockHeartbeat = 0;
+        if (!chatId || (!manual && !settings.enabled) || AUTO_MEMORY_BUSY) return false;
+        if (!acquireAutoMemoryLock(chatId)) {
+            if (!manual && settings.enabled) scheduleAutoMemoryResponseCheck(15000);
+            return false;
+        }
+        AUTO_MEMORY_BUSY = true;
+        lockHeartbeat = setInterval(function() { renewAutoMemoryLock(chatId); }, AUTO_MEMORY_LOCK_HEARTBEAT_MS);
+        var state = getAutoMemoryState(chatId);
+
+        try {
+            state.lastError = '';
+            if (state.pendingApply) {
+                state.waitingForSlot = false;
+                state.lastStatus = '미완료 슬롯 저장 재개 중';
+                saveAutoMemoryState(chatId, state);
+                var resumed = await resumePendingAutoApply(chatId, state, settings);
+                clearAutoMemoryFailure(state);
+                state.lastSuccessAt = Date.now();
+                state.waitingForSlot = !!state.pendingCutoffTurnKey;
+                state.lastStatus = '수정 ' + resumed.patched + '개 · 삭제 ' + resumed.deleted + '개 · 현재 ' + resumed.total + '개';
+                saveAutoMemoryState(chatId, state);
+                scheduleAutoMemoryMaintenanceIfNeeded(state, settings, resumed.total);
+                if (state.pendingCutoffTurnKey) scheduleAutoMemoryResponseCheck(300);
+                return true;
+            }
+
+            state.lastStatus = '대화와 슬롯 확인 중';
+            saveAutoMemoryState(chatId, state);
+            var messageLimit = Math.min(500, Math.max(100, (settings.intervalTurns + settings.readTurns + settings.excludeRecentTurns + 10) * 4));
+            var messageOptions = { silent:true, strict:true, chatId:chatId };
+            if (state.initialized) {
+                messageLimit = 0;
+                messageOptions.stopKeys = [state.lastScheduleTurnKey, state.lastProcessedTurnKey].filter(Boolean);
+            }
+            var messages = await fetchRecentMessageObjects(messageLimit, messageOptions);
+            var turns = buildCompletedDialogueTurns(messages || []);
+            if (!turns.length) {
+                if (manual) throw new Error('완료된 사용자+AI 대화턴을 찾지 못했습니다.');
+                state.waitingForSlot = false;
+                state.lastStatus = '완료된 AI 답변 대기 중';
+                clearAutoMemoryFailure(state);
+                saveAutoMemoryState(chatId, state);
+                return true;
+            }
+            var summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+
+            var initializedNow = false;
+            if (!state.initialized) {
+                var initialOverLimit = summaries.length > settings.maxCards;
+                initializeAutoMemoryState(turns, summaries, state);
+                initializedNow = true;
+                clearAutoMemoryFailure(state);
+                saveAutoMemoryState(chatId, state);
+                if (!manual && !initialOverLimit) return true;
+            } else {
+                syncAutoNativeState(summaries, state, false);
+                if (state.needsV2InventoryMigration && !state.pendingApply) adoptStableNativeSummaries(summaries, state, false);
+            }
+            if (summaries.length > settings.maxCards) state.forceFullCompact = true;
+            saveAutoMemoryState(chatId, state);
+
+            if (state.pendingDeleteIds.length) state.pendingDeleteIds = [];
+
+            var batchTurns = [];
+            var mode = '';
+            var plan = null;
+            if (manual && state.forceFullCompact) {
+                plan = selectFullCompactPlan(summaries, state, settings);
+                mode = 'full';
+            } else if (manual) {
+                batchTurns = prepareManualAutoBatch(turns, settings, state);
+                if (!batchTurns.length) throw new Error('설정한 최근 제외 범위 뒤에 요약할 대화가 없습니다.');
+                plan = selectRoutineAppendPlan(summaries, state, settings);
+                if (plan) mode = 'routine';
+            } else {
+                var scheduled = prepareScheduledAutoBatch(turns, state, settings);
+                batchTurns = scheduled.turns;
+                if (state.forceFullCompact && state.fullBeforeRoutine) {
+                    plan = selectFullCompactPlan(summaries, state, settings);
+                    mode = 'full';
+                    batchTurns = [];
+                } else if (batchTurns.length) {
+                    plan = selectRoutineAppendPlan(summaries, state, settings);
+                    if (plan) mode = 'routine';
+                    else if (state.forceFullCompact) {
+                        plan = selectFullCompactPlan(summaries, state, settings);
+                        mode = 'full';
+                        batchTurns = [];
+                    }
+                } else if (state.forceFullCompact) {
+                    plan = selectFullCompactPlan(summaries, state, settings);
+                    mode = 'full';
+                } else if (isMidMergeDue(state, settings)) {
+                    plan = selectMidMergePlan(summaries, state, settings);
+                    mode = 'mid';
+                    if (!plan) {
+                        state.processedSinceMidMerge = 0;
+                        state.midSegmentIds = state.openTailId ? [String(state.openTailId)] : [];
+                        state.waitingForSlot = false;
+                        state.lastStatus = '중간 병합 대상이 2개 미만이라 비용 없이 건너뜀';
+                        clearAutoMemoryFailure(state);
+                        saveAutoMemoryState(chatId, state);
+                        return true;
+                    }
+                } else {
+                    state.waitingForSlot = false;
+                    state.lastStatus = state.pendingCutoffTurnKey ? '요약할 슬롯 대기 중' : '다음 실행 대기 중';
+                    clearAutoMemoryFailure(state);
+                    saveAutoMemoryState(chatId, state);
+                    return true;
+                }
+            }
+
+            if (!plan) {
+                if (mode === 'full' || state.forceFullCompact) throw new Error('보호된 카드만 남아 최대 슬롯 수를 맞출 수 없습니다.');
+                state.waitingForSlot = !manual || settings.enabled;
+                state.lastStatus = batchTurns.length + '대화턴 보류 · 수정할 마지막 카드 또는 새 assistant 슬롯 대기 중';
+                clearAutoMemoryFailure(state);
+                saveAutoMemoryState(chatId, state);
+                if (manual) showToast('새 assistant 장기기억 슬롯이 없어 로그를 보류했습니다.');
+                return true;
+            }
+
+            state.waitingForSlot = false;
+            var runtime = getSavedAutoAiRuntime();
+            var isCompaction = mode === 'mid' || mode === 'full';
+            var inputPrompt = mode === 'routine' ? buildAutoAppendInput(plan, batchTurns) : buildAutoCompactionInput(plan);
+            state.lastStatus = mode === 'routine'
+                ? batchTurns.length + '대화턴 누적 정리 중'
+                : (mode === 'mid' ? '최근 구간 중간 병합 중' : '최대 슬롯 초과 · 전체 2차 압축 중');
+            saveAutoMemoryState(chatId, state);
+            if (!renewAutoMemoryLock(chatId)) throw new Error('AI 호출 직전 자동 저장 잠금을 잃어 중단했습니다.');
+            var rawResult = await callAI(
+                runtime.provider,
+                runtime.config,
+                formatDialogueTurns(batchTurns),
+                batchTurns.length,
+                runtime.style,
+                isCompaction,
+                {
+                    inputPrompt:inputPrompt,
+                    promptMode:isCompaction ? 'compress' : 'auto',
+                    jsonMode:mode === 'routine',
+                    systemPrompt:getActivePromptText(isCompaction ? 'compress' : 'auto') + '\n\n' +
+                        (mode === 'routine'
+                            ? AUTO_MEMORY_APPEND_SYSTEM_REQUIREMENTS
+                            : AUTO_MEMORY_SYSTEM_REQUIREMENTS + '\n\n' + AUTO_MEMORY_COMPACTION_REQUIREMENT)
+                }
+            );
+            if (!renewAutoMemoryLock(chatId)) throw new Error('AI 호출 뒤 자동 저장 잠금을 잃어 저장을 중단했습니다.');
+            recordAutoMemoryUsage(state, LAST_AI_USAGE);
+            saveAutoMemoryState(chatId, state);
+            var commit;
+            if (mode === 'routine') {
+                var appendResult = validateAutoAppendResult(rawResult, plan);
+                if (appendResult.waiting) {
+                    state.waitingForSlot = true;
+                    if (state.forceFullCompact) state.fullBeforeRoutine = true;
+                    state.lastStatus = '독립 사건을 담을 새 슬롯 부족 · 현재 로그 전체 보류';
+                    clearAutoMemoryFailure(state);
+                    saveAutoMemoryState(chatId, state);
+                    scheduleAutoMemoryMaintenanceIfNeeded(state, settings, summaries.length);
+                    return true;
+                }
+                var routineMetadata = getRoutineCommitMetadata(state, plan, appendResult);
+                if (state.forceFullCompact) routineMetadata.fullBeforeRoutine = true;
+                commit = createAutoApplyCommit(state, turns, batchTurns, manual, false, routineMetadata);
+                state.pendingApply = createPendingAutoAppend(plan, appendResult, commit);
+            } else {
+                var cards = validateAutoGeneratedCards(rawResult, plan.slotLimit, plan.expectedCount);
+                var survivingIds = plan.rewriteSlots.slice(0, cards.length).map(function(item) { return String(getSummaryId(item) || ''); });
+                var nextOpenTailId = mode === 'mid' && plan.openTailId ? plan.openTailId : (survivingIds.length ? survivingIds[survivingIds.length - 1] : '');
+                commit = createAutoApplyCommit(state, turns, [], false, true, {
+                    openTailId:nextOpenTailId,
+                    midSegmentIds:nextOpenTailId ? [nextOpenTailId] : [],
+                    processedSinceMidMerge:0,
+                    forceFullCompact:mode === 'full' ? false : !!state.forceFullCompact,
+                    fullBeforeRoutine:mode === 'full' ? false : !!state.fullBeforeRoutine
+                });
+                state.pendingApply = createPendingAutoApply(plan, cards, commit);
+            }
+            state.lastStatus = '저장 계획 기록 완료 · 슬롯 치환 및 검증 중';
+            saveAutoMemoryState(chatId, state);
+            var result = await resumePendingAutoApply(chatId, state, settings);
+
+            state.lastSuccessAt = Date.now();
+            state.waitingForSlot = !!state.pendingCutoffTurnKey;
+            clearAutoMemoryFailure(state);
+            state.lastStatus = (mode === 'routine' ? '누적 정리' : mode === 'mid' ? '중간 병합' : '전체 압축') +
+                ' 완료 · 수정 ' + result.patched + '개 · 삭제 ' + result.deleted + '개 · 현재 ' + result.total + '개';
+            saveAutoMemoryState(chatId, state);
+            scheduleAutoMemoryMaintenanceIfNeeded(state, settings, result.total);
+            if (state.pendingCutoffTurnKey) scheduleAutoMemoryResponseCheck(300);
+            return true;
+        } catch (err) {
+            state.lastError = String(err && err.message || err || '알 수 없는 오류').slice(0, 500);
+            if (!manual || settings.enabled) recordAutoMemoryFailure(state);
+            state.lastStatus = state.autoPaused ? '오류 3회 누적으로 자동 일시정지' : '안전하게 중단됨';
+            try { saveAutoMemoryState(chatId, state); } catch (saveError) { console.error('[AutoMemory] state save failed:', saveError); }
+            console.error('[AutoMemory]', err);
+            if (manual) await showUiAlert(state.lastError, '자동 장기기억 정리 오류', { tone:'danger' });
+            return false;
+        } finally {
+            if (lockHeartbeat) clearInterval(lockHeartbeat);
+            AUTO_MEMORY_BUSY = false;
+            releaseAutoMemoryLock(chatId);
+            notifyAutoMemoryStatus(chatId);
+            refreshAutoMemorySchedule(true);
+        }
+    }
+
+    function clearAutoMemoryResponseTimer() {
+        if (!AUTO_MEMORY_RESPONSE_TIMER) return;
+        clearTimeout(AUTO_MEMORY_RESPONSE_TIMER);
+        AUTO_MEMORY_RESPONSE_TIMER = 0;
+    }
+
+    function clearAutoMemorySlotTimer(resetBackoff) {
+        if (AUTO_MEMORY_SLOT_TIMER) clearTimeout(AUTO_MEMORY_SLOT_TIMER);
+        AUTO_MEMORY_SLOT_TIMER = 0;
+        if (resetBackoff) AUTO_MEMORY_SLOT_RECHECK_INDEX = 0;
+    }
+
+    function clearAutoMemoryRetryTimer() {
+        if (!AUTO_MEMORY_RETRY_TIMER) return;
+        clearTimeout(AUTO_MEMORY_RETRY_TIMER);
+        AUTO_MEMORY_RETRY_TIMER = 0;
+    }
+
+    function cancelAutoMemorySchedule() {
+        clearAutoMemoryResponseTimer();
+        clearAutoMemorySlotTimer(true);
+        clearAutoMemoryRetryTimer();
+    }
+
+    function scheduleAutoMemoryResponseCheck(delay) {
+        if (!getAutoMemorySettings().enabled || !getChatId()) return;
+        clearAutoMemoryResponseTimer();
+        AUTO_MEMORY_RESPONSE_TIMER = setTimeout(function() {
+            AUTO_MEMORY_RESPONSE_TIMER = 0;
+            pollAutoMemory();
+        }, Math.max(0, Number(delay) || 0));
+    }
+
+    function hasAutoMemorySlotChange(summaries, state) {
+        return (summaries || []).filter(isNativeSummary).some(function(item) {
+            var id = String(getSummaryId(item) || '');
+            if (!id) return false;
+            var fingerprint = summaryFingerprint(item);
+            return !Object.prototype.hasOwnProperty.call(state.nativeHashes, id) || state.nativeHashes[id] !== fingerprint;
+        });
+    }
+
+    async function probeWaitingAutoMemorySlot() {
+        AUTO_MEMORY_SLOT_TIMER = 0;
+        var settings = getAutoMemorySettings();
+        var chatId = getChatId();
+        if (!settings.enabled || !chatId) {
+            clearAutoMemorySlotTimer(true);
+            return;
+        }
+        var state = getAutoMemoryState(chatId);
+        if (!state.waitingForSlot || !state.pendingCutoffTurnKey || state.autoPaused) {
+            clearAutoMemorySlotTimer(true);
+            return;
+        }
+        if (state.retryAfter > Date.now()) {
+            refreshAutoMemorySchedule(false);
+            return;
+        }
+        if (AUTO_MEMORY_BUSY) {
+            AUTO_MEMORY_SLOT_TIMER = setTimeout(probeWaitingAutoMemorySlot, 1500);
+            return;
+        }
+        try {
+            var summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
+            if (hasAutoMemorySlotChange(summaries, state)) {
+                AUTO_MEMORY_SLOT_RECHECK_INDEX = 0;
+                await runAutoMemory(false);
+                refreshAutoMemorySchedule(false);
+                return;
+            }
+        } catch (err) {
+            console.warn('[AutoMemory] slot probe failed:', err);
+        }
+        scheduleWaitingAutoMemorySlotCheck(false);
+    }
+
+    function scheduleWaitingAutoMemorySlotCheck(resetBackoff) {
+        if (resetBackoff) clearAutoMemorySlotTimer(true);
+        if (AUTO_MEMORY_SLOT_TIMER) return;
+        var settings = getAutoMemorySettings();
+        var chatId = getChatId();
+        if (!settings.enabled || !chatId) return;
+        var state = getAutoMemoryState(chatId);
+        if (!state.waitingForSlot || !state.pendingCutoffTurnKey || state.autoPaused || state.retryAfter > Date.now()) return;
+        var delayIndex = Math.min(AUTO_MEMORY_SLOT_RECHECK_INDEX, AUTO_MEMORY_SLOT_RECHECK_DELAYS.length - 1);
+        var delay = AUTO_MEMORY_SLOT_RECHECK_DELAYS[delayIndex];
+        AUTO_MEMORY_SLOT_RECHECK_INDEX = Math.min(delayIndex + 1, AUTO_MEMORY_SLOT_RECHECK_DELAYS.length - 1);
+        AUTO_MEMORY_SLOT_TIMER = setTimeout(probeWaitingAutoMemorySlot, delay);
+    }
+
+    function scheduleAutoMemoryRetry(retryAfter) {
+        clearAutoMemoryRetryTimer();
+        var delay = Math.max(50, Number(retryAfter) - Date.now() + 50);
+        AUTO_MEMORY_RETRY_TIMER = setTimeout(function() {
+            AUTO_MEMORY_RETRY_TIMER = 0;
+            pollAutoMemory();
+        }, delay);
+    }
+
+    function refreshAutoMemorySchedule(resetSlotBackoff) {
+        var settings = getAutoMemorySettings();
+        var chatId = getChatId();
+        if (!settings.enabled || !chatId) {
+            cancelAutoMemorySchedule();
+            return;
+        }
+        var state = getAutoMemoryState(chatId);
+        if (state.autoPaused) {
+            clearAutoMemorySlotTimer(true);
+            clearAutoMemoryRetryTimer();
+            return;
+        }
+        if (state.retryAfter > Date.now()) {
+            clearAutoMemorySlotTimer(false);
+            scheduleAutoMemoryRetry(state.retryAfter);
+            return;
+        }
+        clearAutoMemoryRetryTimer();
+        if (state.pendingApply) {
+            clearAutoMemorySlotTimer(true);
+            scheduleAutoMemoryResponseCheck(250);
+            return;
+        }
+        if (state.waitingForSlot && state.pendingCutoffTurnKey) {
+            scheduleWaitingAutoMemorySlotCheck(!!resetSlotBackoff);
+            return;
+        }
+        clearAutoMemorySlotTimer(true);
+    }
+
+    function isAutoMemoryResponseNode(node, includeDescendants) {
+        var element = node && node.nodeType === 1 ? node : node && node.parentElement;
+        if (!element || !element.closest) return false;
+        if (element.closest('.crack-ext-ai-overlay,#crack-ext-toast,.crack-ext-header-ai-btn')) return false;
+        var selector = '.wrtn-markdown,[data-role="assistant"],[data-message-author-role="assistant"],[data-testid*="assistant"]';
+        if (element.matches && element.matches(selector)) return true;
+        if (element.closest(selector)) return true;
+        return !!(includeDescendants && element.querySelector && element.querySelector(selector));
+    }
+
+    function mutationTouchesAutoMemoryResponse(mutation) {
+        if (!mutation || (mutation.type !== 'childList' && mutation.type !== 'characterData')) return false;
+        if (isAutoMemoryResponseNode(mutation.target, false)) return true;
+        for (var i = 0; i < mutation.addedNodes.length; i++) {
+            if (isAutoMemoryResponseNode(mutation.addedNodes[i], true)) return true;
+        }
+        return false;
+    }
+
+    function wakeAutoMemoryOnReturn() {
+        if (document.visibilityState === 'hidden') return;
+        var now = Date.now();
+        if (now - AUTO_MEMORY_LAST_WAKE_AT < AUTO_MEMORY_WAKE_THROTTLE_MS) return;
+        AUTO_MEMORY_LAST_WAKE_AT = now;
+        scheduleAutoMemoryResponseCheck(300);
+    }
+
+    function pollAutoMemory() {
+        var chatId = getChatId();
+        if (!getAutoMemorySettings().enabled || !chatId) {
+            cancelAutoMemorySchedule();
+            return false;
+        }
+        if (AUTO_MEMORY_BUSY) {
+            scheduleAutoMemoryResponseCheck(3000);
+            return false;
+        }
+        var state = getAutoMemoryState(chatId);
+        if (state.autoPaused) {
+            refreshAutoMemorySchedule(false);
+            return false;
+        }
+        if (state.retryAfter > Date.now()) {
+            refreshAutoMemorySchedule(false);
+            return false;
+        }
+        return runAutoMemory(false);
     }
 
     function showMemoryEditorModal(parentOverlay) {
@@ -3012,6 +4740,7 @@ if (mainModel && mainProvider) {
         var savedTurns = localStorage.getItem('crack_ext_turn_count') || '15';
         var savedStyle = localStorage.getItem('crack_ext_summary_style') || 'concise';
         var currentKey = getSavedApiKey(savedProvider);
+        var autoSettings = getAutoMemorySettings();
 
         var isPromptMode = false;
         var tempResultContent = '';
@@ -3070,6 +4799,27 @@ if (mainModel && mainProvider) {
             '</div></div>';
         html += '</div>';
 
+        html += '<details class="crack-ext-auto-panel" id="ce-auto-panel"' + (autoSettings.enabled ? ' open' : '') + '>';
+        html += '<summary><span>자동 장기기억 정리</span><span class="crack-ext-auto-summary-status" id="ce-auto-summary-status">' + escapeHtml(getAutoMemoryStatusText(getChatId())) + '</span></summary>';
+        html += '<div class="crack-ext-auto-body">';
+        html += '<div class="crack-ext-auto-toggle-row">';
+        html += '<label class="crack-ext-auto-check"><input type="checkbox" id="ce-auto-enabled"' + (autoSettings.enabled ? ' checked' : '') + '><span>자동 정리 사용</span></label>';
+        html += '<label class="crack-ext-auto-check"><input type="checkbox" id="ce-auto-protect"' + (autoSettings.protectUserAdded ? ' checked' : '') + '><span>[추가] 카드 보호</span></label>';
+        html += '</div>';
+        html += '<div class="crack-ext-auto-grid">';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-interval">실행 주기 (대화턴)</label><input type="number" id="ce-auto-interval" min="1" max="50" value="' + autoSettings.intervalTurns + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-read">한 번에 읽을 대화턴</label><input type="number" id="ce-auto-read" min="1" max="50" value="' + autoSettings.readTurns + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-exclude">최근 제외 (대화턴)</label><input type="number" id="ce-auto-exclude" min="0" max="10" value="' + autoSettings.excludeRecentTurns + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-context">참고 장기기억</label><input type="number" id="ce-auto-context" min="3" max="5" value="' + autoSettings.contextCards + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-mid-merge">중간 병합 주기 (처리턴)</label><input type="number" id="ce-auto-mid-merge" min="0" max="500" value="' + autoSettings.midMergeTurns + '" title="0이면 중간 병합을 끕니다."></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-max">최대 슬롯</label><input type="number" id="ce-auto-max" min="5" max="20" value="' + autoSettings.maxCards + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-target">전체 압축 목표 슬롯</label><input type="number" id="ce-auto-target" min="1" max="' + autoSettings.maxCards + '" value="' + autoSettings.compactTarget + '"></div>';
+        html += '</div>';
+        html += '<div class="crack-ext-auto-note">대화턴 1개 = 사용자 1회 + AI 답변 1회입니다. 평상시에는 오래된 카드를 유지하고, 마지막 카드의 직접 후속만 수정하며, 독립 사건은 새 assistant 슬롯에 누적합니다. 새 슬롯이 없으면 로그를 버리거나 옛 카드에 밀어 넣지 않고 보류합니다. “중간 병합 주기”마다 최근 누적 구간만 2차 압축 지침에 따라 필요한 만큼 병합하며, 0이면 끕니다. 전체 카드가 최대 슬롯을 초과한 순간에만 압축 목표 슬롯까지 전체 정리합니다. 아래 “자동 정리” 프롬프트는 평상시 누적 판단에, “2차 압축” 프롬프트는 중간·전체 압축에 사용됩니다. 최근 제외는 마지막 경계를 다음 실행으로 보류합니다. [추가] 카드 보호를 켜면 해당 카드는 절대 수정·삭제하지 않습니다. assistant 슬롯만 치환·삭제하며 새 [추가] 카드는 만들지 않습니다.</div>';
+        html += '<div class="crack-ext-auto-actions"><button class="crack-ext-ai-mbtn" id="ce-auto-save-settings">설정 저장</button><button class="crack-ext-ai-mbtn" id="ce-auto-run">지금 실행</button><button class="crack-ext-ai-mbtn" id="ce-auto-reset">기준점 초기화</button><span class="crack-ext-auto-status" id="ce-auto-status"></span></div>';
+        html += '<div class="crack-ext-auto-usage" id="ce-auto-usage"></div>';
+        html += '</div></details>';
+
         html += '<div class="fg">';
         html += '<div class="crack-ext-prompt-header" id="ce-ai-prompt-header">';
         html += '<div class="crack-ext-prompt-heading"><div class="crack-ext-result-title-row"><span class="crack-ext-prompt-heading-main" id="ce-ai-result-label">생성 결과</span><span class="crack-ext-reasoning-usage" id="ce-ai-reasoning-usage"></span></div><span class="crack-ext-prompt-heading-sub">생성 형식은 선택한 프롬프트만 따름 · 저장 한도 초과 항목은 직접 수정</span></div>';
@@ -3082,7 +4832,7 @@ if (mainModel && mainProvider) {
         html += '</div>';
         html += '<div class="crack-ext-prompt-selects">';
         html += '<span id="ce-ai-selection-counter" style="color:#a777e3;font-size:11px;align-self:center;"></span>';
-        html += '<div class="crack-ext-prompt-field"><span class="crack-ext-prompt-field-label">프롬프트 종류</span><select id="ce-ai-prompt-mode"><option value="main"' + (promptMode === 'main' ? ' selected' : '') + '>1차 요약</option><option value="compress"' + (promptMode === 'compress' ? ' selected' : '') + '>2차 압축</option></select></div>';
+        html += '<div class="crack-ext-prompt-field"><span class="crack-ext-prompt-field-label">프롬프트 종류</span><select id="ce-ai-prompt-mode"><option value="main"' + (promptMode === 'main' ? ' selected' : '') + '>1차 요약</option><option value="auto"' + (promptMode === 'auto' ? ' selected' : '') + '>자동 정리</option><option value="compress"' + (promptMode === 'compress' ? ' selected' : '') + '>2차 압축</option></select></div>';
         html += '<div class="crack-ext-prompt-field"><span class="crack-ext-prompt-field-label">슬롯</span><select id="ce-ai-prompt-slot"></select></div>';
         html += '<button id="ce-ai-toggle-prompt" class="crack-ext-ai-mbtn crack-ext-prompt-tool-btn">프롬프트 편집</button>';
         html += '</div></div>';
@@ -3146,6 +4896,22 @@ if (mainModel && mainProvider) {
         var vertexWrap = overlay.querySelector('#ce-ai-vertex-wrap');
         var topSettings = overlay.querySelector('#ce-ai-top-settings');
         var secondarySettings = overlay.querySelector('#ce-ai-secondary-settings');
+        var autoPanel = overlay.querySelector('#ce-auto-panel');
+        var autoEnabled = overlay.querySelector('#ce-auto-enabled');
+        var autoProtect = overlay.querySelector('#ce-auto-protect');
+        var autoInterval = overlay.querySelector('#ce-auto-interval');
+        var autoRead = overlay.querySelector('#ce-auto-read');
+        var autoExclude = overlay.querySelector('#ce-auto-exclude');
+        var autoContext = overlay.querySelector('#ce-auto-context');
+        var autoMidMerge = overlay.querySelector('#ce-auto-mid-merge');
+        var autoMax = overlay.querySelector('#ce-auto-max');
+        var autoTarget = overlay.querySelector('#ce-auto-target');
+        var autoStatus = overlay.querySelector('#ce-auto-status');
+        var autoSummaryStatus = overlay.querySelector('#ce-auto-summary-status');
+        var autoUsage = overlay.querySelector('#ce-auto-usage');
+        var btnAutoSaveSettings = overlay.querySelector('#ce-auto-save-settings');
+        var btnAutoRun = overlay.querySelector('#ce-auto-run');
+        var btnAutoReset = overlay.querySelector('#ce-auto-reset');
         // 턴 수 안내 팝업
 if (btnTurnInfo && turnInfoPopover) {
     btnTurnInfo.addEventListener('click', function(e) {
@@ -3298,6 +5064,7 @@ if (btnTurnInfo && turnInfoPopover) {
             btnPromptBack.style.display = enabled ? 'inline-block' : 'none';
             topSettings.style.display = enabled ? 'none' : '';
             secondarySettings.style.display = enabled ? 'none' : '';
+            autoPanel.style.display = enabled ? 'none' : '';
             vertexWrap.style.display = enabled ? 'none' : (selProvider.value === 'vertex' ? 'grid' : 'none');
             mainActions.style.display = enabled ? 'none' : 'flex';
             mainFooter.classList.toggle('is-prompt-editing', enabled);
@@ -3394,6 +5161,124 @@ if (btnTurnInfo && turnInfoPopover) {
                 totalTokens:null
             }, false);
         });
+        selStyle.addEventListener('change', function() {
+            localStorage.setItem('crack_ext_summary_style', selStyle.value);
+        });
+
+        function readAutoSettingsFromUi() {
+            return getNormalizedAutoMemorySettings({
+                enabled:autoEnabled.checked,
+                intervalTurns:autoInterval.value,
+                readTurns:autoRead.value,
+                excludeRecentTurns:autoExclude.value,
+                contextCards:autoContext.value,
+                midMergeTurns:autoMidMerge.value,
+                maxCards:autoMax.value,
+                compactTarget:autoTarget.value,
+                protectUserAdded:autoProtect.checked
+            });
+        }
+
+        function writeAutoSettingsToUi(settings) {
+            autoEnabled.checked = settings.enabled;
+            autoProtect.checked = settings.protectUserAdded;
+            autoInterval.value = settings.intervalTurns;
+            autoRead.value = settings.readTurns;
+            autoExclude.value = settings.excludeRecentTurns;
+            autoContext.value = settings.contextCards;
+            autoMidMerge.value = settings.midMergeTurns;
+            autoMax.value = settings.maxCards;
+            autoTarget.max = settings.maxCards;
+            autoTarget.value = settings.compactTarget;
+        }
+
+        function renderAutoMemoryStatus() {
+            var chatId = getChatId();
+            var state = getAutoMemoryState(chatId);
+            var text = getAutoMemoryStatusText(chatId);
+            autoStatus.textContent = text;
+            autoSummaryStatus.textContent = text;
+            autoUsage.textContent = formatAutoMemoryUsage(state);
+            autoUsage.title = getAutoMemoryUsageTooltip(state);
+            btnAutoRun.disabled = AUTO_MEMORY_BUSY || !chatId;
+            btnAutoSaveSettings.disabled = AUTO_MEMORY_BUSY;
+            btnAutoReset.disabled = AUTO_MEMORY_BUSY || !chatId;
+        }
+
+        function persistAutoSettingsFromUi() {
+            saveVisibleCredentials(activeCredentialProvider);
+            localStorage.setItem('crack_ext_api_provider', selProvider.value);
+            localStorage.setItem('crack_ext_' + selProvider.value + '_model', selModel.value);
+            localStorage.setItem('crack_ext_summary_style', selStyle.value);
+            localStorage.setItem(getReasoningStorageKey(selProvider.value, selModel.value), selReasoning.value || 'auto');
+            var saved = saveAutoMemorySettings(readAutoSettingsFromUi());
+            var chatId = getChatId();
+            if (chatId) {
+                var state = getAutoMemoryState(chatId);
+                clearAutoMemoryFailure(state);
+                saveAutoMemoryState(chatId, state);
+            }
+            writeAutoSettingsToUi(saved);
+            renderAutoMemoryStatus();
+            return saved;
+        }
+
+        btnAutoSaveSettings.onclick = function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            persistAutoSettingsFromUi();
+            showToast('자동 장기기억 설정을 저장했습니다.');
+            if (autoEnabled.checked) setTimeout(pollAutoMemory, 100);
+        };
+
+        btnAutoRun.onclick = async function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            persistAutoSettingsFromUi();
+            renderAutoMemoryStatus();
+            await runAutoMemory(true);
+            renderAutoMemoryStatus();
+        };
+
+        btnAutoReset.onclick = async function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var resetChatId = getChatId();
+            var resetState = getAutoMemoryState(resetChatId);
+            if (resetState.pendingApply) {
+                if (!(await showUiConfirm('미완료 저장 계획을 폐기하고 같은 대화 구간을 다시 계획할까요?\n이미 성공한 PATCH 내용과 삭제된 슬롯은 되돌리지 않으며, 서버에는 추가 변경을 하지 않습니다.', '미완료 계획 폐기', { confirmText:'폐기 후 재계획', tone:'warning', preventBackdropClose:true }))) return;
+                if (!acquireAutoMemoryLock(resetChatId)) {
+                    await showUiAlert('다른 탭에서 자동 저장을 처리 중입니다. 잠시 후 다시 시도해주세요.', '자동 저장 처리 중', { tone:'warning' });
+                    return;
+                }
+                try {
+                    await discardPendingAutoApply(resetChatId, resetState);
+                } catch (err) {
+                    await showUiAlert(String(err && err.message || err), '미완료 계획 폐기 실패', { tone:'danger' });
+                    return;
+                } finally {
+                    releaseAutoMemoryLock(resetChatId);
+                }
+                renderAutoMemoryStatus();
+                showToast('미완료 계획을 폐기했습니다. 같은 로그를 다시 정리합니다.');
+                if (autoEnabled.checked) setTimeout(pollAutoMemory, 100);
+                return;
+            }
+            if (!(await showUiConfirm('현재 채팅의 자동 요약 기준점, 관리 이력, 자동 AI 비용 기록을 초기화할까요?\n저장된 장기기억 카드는 삭제하지 않습니다.', '자동 요약 기준점 초기화', { confirmText:'초기화', tone:'warning' }))) return;
+            resetAutoMemoryState(resetChatId);
+            renderAutoMemoryStatus();
+            if (autoEnabled.checked) setTimeout(pollAutoMemory, 100);
+        };
+
+        var autoStatusHandler = function(event) {
+            if (!overlay.isConnected) {
+                window.removeEventListener('crack-ext-auto-memory-status', autoStatusHandler);
+                return;
+            }
+            if (!event.detail || !event.detail.chatId || event.detail.chatId === getChatId()) renderAutoMemoryStatus();
+        };
+        window.addEventListener('crack-ext-auto-memory-status', autoStatusHandler);
+        renderAutoMemoryStatus();
 
         selPromptMode.onchange = async function() {
             var previous = promptMode;
@@ -3819,11 +5704,13 @@ if (btnTurnInfo && turnInfoPopover) {
     var topHeaderContainerCache = null;
     var topHeaderContainerRoute = '';
     var topHeaderAiBtn = null;
-    var topHeaderFallbackTimer = 0;
-    var TOP_HEADER_FALLBACK_DELAY = 700;
+
+    function getTopHeaderBandStart() {
+        return window.innerWidth < 760 ? 32 : 40;
+    }
 
     function getTopHeaderBandLimit() {
-        return Math.min(180, Math.max(96, window.innerHeight * 0.2));
+        return Math.min(150, Math.max(112, window.innerHeight * 0.16));
     }
 
     function isExcludedHeaderArea(el) {
@@ -3831,13 +5718,20 @@ if (btnTurnInfo && turnInfoPopover) {
         return !!el.closest('.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"],form');
     }
 
+    function isRetainableTopHeaderContainer(el) {
+        if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
+        return !el.querySelector('textarea,[contenteditable="true"]');
+    }
+
     function isUsableTopHeaderContainer(el) {
         if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
         if (el.querySelector('textarea,[contenteditable="true"]')) return false;
 
         var rect = el.getBoundingClientRect();
-        if (rect.width < 48 || rect.height < 16 || rect.height > 120) return false;
-        if (rect.bottom < 0 || rect.top > getTopHeaderBandLimit()) return false;
+        var viewportWidth = Math.max(window.innerWidth || 0, 1);
+        if (rect.width < 48 || rect.height < 16 || rect.height > 80) return false;
+        if (rect.top < getTopHeaderBandStart() || rect.top > getTopHeaderBandLimit()) return false;
+        if (viewportWidth >= 760 && (rect.width > Math.min(680, viewportWidth * 0.65) || rect.right < viewportWidth * 0.5)) return false;
 
         var style = window.getComputedStyle(el);
         return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
@@ -3845,9 +5739,10 @@ if (btnTurnInfo && turnInfoPopover) {
 
     function isVisibleTopHeaderControl(el) {
         if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
+        if (el.classList && el.classList.contains('crack-ext-header-ai-btn')) return false;
         var rect = el.getBoundingClientRect();
         if (rect.width < 8 || rect.height < 8 || rect.bottom < 0) return false;
-        if (rect.top > getTopHeaderBandLimit() || rect.bottom > getTopHeaderBandLimit() + 32) return false;
+        if (rect.top < getTopHeaderBandStart() - 8 || rect.top > getTopHeaderBandLimit() || rect.bottom > getTopHeaderBandLimit() + 28) return false;
         var style = window.getComputedStyle(el);
         return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
     }
@@ -3865,11 +5760,13 @@ if (btnTurnInfo && turnInfoPopover) {
         if (!isUsableTopHeaderContainer(el)) return -Infinity;
         var rect = el.getBoundingClientRect();
         var controls = countVisibleTopHeaderControls(el);
+        if (!controls) return -Infinity;
         var viewportWidth = Math.max(window.innerWidth || 0, 1);
-        var score = controls * 30 - rect.width * 0.35 - rect.height * 0.15;
-        score += Math.max(0, Math.min(40, (rect.left / viewportWidth) * 40));
-        if (rect.right >= viewportWidth * 0.72) score += 55;
-        if (topHeaderAiBtn && topHeaderAiBtn.parentElement === el) score += 500;
+        var score = controls * 24 - Math.abs(rect.top - 76) * 1.4 - Math.max(0, rect.width - 360) * 0.08;
+        score += Math.max(0, Math.min(36, (rect.left / viewportWidth) * 36));
+        if (rect.right >= viewportWidth * 0.72) score += 48;
+        var modelLike = el.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
+        if (modelLike && isVisibleTopHeaderControl(modelLike)) score += 90;
         return score;
     }
 
@@ -3888,22 +5785,49 @@ if (btnTurnInfo && turnInfoPopover) {
         return best;
     }
 
-    function findGeometricTopActionGroup() {
-        // 채팅 화면에서만 클래스명에 의존하지 않는 최종 탐색을 사용한다.
+    function findLegacyTopActionGroup() {
         if (!getChatId()) return null;
+        var isStory = /\/stories\/[a-f0-9-]+\/episodes\/[a-f0-9-]+/i.test(location.pathname) || /\/u\/[a-f0-9-]+\/c\/[a-f0-9-]+/i.test(location.pathname);
+        var classNames = isStory ? ['css-1c5w7et'] : ['css-l8r172'];
+        var best = null;
+        var bestScore = -Infinity;
+        classNames.forEach(function(className) {
+            var panels = document.getElementsByClassName(className);
+            for (var i = 0; i < panels.length; i++) {
+                var candidates = [panels[i]].concat(Array.prototype.slice.call(panels[i].querySelectorAll('div')));
+                for (var j = 0; j < candidates.length; j++) {
+                    var score = scoreTopHeaderCandidate(candidates[j]);
+                    if (score > bestScore) {
+                        best = candidates[j];
+                        bestScore = score;
+                    }
+                }
+            }
+        });
+        return best;
+    }
+
+    function findGeometricTopActionGroup() {
+        // 제목·모델 선택 줄과 같은 세로 대역만 검사한다. 페이지 전역 최상단 바는 제외한다.
+        // 모바일은 전역 상단바와 제목 줄의 기하 구분이 불안정하므로 정확 선택자 실패 시 floating을 쓴다.
+        if (!getChatId() || window.innerWidth < 760) return null;
 
         var controls = document.querySelectorAll('button,[role="button"]');
         var candidates = [];
         var seen = new Set();
+        var viewportWidth = Math.max(window.innerWidth || 0, 1);
+        var minLeft = viewportWidth >= 760 ? Math.max(260, Math.floor(viewportWidth * 0.28)) : 0;
         for (var i = 0; i < controls.length; i++) {
             if (!isVisibleTopHeaderControl(controls[i])) continue;
+            var controlRect = controls[i].getBoundingClientRect();
+            if (controlRect.left < minLeft || controlRect.right > viewportWidth + 8) continue;
             var parent = controls[i].parentElement;
             var depth = 0;
             while (parent && parent !== document.body && depth < 6) {
                 if (!seen.has(parent) && isUsableTopHeaderContainer(parent)) {
                     var display = window.getComputedStyle(parent).display;
                     var controlCount = countVisibleTopHeaderControls(parent);
-                    if ((display === 'flex' || display === 'inline-flex' || display === 'grid') && controlCount >= 2 && controlCount <= 10) {
+                    if ((display === 'flex' || display === 'inline-flex' || display === 'grid') && controlCount >= 1 && controlCount <= 10) {
                         seen.add(parent);
                         candidates.push(parent);
                     }
@@ -3927,19 +5851,26 @@ if (btnTurnInfo && turnInfoPopover) {
 
     function findTopHeaderContainer() {
         var currentRoute = getChatId() || location.pathname || 'current';
-        if (topHeaderContainerRoute === currentRoute && isUsableTopHeaderContainer(topHeaderContainerCache)) return topHeaderContainerCache;
-        topHeaderContainerCache = null;
+        var retainedHiddenContainer = null;
+        if (topHeaderContainerRoute === currentRoute && isRetainableTopHeaderContainer(topHeaderContainerCache)) {
+            if (isUsableTopHeaderContainer(topHeaderContainerCache)) return topHeaderContainerCache;
+            retainedHiddenContainer = topHeaderContainerCache;
+        } else {
+            topHeaderContainerCache = null;
+        }
         topHeaderContainerRoute = currentRoute;
 
-        // 구체적인 제목창 액션 영역부터 찾고, 현재 Crack 클래스가 바뀐 경우에는
-        // 화면 상단의 우측 버튼 그룹을 기하학적으로 찾는다.
+        var legacy = findLegacyTopActionGroup();
+        if (legacy) {
+            topHeaderContainerCache = legacy;
+            return legacy;
+        }
+
+        // 구체적인 제목창 액션 영역만 찾고, 실패하면 제한된 기하 탐색을 사용한다.
         var selectors = [
             '.absolute.z-\\[5\\] .flex.gap-3.items-center',
-            'header .flex.items-center',
-            'header [role="toolbar"]',
-            '[role="banner"] [role="toolbar"]',
-            '[class*="z-[5]"] [class*="items-center"]',
-            'main + div header'
+            '.absolute.z-\\[5\\] [class*="items-center"]',
+            'main [role="toolbar"]'
         ];
 
         for (var i = 0; i < selectors.length; i++) {
@@ -3955,14 +5886,9 @@ if (btnTurnInfo && turnInfoPopover) {
             topHeaderContainerCache = geometric;
             return geometric;
         }
-
-        var broadSelectors = ['header', '[role="banner"]'];
-        for (var j = 0; j < broadSelectors.length; j++) {
-            var broad = findBestSelectorCandidate(broadSelectors[j]);
-            if (broad) {
-                topHeaderContainerCache = broad;
-                return broad;
-            }
+        if (retainedHiddenContainer) {
+            topHeaderContainerCache = retainedHiddenContainer;
+            return retainedHiddenContainer;
         }
         return null;
     }
@@ -3990,11 +5916,6 @@ if (btnTurnInfo && turnInfoPopover) {
                 if (buttons[i].parentElement === headerContainer) { aiBtn = buttons[i]; break; }
             }
         }
-        if (!aiBtn) {
-            for (var j = 0; j < buttons.length; j++) {
-                if (buttons[j].classList.contains('crack-ext-floating')) { aiBtn = buttons[j]; break; }
-            }
-        }
         if (!aiBtn && buttons.length) aiBtn = buttons[0];
         if (!aiBtn) aiBtn = createTopHeaderBtn();
         topHeaderAiBtn = aiBtn;
@@ -4005,44 +5926,15 @@ if (btnTurnInfo && turnInfoPopover) {
         return aiBtn;
     }
 
-    function cancelTopHeaderFallback() {
-        if (!topHeaderFallbackTimer) return;
-        clearTimeout(topHeaderFallbackTimer);
-        topHeaderFallbackTimer = 0;
-    }
-
-    function placeTopHeaderBtnAsFloatingAfterGrace() {
-        if (topHeaderFallbackTimer) return;
-        topHeaderFallbackTimer = setTimeout(function() {
-            topHeaderFallbackTimer = 0;
-            var headerContainer = findTopHeaderContainer();
-            if (headerContainer) {
-                injectTopHeaderBtn();
-                return;
-            }
-
-            var aiBtn = getOrCreateTopHeaderBtn(null);
-            if (aiBtn.isConnected && !aiBtn.classList.contains('crack-ext-floating') && isUsableTopHeaderContainer(aiBtn.parentElement)) return;
-            if (!aiBtn.classList.contains('crack-ext-floating')) aiBtn.classList.add('crack-ext-floating');
-            if (aiBtn.parentElement !== document.body) document.body.appendChild(aiBtn);
-        }, TOP_HEADER_FALLBACK_DELAY);
-    }
-
     function injectTopHeaderBtn() {
         var headerContainer = findTopHeaderContainer();
         var aiBtn = getOrCreateTopHeaderBtn(headerContainer);
 
         if (headerContainer) {
-            cancelTopHeaderFallback();
-            if (aiBtn.classList.contains('crack-ext-floating')) aiBtn.classList.remove('crack-ext-floating');
             if (aiBtn.parentElement !== headerContainer) headerContainer.prepend(aiBtn);
             return;
         }
-
-        // SPA 전환 중 잠깐 헤더가 사라진 경우에는 즉시 하단으로 내리지 않는다.
-        // 헤더가 실제로 없는 상태가 일정 시간 유지될 때만 floating을 사용한다.
-        if (aiBtn.isConnected && !aiBtn.classList.contains('crack-ext-floating') && isUsableTopHeaderContainer(aiBtn.parentElement)) return;
-        placeTopHeaderBtnAsFloatingAfterGrace();
+        if (aiBtn.isConnected) aiBtn.remove();
     }
 
     function inject() { injectAiStyles(); injectTopHeaderBtn(); }
@@ -4060,16 +5952,14 @@ if (btnTurnInfo && turnInfoPopover) {
             var aiBtn = buttons[0];
             var headerContainer = findTopHeaderContainer();
             if (headerContainer) {
-                return aiBtn.parentElement !== headerContainer || aiBtn.classList.contains('crack-ext-floating');
+                return aiBtn.parentElement !== headerContainer;
             }
-
-            if (aiBtn.classList.contains('crack-ext-floating')) return false;
-            return !isUsableTopHeaderContainer(aiBtn.parentElement);
+            return aiBtn.isConnected;
         }
 
         function scheduleInject(force) {
-            if (!force && !needsInjection()) return;
             if (injectScheduled) return;
+            if (!force && !needsInjection()) return;
             injectScheduled = true;
             requestAnimationFrame(function() {
                 injectScheduled = false;
@@ -4077,23 +5967,42 @@ if (btnTurnInfo && turnInfoPopover) {
             });
         }
 
-        // 버튼 유무뿐 아니라 현재 제목창 안에 있는지까지 검사한다.
-        // floating 버튼이 먼저 생겨도 새 헤더가 렌더되면 같은 노드를 즉시 위로 옮긴다.
-        var obs = new MutationObserver(function() {
-            if (needsInjection()) scheduleInject();
+        // 제목창은 접혀 화면 밖으로 나가도 같은 DOM 부모에 고정한다. 방 변경/DOM 교체 때만 다시 찾는다.
+        // 같은 Observer에서 AI 답변 본문의 변화가 잠잠해진 시점도 감지해 자동 정리를 깨운다.
+        var obs = new MutationObserver(function(mutations) {
+            var currentRoute = getChatId() || location.pathname || 'current';
+            var routeChanged = !!topHeaderContainerRoute && topHeaderContainerRoute !== currentRoute;
+            if (routeChanged) {
+                topHeaderContainerCache = null;
+                if (topHeaderAiBtn && topHeaderAiBtn.isConnected) topHeaderAiBtn.remove();
+            }
+            var shouldRescan = routeChanged || !isRetainableTopHeaderContainer(topHeaderContainerCache) ||
+                !topHeaderAiBtn || !topHeaderAiBtn.isConnected;
+            if (shouldRescan) scheduleInject();
+            for (var i = 0; i < mutations.length; i++) {
+                if (mutationTouchesAutoMemoryResponse(mutations[i])) {
+                    scheduleAutoMemoryResponseCheck(AUTO_MEMORY_RESPONSE_DEBOUNCE_MS);
+                    break;
+                }
+            }
+            if (routeChanged) scheduleAutoMemoryResponseCheck(500);
         });
-        obs.observe(document.body, { childList: true, subtree: true });
+        obs.observe(document.body, { childList:true, characterData:true, attributes:true, attributeFilter:['class', 'style', 'aria-hidden'], subtree:true });
 
         scheduleInject(true);
         window.addEventListener('resize', function() {
-            topHeaderContainerCache = null;
             scheduleInject();
         }, { passive:true });
-        // Observer가 놓치는 클래스 전환이나 예외 상황을 위한 저빈도 안전망.
+        // DOM 클래스 전환을 놓쳐도 캐시는 버리지 않고 같은 제목창을 유지한다.
         setInterval(function() {
-            topHeaderContainerCache = null;
             scheduleInject();
         }, 5000);
+        scheduleAutoMemoryResponseCheck(1500);
+        window.addEventListener('focus', wakeAutoMemoryOnReturn, { passive:true });
+        window.addEventListener('pageshow', wakeAutoMemoryOnReturn, { passive:true });
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'visible') wakeAutoMemoryOnReturn();
+        });
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
