@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.3.0
+// @version      2.3.1
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -40,8 +40,8 @@
     // 제목·본문 제한은 미리보기와 저장 검증에만 사용하며, AI의 출력 형식에는 개입하지 않습니다.
     const GENERATED_TITLE_MAX = 20;
     const GENERATED_SUMMARY_MAX = 300;
-    const AUTO_MEMORY_SETTINGS_KEY = 'crack_ext_auto_memory_settings_v1';
-    const AUTO_MEMORY_SETTINGS_GM_KEY = 'crack_ext_auto_memory_settings_v3';
+    const AUTO_MEMORY_SETTINGS_PREFIX = 'crack_ext_auto_memory_settings_v2:';
+    const AUTO_MEMORY_SETTINGS_GM_PREFIX = 'crack_ext_auto_memory_settings_v4:';
     const AUTO_MEMORY_SETTINGS_AUTOSAVE_MS = 600;
     const AUTO_MEMORY_STATE_PREFIX = 'crack_ext_auto_memory_state_v1:';
     const AUTO_MEMORY_LOCK_PREFIX = 'crack_ext_auto_memory_lock_v1:';
@@ -70,8 +70,8 @@
     let AUTO_MEMORY_SLOT_RECHECK_INDEX = 0;
     let AUTO_MEMORY_LAST_WAKE_AT = 0;
     let AUTO_MEMORY_SETTINGS_LAST_WRITE_AT = 0;
-    let AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED = false;
-    let AUTO_MEMORY_SETTINGS_EDIT_PENDING = false;
+    const AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED_CHATS = new Set();
+    const AUTO_MEMORY_SETTINGS_EDIT_PENDING_CHATS = new Set();
 
     const AUTO_MEMORY_CONTINUITY_REQUIREMENT = `[BATCH CONTINUITY]
 Batch cuts are artificial. Treat trusted memories as authoritative prior state. Preserve unchanged facts. Continue, revise, or merge the same event; fix premature endings and overlap. Split only when the narrative thread truly changes. Return the complete deduplicated replacement set for EDITABLE, RECOVERY, and NEW content only.`;
@@ -428,6 +428,40 @@ This requirement controls coverage only. It must not change or add any output fo
         return null;
     }
 
+    function normalizeAutoMemorySettingsChatId(chatId) {
+        return String(chatId || '').trim();
+    }
+
+    function getAutoMemorySettingsStorageKey(chatId, useGmStorage) {
+        var normalizedChatId = normalizeAutoMemorySettingsChatId(chatId);
+        if (!normalizedChatId) return '';
+        return (useGmStorage ? AUTO_MEMORY_SETTINGS_GM_PREFIX : AUTO_MEMORY_SETTINGS_PREFIX) + normalizedChatId;
+    }
+
+    function isAutoMemorySettingsEditPending(chatId) {
+        var normalizedChatId = normalizeAutoMemorySettingsChatId(chatId);
+        return !!normalizedChatId && AUTO_MEMORY_SETTINGS_EDIT_PENDING_CHATS.has(normalizedChatId);
+    }
+
+    function setAutoMemorySettingsEditPending(chatId, pending) {
+        var normalizedChatId = normalizeAutoMemorySettingsChatId(chatId);
+        if (!normalizedChatId) return;
+        if (pending) AUTO_MEMORY_SETTINGS_EDIT_PENDING_CHATS.add(normalizedChatId);
+        else AUTO_MEMORY_SETTINGS_EDIT_PENDING_CHATS.delete(normalizedChatId);
+    }
+
+    function requestAutoMemorySettingsReplan(chatId) {
+        var normalizedChatId = normalizeAutoMemorySettingsChatId(chatId);
+        if (normalizedChatId) AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED_CHATS.add(normalizedChatId);
+    }
+
+    function consumeAutoMemorySettingsReplan(chatId) {
+        var normalizedChatId = normalizeAutoMemorySettingsChatId(chatId);
+        if (!normalizedChatId || !AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED_CHATS.has(normalizedChatId)) return false;
+        AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED_CHATS.delete(normalizedChatId);
+        return true;
+    }
+
     function getAiResultDraftKey() {
         return getChatId() || location.pathname || 'current';
     }
@@ -478,45 +512,85 @@ This requirement controls coverage only. It must not change or add any output fo
         }
     }
 
-    function readStoredAutoMemorySettings() {
+    function getLegacyAutoMemorySettingsForChat(chatId) {
+        var normalizedChatId = normalizeAutoMemorySettingsChatId(chatId);
+        if (!normalizedChatId) return null;
+        var rawState = null;
+        try { rawState = JSON.parse(localStorage.getItem(AUTO_MEMORY_STATE_PREFIX + normalizedChatId) || 'null'); } catch (e) {}
+        if (!rawState || typeof rawState !== 'object') return null;
+        var signature = String(rawState.settingsSignature || '');
+        if (!signature && rawState.pendingApply) signature = String(rawState.pendingApply.settingsSignature || '');
+        var values = null;
+        try { values = JSON.parse(signature); } catch (e) {}
+        if (!Array.isArray(values) || values.length < 9) return null;
+        return {
+            settingsVersion:4,
+            settingsUpdatedAt:Math.max(Date.now(), Number(rawState.lastSuccessAt) || 0),
+            enabled:!!values[0],
+            intervalTurns:values[1],
+            readTurns:values[2],
+            excludeRecentTurns:values[3],
+            contextCards:values[4],
+            midMergeTurns:values[5],
+            maxCards:values[6],
+            compactTarget:values[7],
+            protectUserAdded:values[8] !== false
+        };
+    }
+
+    function readStoredAutoMemorySettings(chatId) {
+        var localKey = getAutoMemorySettingsStorageKey(chatId, false);
+        var gmKey = getAutoMemorySettingsStorageKey(chatId, true);
+        if (!localKey || !gmKey) return {};
         var gmSettings = null;
         if (typeof GM_getValue === 'function') {
-            try { gmSettings = parseAutoMemorySettingsStorage(GM_getValue(AUTO_MEMORY_SETTINGS_GM_KEY, '')); } catch (e) {}
+            try { gmSettings = parseAutoMemorySettingsStorage(GM_getValue(gmKey, '')); } catch (e) {}
         }
         var localSettings = null;
-        try { localSettings = parseAutoMemorySettingsStorage(localStorage.getItem(AUTO_MEMORY_SETTINGS_KEY)); } catch (e) {}
+        try { localSettings = parseAutoMemorySettingsStorage(localStorage.getItem(localKey)); } catch (e) {}
 
         var gmUpdatedAt = Math.max(0, Number(gmSettings && gmSettings.settingsUpdatedAt) || 0);
         var localUpdatedAt = Math.max(0, Number(localSettings && localSettings.settingsUpdatedAt) || 0);
         var selected = localSettings && (!gmSettings || localUpdatedAt >= gmUpdatedAt) ? localSettings : (gmSettings || localSettings);
-        if (!selected) return {};
+        if (!selected) {
+            selected = getLegacyAutoMemorySettingsForChat(chatId);
+            if (!selected) return {};
+            try { writeStoredAutoMemorySettings(chatId, selected); } catch (e) {}
+            return selected;
+        }
 
         var serialized = JSON.stringify(selected);
         if (selected === localSettings && typeof GM_setValue === 'function') {
-            try { GM_setValue(AUTO_MEMORY_SETTINGS_GM_KEY, serialized); } catch (e) {}
+            var gmSerialized = gmSettings ? JSON.stringify(gmSettings) : '';
+            if (!gmSettings || localUpdatedAt > gmUpdatedAt || serialized !== gmSerialized) {
+                try { GM_setValue(gmKey, serialized); } catch (e) {}
+            }
         } else if (selected === gmSettings) {
             try {
-                if (!localSettings || localUpdatedAt < gmUpdatedAt) localStorage.setItem(AUTO_MEMORY_SETTINGS_KEY, serialized);
+                if (!localSettings || localUpdatedAt < gmUpdatedAt) localStorage.setItem(localKey, serialized);
             } catch (e) {}
         }
         return selected;
     }
 
-    function writeStoredAutoMemorySettings(settings) {
+    function writeStoredAutoMemorySettings(chatId, settings) {
+        var localKey = getAutoMemorySettingsStorageKey(chatId, false);
+        var gmKey = getAutoMemorySettingsStorageKey(chatId, true);
+        if (!localKey || !gmKey) throw new Error('채팅방을 확인할 수 없어 자동 설정을 저장하지 못했습니다.');
         var serialized = JSON.stringify(settings || {});
         var localVerified = false;
         var gmVerified = false;
 
         try {
-            localStorage.setItem(AUTO_MEMORY_SETTINGS_KEY, serialized);
-            localVerified = localStorage.getItem(AUTO_MEMORY_SETTINGS_KEY) === serialized;
+            localStorage.setItem(localKey, serialized);
+            localVerified = localStorage.getItem(localKey) === serialized;
         } catch (e) {}
 
         if (typeof GM_setValue === 'function') {
             try {
-                GM_setValue(AUTO_MEMORY_SETTINGS_GM_KEY, serialized);
+                GM_setValue(gmKey, serialized);
                 if (typeof GM_getValue === 'function') {
-                    gmVerified = JSON.stringify(parseAutoMemorySettingsStorage(GM_getValue(AUTO_MEMORY_SETTINGS_GM_KEY, '')) || {}) === serialized;
+                    gmVerified = JSON.stringify(parseAutoMemorySettingsStorage(GM_getValue(gmKey, '')) || {}) === serialized;
                 } else {
                     gmVerified = true;
                 }
@@ -527,15 +601,15 @@ This requirement controls coverage only. It must not change or add any output fo
         return settings;
     }
 
-    function getAutoMemorySettings() {
-        var saved = readStoredAutoMemorySettings();
+    function getAutoMemorySettings(chatId) {
+        var saved = readStoredAutoMemorySettings(chatId);
         if (!Number.isFinite(Number(saved.settingsVersion)) || Number(saved.settingsVersion) < 2) {
             if (saved.intervalTurns == null || Number(saved.intervalTurns) === 5) saved.intervalTurns = 10;
             if (saved.readTurns == null || Number(saved.readTurns) === 5) saved.readTurns = 10;
             if (saved.midMergeTurns == null) saved.midMergeTurns = 10;
         }
         var settings = Object.assign({}, AUTO_MEMORY_DEFAULTS, saved);
-        settings.settingsVersion = 3;
+        settings.settingsVersion = 4;
         settings.settingsUpdatedAt = Math.max(0, Number(settings.settingsUpdatedAt) || 0);
         settings.enabled = !!settings.enabled;
         settings.intervalTurns = clampInteger(settings.intervalTurns, 1, 50, AUTO_MEMORY_DEFAULTS.intervalTurns);
@@ -549,15 +623,17 @@ This requirement controls coverage only. It must not change or add any output fo
         return settings;
     }
 
-    function saveAutoMemorySettings(settings) {
+    function saveAutoMemorySettings(chatId, settings) {
+        chatId = normalizeAutoMemorySettingsChatId(chatId);
+        if (!chatId) throw new Error('채팅방을 확인할 수 없어 자동 설정을 저장하지 못했습니다.');
         var normalized = Object.assign({}, AUTO_MEMORY_DEFAULTS, settings || {});
         normalized = getNormalizedAutoMemorySettings(normalized);
-        var stored = readStoredAutoMemorySettings();
+        var stored = readStoredAutoMemorySettings(chatId);
         AUTO_MEMORY_SETTINGS_LAST_WRITE_AT = Math.max(Date.now(), AUTO_MEMORY_SETTINGS_LAST_WRITE_AT + 1, (Number(stored.settingsUpdatedAt) || 0) + 1);
         normalized.settingsUpdatedAt = AUTO_MEMORY_SETTINGS_LAST_WRITE_AT;
-        writeStoredAutoMemorySettings(normalized);
-        notifyAutoMemoryStatus(getChatId());
-        setTimeout(function() { refreshAutoMemorySchedule(false); }, 0);
+        writeStoredAutoMemorySettings(chatId, normalized);
+        notifyAutoMemoryStatus(chatId);
+        if (getChatId() === chatId) setTimeout(function() { refreshAutoMemorySchedule(false); }, 0);
         return normalized;
     }
 
@@ -565,7 +641,7 @@ This requirement controls coverage only. It must not change or add any output fo
         var source = settings || {};
         var maxCards = clampInteger(source.maxCards, 5, 20, AUTO_MEMORY_DEFAULTS.maxCards);
         return {
-            settingsVersion:3,
+            settingsVersion:4,
             settingsUpdatedAt:Math.max(0, Number(source.settingsUpdatedAt) || 0),
             enabled:!!source.enabled,
             intervalTurns:clampInteger(source.intervalTurns, 1, 50, AUTO_MEMORY_DEFAULTS.intervalTurns),
@@ -594,17 +670,17 @@ This requirement controls coverage only. It must not change or add any output fo
         ]);
     }
 
-    function isAutoMemorySettingsSignatureCurrent(signature) {
-        return String(signature || '') === getAutoMemorySettingsSignature(getAutoMemorySettings());
+    function isAutoMemorySettingsSignatureCurrent(signature, chatId) {
+        return String(signature || '') === getAutoMemorySettingsSignature(getAutoMemorySettings(chatId));
     }
 
-    function reconcileAutoMemoryStateAfterSettingsChange(previousSettings, nextSettings) {
+    function reconcileAutoMemoryStateAfterSettingsChange(chatId, previousSettings, nextSettings) {
         if (getAutoMemorySettingsSignature(previousSettings) === getAutoMemorySettingsSignature(nextSettings)) return false;
-        AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED = true;
-        notifyAutoMemoryStatus(getChatId());
+        requestAutoMemorySettingsReplan(chatId);
+        notifyAutoMemoryStatus(chatId);
         if (!AUTO_MEMORY_BUSY) {
-            if (safelyResetAutoMemoryPlanningAfterSettingsSave(getChatId(), nextSettings)) AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED = false;
-            scheduleAutoMemoryResponseCheck(100);
+            if (safelyResetAutoMemoryPlanningAfterSettingsSave(chatId, nextSettings)) consumeAutoMemorySettingsReplan(chatId);
+            if (getChatId() === chatId) scheduleAutoMemoryResponseCheck(100);
         }
         return true;
     }
@@ -3833,14 +3909,14 @@ margin-bottom:12px;
         }
     }
 
-    function resetAutoMemoryPlanningForSettings(state, settingsSignature) {
+    function resetAutoMemoryPlanningForSettings(state, settingsSignature, chatId) {
         state.lastScheduleTurnKey = String(state.lastProcessedTurnKey || '');
         state.pendingCutoffTurnKey = '';
         state.observedNewTurns = 0;
         state.forceFullCompact = false;
         state.fullBeforeRoutine = false;
         state.waitingForSlot = false;
-        state.settingsSignature = String(settingsSignature || getAutoMemorySettingsSignature(getAutoMemorySettings()));
+        state.settingsSignature = String(settingsSignature || getAutoMemorySettingsSignature(getAutoMemorySettings(chatId)));
     }
 
     function safelyResetAutoMemoryPlanningAfterSettingsSave(chatId, settings) {
@@ -3849,7 +3925,7 @@ margin-bottom:12px;
             var state = getAutoMemoryState(chatId);
             if (state.pendingApply && state.pendingApply.mutationStarted) return false;
             state.pendingApply = null;
-            resetAutoMemoryPlanningForSettings(state, getAutoMemorySettingsSignature(settings));
+            resetAutoMemoryPlanningForSettings(state, getAutoMemorySettingsSignature(settings), chatId);
             clearAutoMemoryFailure(state);
             state.lastError = '';
             state.lastStatus = '설정 변경 반영 · 최신 값으로 재계획 대기';
@@ -3861,29 +3937,29 @@ margin-bottom:12px;
     }
 
     function finishAutoMemorySettingsTransition(chatId, state, planSettingsSignature, status) {
-        var latestSignature = getAutoMemorySettingsSignature(getAutoMemorySettings());
-        if (!AUTO_MEMORY_SETTINGS_EDIT_PENDING && String(planSettingsSignature || latestSignature) === latestSignature && state.settingsSignature === latestSignature) return false;
-        resetAutoMemoryPlanningForSettings(state, latestSignature);
+        var latestSignature = getAutoMemorySettingsSignature(getAutoMemorySettings(chatId));
+        if (!isAutoMemorySettingsEditPending(chatId) && String(planSettingsSignature || latestSignature) === latestSignature && state.settingsSignature === latestSignature) return false;
+        resetAutoMemoryPlanningForSettings(state, latestSignature, chatId);
         state.lastStatus = status || '설정 변경 반영 · 최신 값으로 재계획 대기';
         clearAutoMemoryFailure(state);
         saveAutoMemoryState(chatId, state);
-        scheduleAutoMemoryResponseCheck(AUTO_MEMORY_SETTINGS_EDIT_PENDING ? AUTO_MEMORY_SETTINGS_AUTOSAVE_MS + 100 : 100);
+        if (getChatId() === chatId) scheduleAutoMemoryResponseCheck(isAutoMemorySettingsEditPending(chatId) ? AUTO_MEMORY_SETTINGS_AUTOSAVE_MS + 100 : 100);
         return true;
     }
 
-    function getPendingMutationSettings(pending, fallbackSettings) {
-        var effective = Object.assign({}, fallbackSettings || getAutoMemorySettings());
+    function getPendingMutationSettings(pending, fallbackSettings, chatId) {
+        var effective = Object.assign({}, fallbackSettings || getAutoMemorySettings(chatId));
         if (pending && pending.mutationStarted && typeof pending.settingsProtectUserAdded === 'boolean') {
-            effective.protectUserAdded = pending.settingsProtectUserAdded;
+            effective.protectUserAdded = pending.settingsProtectUserAdded || effective.protectUserAdded;
         }
         return effective;
     }
 
     function discardUnstartedPendingForSettingsChange(chatId, state, pending) {
         if (!pending || pending.mutationStarted) return false;
-        if (!AUTO_MEMORY_SETTINGS_EDIT_PENDING && pending.settingsSignature && isAutoMemorySettingsSignatureCurrent(pending.settingsSignature)) return false;
+        if (!isAutoMemorySettingsEditPending(chatId) && pending.settingsSignature && isAutoMemorySettingsSignatureCurrent(pending.settingsSignature, chatId)) return false;
         state.pendingApply = null;
-        resetAutoMemoryPlanningForSettings(state);
+        resetAutoMemoryPlanningForSettings(state, '', chatId);
         state.lastStatus = '설정 변경 감지 · 최신 값으로 재계획 대기';
         state.lastError = '';
         saveAutoMemoryState(chatId, state);
@@ -3909,7 +3985,7 @@ margin-bottom:12px;
                 if (discardUnstartedPendingForSettingsChange(chatId, state, pending)) {
                     return { replan:true, patched:0, deleted:0, deleteFailures:0, total:summaries.length };
                 }
-                var currentSettings = getPendingMutationSettings(pending, getAutoMemorySettings());
+                var currentSettings = getPendingMutationSettings(pending, getAutoMemorySettings(chatId), chatId);
                 if (!canAutoMutateSummary(current, currentSettings)) throw new Error('보호된 카드가 PATCH 대상에 포함되어 중단했습니다.');
                 if (!renewAutoMemoryLock(chatId)) throw new Error('PATCH 직전 자동 저장 잠금을 잃어 중단했습니다.');
                 pending.mutationStarted = true;
@@ -3929,7 +4005,7 @@ margin-bottom:12px;
 
         summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
         byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
-        assertPendingDeletePreflight(pending, byId, getPendingMutationSettings(pending, getAutoMemorySettings()));
+        assertPendingDeletePreflight(pending, byId, getPendingMutationSettings(pending, getAutoMemorySettings(chatId), chatId));
         if (pending.phase === 'patch') {
             pending.phase = 'delete';
             saveAutoMemoryState(chatId, state);
@@ -3938,7 +4014,7 @@ margin-bottom:12px;
         while (pending.deleteIndex < pending.deletes.length) {
             summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
             byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
-            assertPendingDeletePreflight(pending, byId, getPendingMutationSettings(pending, getAutoMemorySettings()));
+            assertPendingDeletePreflight(pending, byId, getPendingMutationSettings(pending, getAutoMemorySettings(chatId), chatId));
             var deletion = pending.deletes[pending.deleteIndex];
             var deleteTarget = byId.get(String(deletion.id));
             if (deleteTarget) {
@@ -3946,7 +4022,7 @@ margin-bottom:12px;
                 if (discardUnstartedPendingForSettingsChange(chatId, state, pending)) {
                     return { replan:true, patched:0, deleted:0, deleteFailures:0, total:summaries.length };
                 }
-                var latestSettings = getPendingMutationSettings(pending, getAutoMemorySettings());
+                var latestSettings = getPendingMutationSettings(pending, getAutoMemorySettings(chatId), chatId);
                 if (!canAutoMutateSummary(deleteTarget, latestSettings)) throw new Error('보호된 카드가 DELETE 대상에 포함되어 중단했습니다.');
                 if (!renewAutoMemoryLock(chatId)) throw new Error('DELETE 직전 자동 저장 잠금을 잃어 중단했습니다.');
                 pending.mutationStarted = true;
@@ -4110,9 +4186,9 @@ margin-bottom:12px;
     }
 
     function getAutoMemoryStatusText(chatId) {
-        var settings = getAutoMemorySettings();
-        if (!settings.enabled) return '꺼짐 · 수동 요약은 기존대로 사용 가능';
         if (!chatId) return '채팅방에서만 작동함';
+        var settings = getAutoMemorySettings(chatId);
+        if (!settings.enabled) return '꺼짐 · 수동 요약은 기존대로 사용 가능';
         var state = getAutoMemoryState(chatId);
         if (state.autoPaused) return '3회 오류 누적 · 자동 일시정지 · 원인: ' + (state.lastError || '알 수 없음') + ' (설정 저장 또는 지금 실행으로 재개)';
         if (state.retryAfter > Date.now()) {
@@ -4149,21 +4225,22 @@ margin-bottom:12px;
         return settings.midMergeTurns > 0 && (Number(state.processedSinceMidMerge) || 0) >= settings.midMergeTurns;
     }
 
-    function scheduleAutoMemoryMaintenanceIfNeeded(state, settings, totalCards) {
-        if (!settings.enabled) return;
+    function scheduleAutoMemoryMaintenanceIfNeeded(chatId, state, settings, totalCards) {
+        if (!settings.enabled || getChatId() !== chatId) return;
         if (state.forceFullCompact || Number(totalCards) > settings.maxCards || (!state.pendingCutoffTurnKey && isMidMergeDue(state, settings))) scheduleAutoMemoryResponseCheck(300);
     }
 
     async function runAutoMemory(manual) {
-        if (AUTO_MEMORY_SETTINGS_EDIT_PENDING) {
+        var chatId = getChatId();
+        if (!chatId) return false;
+        if (isAutoMemorySettingsEditPending(chatId)) {
             if (!manual) scheduleAutoMemoryResponseCheck(AUTO_MEMORY_SETTINGS_AUTOSAVE_MS + 100);
             return false;
         }
-        var settings = getAutoMemorySettings();
+        var settings = getAutoMemorySettings(chatId);
         var settingsSignature = getAutoMemorySettingsSignature(settings);
-        var chatId = getChatId();
         var lockHeartbeat = 0;
-        if (!chatId || (!manual && !settings.enabled) || AUTO_MEMORY_BUSY) return false;
+        if ((!manual && !settings.enabled) || AUTO_MEMORY_BUSY) return false;
         if (!acquireAutoMemoryLock(chatId)) {
             if (!manual && settings.enabled) scheduleAutoMemoryResponseCheck(15000);
             return false;
@@ -4176,7 +4253,7 @@ margin-bottom:12px;
             if (!state.settingsSignature) {
                 if (state.initialized && !(state.pendingApply && state.pendingApply.mutationStarted)) {
                     state.pendingApply = null;
-                    resetAutoMemoryPlanningForSettings(state, settingsSignature);
+                    resetAutoMemoryPlanningForSettings(state, settingsSignature, chatId);
                     state.lastStatus = '자동 설정 저장 구조 갱신 · 현재 값으로 재계획';
                     saveAutoMemoryState(chatId, state);
                 } else {
@@ -4184,7 +4261,7 @@ margin-bottom:12px;
                 }
             } else if (state.settingsSignature !== settingsSignature && !(state.pendingApply && state.pendingApply.mutationStarted)) {
                 state.pendingApply = null;
-                resetAutoMemoryPlanningForSettings(state, settingsSignature);
+                resetAutoMemoryPlanningForSettings(state, settingsSignature, chatId);
                 state.lastStatus = '저장된 자동 설정 변경 감지 · 최신 값으로 재계획';
                 saveAutoMemoryState(chatId, state);
             }
@@ -4207,7 +4284,7 @@ margin-bottom:12px;
                 state.waitingForSlot = !!state.pendingCutoffTurnKey;
                 state.lastStatus = '수정 ' + resumed.patched + '개 · 삭제 ' + resumed.deleted + '개 · 현재 ' + resumed.total + '개';
                 saveAutoMemoryState(chatId, state);
-                scheduleAutoMemoryMaintenanceIfNeeded(state, settings, resumed.total);
+                scheduleAutoMemoryMaintenanceIfNeeded(chatId, state, settings, resumed.total);
                 if (state.pendingCutoffTurnKey) scheduleAutoMemoryResponseCheck(300);
                 return true;
             }
@@ -4317,8 +4394,8 @@ margin-bottom:12px;
                 ? batchTurns.length + '대화턴 누적 정리 중'
                 : (mode === 'mid' ? '최근 구간 중간 병합 중' : '최대 슬롯 초과 · 전체 2차 압축 중');
             saveAutoMemoryState(chatId, state);
-            if (AUTO_MEMORY_SETTINGS_EDIT_PENDING || !isAutoMemorySettingsSignatureCurrent(settingsSignature)) {
-                resetAutoMemoryPlanningForSettings(state);
+            if (isAutoMemorySettingsEditPending(chatId) || !isAutoMemorySettingsSignatureCurrent(settingsSignature, chatId)) {
+                resetAutoMemoryPlanningForSettings(state, '', chatId);
                 state.lastStatus = '설정 변경 감지 · AI 호출 전 최신 값으로 재계획 대기';
                 clearAutoMemoryFailure(state);
                 saveAutoMemoryState(chatId, state);
@@ -4346,8 +4423,8 @@ margin-bottom:12px;
             if (!renewAutoMemoryLock(chatId)) throw new Error('AI 호출 뒤 자동 저장 잠금을 잃어 저장을 중단했습니다.');
             recordAutoMemoryUsage(state, LAST_AI_USAGE);
             saveAutoMemoryState(chatId, state);
-            if (AUTO_MEMORY_SETTINGS_EDIT_PENDING || !isAutoMemorySettingsSignatureCurrent(settingsSignature)) {
-                resetAutoMemoryPlanningForSettings(state);
+            if (isAutoMemorySettingsEditPending(chatId) || !isAutoMemorySettingsSignatureCurrent(settingsSignature, chatId)) {
+                resetAutoMemoryPlanningForSettings(state, '', chatId);
                 state.lastStatus = '설정 변경 감지 · AI 결과는 저장하지 않고 최신 값으로 재계획 대기';
                 clearAutoMemoryFailure(state);
                 saveAutoMemoryState(chatId, state);
@@ -4363,7 +4440,7 @@ margin-bottom:12px;
                     state.lastStatus = '독립 사건을 담을 새 슬롯 부족 · 현재 로그 전체 보류';
                     clearAutoMemoryFailure(state);
                     saveAutoMemoryState(chatId, state);
-                    scheduleAutoMemoryMaintenanceIfNeeded(state, settings, summaries.length);
+                    scheduleAutoMemoryMaintenanceIfNeeded(chatId, state, settings, summaries.length);
                     return true;
                 }
                 var routineMetadata = getRoutineCommitMetadata(state, plan, appendResult);
@@ -4402,7 +4479,7 @@ margin-bottom:12px;
             state.lastStatus = (mode === 'routine' ? '누적 정리' : mode === 'mid' ? '중간 병합' : '전체 압축') +
                 ' 완료 · 수정 ' + result.patched + '개 · 삭제 ' + result.deleted + '개 · 현재 ' + result.total + '개';
             saveAutoMemoryState(chatId, state);
-            scheduleAutoMemoryMaintenanceIfNeeded(state, settings, result.total);
+            scheduleAutoMemoryMaintenanceIfNeeded(chatId, state, settings, result.total);
             if (state.pendingCutoffTurnKey) scheduleAutoMemoryResponseCheck(300);
             return true;
         } catch (err) {
@@ -4414,12 +4491,13 @@ margin-bottom:12px;
             if (manual) await showUiAlert(state.lastError, '자동 장기기억 정리 오류', { tone:'danger' });
             return false;
         } finally {
-            var settingsReplanRequested = AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED;
-            AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED = false;
+            var settingsReplanRequested = consumeAutoMemorySettingsReplan(chatId);
             if (lockHeartbeat) clearInterval(lockHeartbeat);
             AUTO_MEMORY_BUSY = false;
             releaseAutoMemoryLock(chatId);
             notifyAutoMemoryStatus(chatId);
+            var visibleChatId = getChatId();
+            if (visibleChatId && visibleChatId !== chatId) notifyAutoMemoryStatus(visibleChatId);
             refreshAutoMemorySchedule(true);
             if (settingsReplanRequested) scheduleAutoMemoryResponseCheck(100);
         }
@@ -4450,10 +4528,15 @@ margin-bottom:12px;
     }
 
     function scheduleAutoMemoryResponseCheck(delay) {
-        if (!getAutoMemorySettings().enabled || !getChatId()) return;
+        var chatId = getChatId();
+        if (!chatId || !getAutoMemorySettings(chatId).enabled) return;
         clearAutoMemoryResponseTimer();
         AUTO_MEMORY_RESPONSE_TIMER = setTimeout(function() {
             AUTO_MEMORY_RESPONSE_TIMER = 0;
+            if (getChatId() !== chatId) {
+                refreshAutoMemorySchedule(true);
+                return;
+            }
             pollAutoMemory();
         }, Math.max(0, Number(delay) || 0));
     }
@@ -4467,10 +4550,15 @@ margin-bottom:12px;
         });
     }
 
-    async function probeWaitingAutoMemorySlot() {
+    async function probeWaitingAutoMemorySlot(expectedChatId) {
         AUTO_MEMORY_SLOT_TIMER = 0;
-        var settings = getAutoMemorySettings();
         var chatId = getChatId();
+        if (expectedChatId && chatId !== expectedChatId) {
+            clearAutoMemorySlotTimer(true);
+            refreshAutoMemorySchedule(true);
+            return;
+        }
+        var settings = getAutoMemorySettings(chatId);
         if (!settings.enabled || !chatId) {
             clearAutoMemorySlotTimer(true);
             return;
@@ -4485,7 +4573,7 @@ margin-bottom:12px;
             return;
         }
         if (AUTO_MEMORY_BUSY) {
-            AUTO_MEMORY_SLOT_TIMER = setTimeout(probeWaitingAutoMemorySlot, 1500);
+            AUTO_MEMORY_SLOT_TIMER = setTimeout(function() { probeWaitingAutoMemorySlot(chatId); }, 1500);
             return;
         }
         try {
@@ -4505,29 +4593,35 @@ margin-bottom:12px;
     function scheduleWaitingAutoMemorySlotCheck(resetBackoff) {
         if (resetBackoff) clearAutoMemorySlotTimer(true);
         if (AUTO_MEMORY_SLOT_TIMER) return;
-        var settings = getAutoMemorySettings();
         var chatId = getChatId();
+        var settings = getAutoMemorySettings(chatId);
         if (!settings.enabled || !chatId) return;
         var state = getAutoMemoryState(chatId);
         if (!state.waitingForSlot || !state.pendingCutoffTurnKey || state.autoPaused || state.retryAfter > Date.now()) return;
         var delayIndex = Math.min(AUTO_MEMORY_SLOT_RECHECK_INDEX, AUTO_MEMORY_SLOT_RECHECK_DELAYS.length - 1);
         var delay = AUTO_MEMORY_SLOT_RECHECK_DELAYS[delayIndex];
         AUTO_MEMORY_SLOT_RECHECK_INDEX = Math.min(delayIndex + 1, AUTO_MEMORY_SLOT_RECHECK_DELAYS.length - 1);
-        AUTO_MEMORY_SLOT_TIMER = setTimeout(probeWaitingAutoMemorySlot, delay);
+        AUTO_MEMORY_SLOT_TIMER = setTimeout(function() { probeWaitingAutoMemorySlot(chatId); }, delay);
     }
 
     function scheduleAutoMemoryRetry(retryAfter) {
         clearAutoMemoryRetryTimer();
+        var chatId = getChatId();
+        if (!chatId) return;
         var delay = Math.max(50, Number(retryAfter) - Date.now() + 50);
         AUTO_MEMORY_RETRY_TIMER = setTimeout(function() {
             AUTO_MEMORY_RETRY_TIMER = 0;
+            if (getChatId() !== chatId) {
+                refreshAutoMemorySchedule(true);
+                return;
+            }
             pollAutoMemory();
         }, delay);
     }
 
     function refreshAutoMemorySchedule(resetSlotBackoff) {
-        var settings = getAutoMemorySettings();
         var chatId = getChatId();
+        var settings = getAutoMemorySettings(chatId);
         if (!settings.enabled || !chatId) {
             cancelAutoMemorySchedule();
             return;
@@ -4585,7 +4679,7 @@ margin-bottom:12px;
 
     function pollAutoMemory() {
         var chatId = getChatId();
-        if (!getAutoMemorySettings().enabled || !chatId) {
+        if (!chatId || !getAutoMemorySettings(chatId).enabled) {
             cancelAutoMemorySchedule();
             return false;
         }
@@ -5021,6 +5115,7 @@ if (mainModel && mainProvider) {
 
     // ============== 메인 모달 ==============
     function showMainModal(prefillText, isCompressResult) {
+        var modalChatId = getChatId();
         var restoredDraft = null;
         if (!String(prefillText || '').trim()) {
             restoredDraft = getAiResultDraft();
@@ -5039,7 +5134,7 @@ if (mainModel && mainProvider) {
         var savedTurns = localStorage.getItem('crack_ext_turn_count') || '15';
         var savedStyle = localStorage.getItem('crack_ext_summary_style') || 'concise';
         var currentKey = getSavedApiKey(savedProvider);
-        var autoSettings = getAutoMemorySettings();
+        var autoSettings = getAutoMemorySettings(modalChatId);
 
         var isPromptMode = false;
         var tempResultContent = '';
@@ -5099,7 +5194,7 @@ if (mainModel && mainProvider) {
         html += '</div>';
 
         html += '<details class="crack-ext-auto-panel" id="ce-auto-panel"' + (autoSettings.enabled ? ' open' : '') + '>';
-        html += '<summary><span>자동 장기기억 정리</span><span class="crack-ext-auto-summary-status" id="ce-auto-summary-status">' + escapeHtml(getAutoMemoryStatusText(getChatId())) + '</span></summary>';
+        html += '<summary><span>자동 장기기억 정리</span><span class="crack-ext-auto-summary-status" id="ce-auto-summary-status">' + escapeHtml(getAutoMemoryStatusText(modalChatId)) + '</span></summary>';
         html += '<div class="crack-ext-auto-body">';
         html += '<div class="crack-ext-auto-toggle-row">';
         html += '<label class="crack-ext-auto-check"><input type="checkbox" id="ce-auto-enabled"' + (autoSettings.enabled ? ' checked' : '') + '><span>자동 정리 사용</span></label>';
@@ -5114,7 +5209,7 @@ if (mainModel && mainProvider) {
         html += '<div class="crack-ext-auto-field"><label for="ce-auto-max">최대 슬롯</label><input type="number" id="ce-auto-max" min="5" max="20" value="' + autoSettings.maxCards + '"></div>';
         html += '<div class="crack-ext-auto-field"><label for="ce-auto-target">전체 압축 목표 슬롯</label><input type="number" id="ce-auto-target" min="1" max="' + autoSettings.maxCards + '" value="' + autoSettings.compactTarget + '"></div>';
         html += '</div>';
-        html += '<div class="crack-ext-auto-note">대화턴 1개 = 사용자 1회 + AI 답변 1회입니다. 평상시에는 오래된 카드를 유지하고, 마지막 카드의 직접 후속만 수정하며, 독립 사건은 새 assistant 슬롯에 누적합니다. 새 슬롯이 없으면 로그를 버리거나 옛 카드에 밀어 넣지 않고 보류합니다. “중간 병합 주기”마다 최근 누적 구간만 2차 압축 지침에 따라 필요한 만큼 병합하며, 0이면 끕니다. 전체 카드가 최대 슬롯을 초과한 순간에만 압축 목표 슬롯까지 전체 정리합니다. 아래 “자동 정리” 프롬프트는 평상시 누적 판단에, “2차 압축” 프롬프트는 중간·전체 압축에 사용됩니다. 최근 제외는 마지막 경계를 다음 실행으로 보류합니다. [추가] 카드 보호를 켜면 해당 카드는 절대 수정·삭제하지 않습니다. assistant 슬롯만 치환·삭제하며 새 [추가] 카드는 만들지 않습니다.</div>';
+        html += '<div class="crack-ext-auto-note">자동 정리 사용 여부와 아래 숫자 설정은 현재 채팅방별로 따로 저장됩니다. 대화턴 1개 = 사용자 1회 + AI 답변 1회입니다. 평상시에는 오래된 카드를 유지하고, 마지막 카드의 직접 후속만 수정하며, 독립 사건은 새 assistant 슬롯에 누적합니다. 새 슬롯이 없으면 로그를 버리거나 옛 카드에 밀어 넣지 않고 보류합니다. “중간 병합 주기”마다 최근 누적 구간만 2차 압축 지침에 따라 필요한 만큼 병합하며, 0이면 끕니다. 전체 카드가 최대 슬롯을 초과한 순간에만 압축 목표 슬롯까지 전체 정리합니다. 아래 “자동 정리” 프롬프트는 평상시 누적 판단에, “2차 압축” 프롬프트는 중간·전체 압축에 사용됩니다. 최근 제외는 마지막 경계를 다음 실행으로 보류합니다. [추가] 카드 보호를 켜면 해당 카드는 절대 수정·삭제하지 않습니다. assistant 슬롯만 치환·삭제하며 새 [추가] 카드는 만들지 않습니다.</div>';
         html += '<div class="crack-ext-auto-actions"><button class="crack-ext-ai-mbtn" id="ce-auto-save-settings">설정 저장</button><button class="crack-ext-ai-mbtn" id="ce-auto-run">지금 실행</button><button class="crack-ext-ai-mbtn" id="ce-auto-reset">기준점 초기화</button><span class="crack-ext-auto-status" id="ce-auto-status"></span></div>';
         html += '<div class="crack-ext-auto-usage" id="ce-auto-usage"></div>';
         html += '</div></details>';
@@ -5215,6 +5310,7 @@ if (mainModel && mainProvider) {
         var autoSettingsDirty = false;
         var autoSettingsDirtyFields = new Set();
         var autoSettingsSaveLabelTimer = 0;
+        var autoSettingsStorageHandler = null;
         // 턴 수 안내 팝업
 if (btnTurnInfo && turnInfoPopover) {
     btnTurnInfo.addEventListener('click', function(e) {
@@ -5525,18 +5621,19 @@ if (btnTurnInfo && turnInfoPopover) {
         }
 
         function renderAutoMemoryStatus() {
-            var chatId = getChatId();
-            var state = getAutoMemoryState(chatId);
-            var text = getAutoMemoryStatusText(chatId);
+            var state = getAutoMemoryState(modalChatId);
+            var text = getAutoMemoryStatusText(modalChatId);
+            var routeChanged = !!modalChatId && getChatId() !== modalChatId;
+            if (routeChanged) text = '다른 채팅방으로 이동함 · 이 창을 닫고 다시 열어주세요';
             autoStatus.textContent = text;
             autoSummaryStatus.textContent = text;
             autoUsage.textContent = formatAutoMemoryUsage(state);
             autoUsage.title = getAutoMemoryUsageTooltip(state);
-            btnAutoRun.disabled = AUTO_MEMORY_BUSY || !chatId;
-            btnAutoSaveSettings.disabled = AUTO_MEMORY_BUSY;
-            btnAutoReset.disabled = AUTO_MEMORY_BUSY || !chatId;
+            btnAutoRun.disabled = AUTO_MEMORY_BUSY || !modalChatId || routeChanged;
+            btnAutoSaveSettings.disabled = AUTO_MEMORY_BUSY || !modalChatId || routeChanged;
+            btnAutoReset.disabled = AUTO_MEMORY_BUSY || !modalChatId || routeChanged;
             [autoEnabled, autoProtect, autoInterval, autoRead, autoExclude, autoContext, autoMidMerge, autoMax, autoTarget].forEach(function(control) {
-                if (control) control.disabled = AUTO_MEMORY_BUSY;
+                if (control) control.disabled = AUTO_MEMORY_BUSY || routeChanged;
             });
         }
 
@@ -5552,17 +5649,17 @@ if (btnTurnInfo && turnInfoPopover) {
             options = options || {};
             var uiSettings = readAutoSettingsFromUi();
             if (!uiSettings) return null;
-            var previousSettings = getAutoMemorySettings();
+            var previousSettings = getAutoMemorySettings(modalChatId);
             var nextSettings = Object.assign({}, previousSettings);
             autoSettingsDirtyFields.forEach(function(key) {
                 nextSettings[key] = uiSettings[key];
             });
-            var saved = saveAutoMemorySettings(nextSettings);
-            var settingsChanged = reconcileAutoMemoryStateAfterSettingsChange(previousSettings, saved);
-            if (settingsChanged) safelyClearAutoMemoryFailureAfterSettingsSave(getChatId());
+            var saved = saveAutoMemorySettings(modalChatId, nextSettings);
+            var settingsChanged = reconcileAutoMemoryStateAfterSettingsChange(modalChatId, previousSettings, saved);
+            if (settingsChanged) safelyClearAutoMemoryFailureAfterSettingsSave(modalChatId);
             autoSettings = saved;
             autoSettingsDirty = false;
-            AUTO_MEMORY_SETTINGS_EDIT_PENDING = false;
+            setAutoMemorySettingsEditPending(modalChatId, false);
             autoSettingsDirtyFields.clear();
             if (options.writeBack) writeAutoSettingsToUi(saved);
             if (options.flash) flashAutoSettingsSaved();
@@ -5571,8 +5668,12 @@ if (btnTurnInfo && turnInfoPopover) {
         }
 
         function scheduleAutoSettingsSave(delay, fields) {
+            if (!modalChatId || getChatId() !== modalChatId) {
+                renderAutoMemoryStatus();
+                return;
+            }
             autoSettingsDirty = true;
-            AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+            setAutoMemorySettingsEditPending(modalChatId, true);
             (Array.isArray(fields) ? fields : [fields]).filter(Boolean).forEach(function(key) {
                 autoSettingsDirtyFields.add(String(key));
             });
@@ -5582,11 +5683,11 @@ if (btnTurnInfo && turnInfoPopover) {
                 try {
                     var saved = saveAutoSettingsOnlyFromUi({ flash:true });
                     if (!saved) {
-                        AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                        setAutoMemorySettingsEditPending(modalChatId, true);
                         autoStatus.textContent = '설정 입력 완료 대기 · 자동 실행 잠시 멈춤';
                     }
                 } catch (err) {
-                    AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                    setAutoMemorySettingsEditPending(modalChatId, true);
                     autoStatus.textContent = '설정 자동 저장 실패 · ' + err.message;
                 }
             }, delay == null ? AUTO_MEMORY_SETTINGS_AUTOSAVE_MS : delay);
@@ -5626,10 +5727,10 @@ if (btnTurnInfo && turnInfoPopover) {
             autoSettingsSaveTimer = 0;
             var saved = saveAutoSettingsOnlyFromUi({ writeBack:true });
             if (!saved) {
-                AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                setAutoMemorySettingsEditPending(modalChatId, true);
                 throw new Error('자동 설정의 빈칸이나 범위를 확인해주세요. 최대 슬롯은 5~20, 압축 목표는 최대 슬롯 이하여야 합니다.');
             }
-            safelyClearAutoMemoryFailureAfterSettingsSave(getChatId());
+            safelyClearAutoMemoryFailureAfterSettingsSave(modalChatId);
             renderAutoMemoryStatus();
             return saved;
         }
@@ -5638,12 +5739,13 @@ if (btnTurnInfo && turnInfoPopover) {
             e.preventDefault();
             e.stopPropagation();
             try {
+                if (!modalChatId || getChatId() !== modalChatId) throw new Error('설정창을 연 채팅방과 현재 채팅방이 다릅니다. 창을 닫고 현재 방에서 다시 열어주세요.');
                 persistAutoSettingsFromUi();
             } catch (err) {
                 await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
                 return;
             }
-            showToast('자동 장기기억 설정을 저장했습니다.');
+            showToast('현재 채팅방의 자동 장기기억 설정을 저장했습니다.');
             if (autoEnabled.checked) setTimeout(pollAutoMemory, 100);
         };
 
@@ -5651,6 +5753,7 @@ if (btnTurnInfo && turnInfoPopover) {
             e.preventDefault();
             e.stopPropagation();
             try {
+                if (!modalChatId || getChatId() !== modalChatId) throw new Error('설정창을 연 채팅방과 현재 채팅방이 다릅니다. 창을 닫고 현재 방에서 다시 열어주세요.');
                 persistAutoSettingsFromUi();
             } catch (err) {
                 await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
@@ -5664,7 +5767,11 @@ if (btnTurnInfo && turnInfoPopover) {
         btnAutoReset.onclick = async function(e) {
             e.preventDefault();
             e.stopPropagation();
-            var resetChatId = getChatId();
+            var resetChatId = modalChatId;
+            if (!resetChatId || getChatId() !== resetChatId) {
+                await showUiAlert('설정창을 연 채팅방과 현재 채팅방이 다릅니다. 창을 닫고 현재 방에서 다시 열어주세요.', '채팅방 변경 감지', { tone:'warning' });
+                return;
+            }
             var resetState = getAutoMemoryState(resetChatId);
             if (resetState.pendingApply) {
                 if (!(await showUiConfirm('미완료 저장 계획을 폐기하고 같은 대화 구간을 다시 계획할까요?\n이미 성공한 PATCH 내용과 삭제된 슬롯은 되돌리지 않으며, 서버에는 추가 변경을 하지 않습니다.', '미완료 계획 폐기', { confirmText:'폐기 후 재계획', tone:'warning', preventBackdropClose:true }))) return;
@@ -5696,9 +5803,20 @@ if (btnTurnInfo && turnInfoPopover) {
                 window.removeEventListener('crack-ext-auto-memory-status', autoStatusHandler);
                 return;
             }
-            if (!event.detail || !event.detail.chatId || event.detail.chatId === getChatId()) renderAutoMemoryStatus();
+            if (getChatId() !== modalChatId || !event.detail || !event.detail.chatId || event.detail.chatId === modalChatId) renderAutoMemoryStatus();
         };
         window.addEventListener('crack-ext-auto-memory-status', autoStatusHandler);
+        autoSettingsStorageHandler = function(event) {
+            if (!overlay.isConnected) {
+                window.removeEventListener('storage', autoSettingsStorageHandler);
+                return;
+            }
+            if (!event || event.key !== getAutoMemorySettingsStorageKey(modalChatId, false) || autoSettingsDirty || isAutoMemorySettingsEditPending(modalChatId)) return;
+            autoSettings = getAutoMemorySettings(modalChatId);
+            writeAutoSettingsToUi(autoSettings);
+            renderAutoMemoryStatus();
+        };
+        window.addEventListener('storage', autoSettingsStorageHandler);
         renderAutoMemoryStatus();
 
         selPromptMode.onchange = async function() {
@@ -5976,12 +6094,12 @@ if (btnTurnInfo && turnInfoPopover) {
                 try {
                     var savedAutoSettings = saveAutoSettingsOnlyFromUi({ writeBack:true });
                     if (!savedAutoSettings) {
-                        AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                        setAutoMemorySettingsEditPending(modalChatId, true);
                         await showUiAlert('자동 설정의 빈칸이나 범위를 확인해주세요. 최대 슬롯은 5~20, 압축 목표는 최대 슬롯 이하여야 합니다.', '자동 설정 확인', { tone:'warning' });
                         return;
                     }
                 } catch (err) {
-                    AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                    setAutoMemorySettingsEditPending(modalChatId, true);
                     await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
                     return;
                 }
@@ -5989,6 +6107,7 @@ if (btnTurnInfo && turnInfoPopover) {
             if (hasUnsavedPromptText() && !(await showUiConfirm('저장하지 않은 프롬프트 수정이 있습니다. 창을 닫을까요?', '저장하지 않은 변경사항', { confirmText:'닫기', danger:true }))) return;
             if (!isGenerating) saveAiResultDraft(isPromptMode ? tempResultContent : txtResult.value, resultMode);
             clearTimeout(autoSettingsSaveLabelTimer);
+            if (autoSettingsStorageHandler) window.removeEventListener('storage', autoSettingsStorageHandler);
             releaseVertexSessionSecrets();
             overlay.remove();
         }
@@ -6566,6 +6685,8 @@ if (btnTurnInfo && turnInfoPopover) {
             var currentRoute = getChatId() || location.pathname || 'current';
             var routeChanged = !!topHeaderContainerRoute && topHeaderContainerRoute !== currentRoute;
             if (routeChanged) {
+                cancelAutoMemorySchedule();
+                AUTO_MEMORY_LAST_WAKE_AT = 0;
                 clearTopHeaderRetry();
                 topHeaderContainerCache = null;
                 topHeaderContainerRoute = currentRoute;
@@ -6588,7 +6709,10 @@ if (btnTurnInfo && turnInfoPopover) {
                     break;
                 }
             }
-            if (routeChanged) scheduleAutoMemoryResponseCheck(500);
+            if (routeChanged) {
+                notifyAutoMemoryStatus(getChatId());
+                scheduleAutoMemoryResponseCheck(500);
+            }
         });
         obs.observe(document.body, { childList:true, characterData:true, attributes:true, attributeFilter:['class', 'style', 'aria-hidden'], subtree:true });
 
@@ -6603,6 +6727,13 @@ if (btnTurnInfo && turnInfoPopover) {
         scheduleAutoMemoryResponseCheck(1500);
         window.addEventListener('focus', wakeAutoMemoryOnReturn, { passive:true });
         window.addEventListener('pageshow', wakeAutoMemoryOnReturn, { passive:true });
+        window.addEventListener('storage', function(event) {
+            var chatId = getChatId();
+            if (!chatId || !event || event.key !== getAutoMemorySettingsStorageKey(chatId, false)) return;
+            notifyAutoMemoryStatus(chatId);
+            refreshAutoMemorySchedule(true);
+            if (getAutoMemorySettings(chatId).enabled) scheduleAutoMemoryResponseCheck(100);
+        });
         document.addEventListener('visibilitychange', function() {
             if (document.visibilityState === 'visible') wakeAutoMemoryOnReturn();
         });
