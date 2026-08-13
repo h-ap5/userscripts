@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.2.9
+// @version      2.3.0
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -41,6 +41,8 @@
     const GENERATED_TITLE_MAX = 20;
     const GENERATED_SUMMARY_MAX = 300;
     const AUTO_MEMORY_SETTINGS_KEY = 'crack_ext_auto_memory_settings_v1';
+    const AUTO_MEMORY_SETTINGS_GM_KEY = 'crack_ext_auto_memory_settings_v3';
+    const AUTO_MEMORY_SETTINGS_AUTOSAVE_MS = 600;
     const AUTO_MEMORY_STATE_PREFIX = 'crack_ext_auto_memory_state_v1:';
     const AUTO_MEMORY_LOCK_PREFIX = 'crack_ext_auto_memory_lock_v1:';
     const AUTO_MEMORY_LOCK_MS = 600000;
@@ -67,6 +69,9 @@
     let AUTO_MEMORY_RETRY_TIMER = 0;
     let AUTO_MEMORY_SLOT_RECHECK_INDEX = 0;
     let AUTO_MEMORY_LAST_WAKE_AT = 0;
+    let AUTO_MEMORY_SETTINGS_LAST_WRITE_AT = 0;
+    let AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED = false;
+    let AUTO_MEMORY_SETTINGS_EDIT_PENDING = false;
 
     const AUTO_MEMORY_CONTINUITY_REQUIREMENT = `[BATCH CONTINUITY]
 Batch cuts are artificial. Treat trusted memories as authoritative prior state. Preserve unchanged facts. Continue, revise, or merge the same event; fix premature endings and overlap. Split only when the narrative thread truly changes. Return the complete deduplicated replacement set for EDITABLE, RECOVERY, and NEW content only.`;
@@ -462,16 +467,76 @@ This requirement controls coverage only. It must not change or add any output fo
         return (hash >>> 0).toString(36);
     }
 
+    function parseAutoMemorySettingsStorage(value) {
+        if (value == null || value === '') return null;
+        if (typeof value === 'object' && !Array.isArray(value)) return value;
+        try {
+            var parsed = JSON.parse(String(value));
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function readStoredAutoMemorySettings() {
+        var gmSettings = null;
+        if (typeof GM_getValue === 'function') {
+            try { gmSettings = parseAutoMemorySettingsStorage(GM_getValue(AUTO_MEMORY_SETTINGS_GM_KEY, '')); } catch (e) {}
+        }
+        var localSettings = null;
+        try { localSettings = parseAutoMemorySettingsStorage(localStorage.getItem(AUTO_MEMORY_SETTINGS_KEY)); } catch (e) {}
+
+        var gmUpdatedAt = Math.max(0, Number(gmSettings && gmSettings.settingsUpdatedAt) || 0);
+        var localUpdatedAt = Math.max(0, Number(localSettings && localSettings.settingsUpdatedAt) || 0);
+        var selected = localSettings && (!gmSettings || localUpdatedAt >= gmUpdatedAt) ? localSettings : (gmSettings || localSettings);
+        if (!selected) return {};
+
+        var serialized = JSON.stringify(selected);
+        if (selected === localSettings && typeof GM_setValue === 'function') {
+            try { GM_setValue(AUTO_MEMORY_SETTINGS_GM_KEY, serialized); } catch (e) {}
+        } else if (selected === gmSettings) {
+            try {
+                if (!localSettings || localUpdatedAt < gmUpdatedAt) localStorage.setItem(AUTO_MEMORY_SETTINGS_KEY, serialized);
+            } catch (e) {}
+        }
+        return selected;
+    }
+
+    function writeStoredAutoMemorySettings(settings) {
+        var serialized = JSON.stringify(settings || {});
+        var localVerified = false;
+        var gmVerified = false;
+
+        try {
+            localStorage.setItem(AUTO_MEMORY_SETTINGS_KEY, serialized);
+            localVerified = localStorage.getItem(AUTO_MEMORY_SETTINGS_KEY) === serialized;
+        } catch (e) {}
+
+        if (typeof GM_setValue === 'function') {
+            try {
+                GM_setValue(AUTO_MEMORY_SETTINGS_GM_KEY, serialized);
+                if (typeof GM_getValue === 'function') {
+                    gmVerified = JSON.stringify(parseAutoMemorySettingsStorage(GM_getValue(AUTO_MEMORY_SETTINGS_GM_KEY, '')) || {}) === serialized;
+                } else {
+                    gmVerified = true;
+                }
+            } catch (e) {}
+        }
+
+        if (!localVerified && !gmVerified) throw new Error('자동 장기기억 설정을 브라우저 저장소에 기록하지 못했습니다.');
+        return settings;
+    }
+
     function getAutoMemorySettings() {
-        var saved = {};
-        try { saved = JSON.parse(localStorage.getItem(AUTO_MEMORY_SETTINGS_KEY) || '{}') || {}; } catch (e) {}
+        var saved = readStoredAutoMemorySettings();
         if (!Number.isFinite(Number(saved.settingsVersion)) || Number(saved.settingsVersion) < 2) {
             if (saved.intervalTurns == null || Number(saved.intervalTurns) === 5) saved.intervalTurns = 10;
             if (saved.readTurns == null || Number(saved.readTurns) === 5) saved.readTurns = 10;
             if (saved.midMergeTurns == null) saved.midMergeTurns = 10;
         }
         var settings = Object.assign({}, AUTO_MEMORY_DEFAULTS, saved);
-        settings.settingsVersion = 2;
+        settings.settingsVersion = 3;
+        settings.settingsUpdatedAt = Math.max(0, Number(settings.settingsUpdatedAt) || 0);
         settings.enabled = !!settings.enabled;
         settings.intervalTurns = clampInteger(settings.intervalTurns, 1, 50, AUTO_MEMORY_DEFAULTS.intervalTurns);
         settings.readTurns = clampInteger(settings.readTurns, 1, 50, AUTO_MEMORY_DEFAULTS.readTurns);
@@ -487,7 +552,10 @@ This requirement controls coverage only. It must not change or add any output fo
     function saveAutoMemorySettings(settings) {
         var normalized = Object.assign({}, AUTO_MEMORY_DEFAULTS, settings || {});
         normalized = getNormalizedAutoMemorySettings(normalized);
-        localStorage.setItem(AUTO_MEMORY_SETTINGS_KEY, JSON.stringify(normalized));
+        var stored = readStoredAutoMemorySettings();
+        AUTO_MEMORY_SETTINGS_LAST_WRITE_AT = Math.max(Date.now(), AUTO_MEMORY_SETTINGS_LAST_WRITE_AT + 1, (Number(stored.settingsUpdatedAt) || 0) + 1);
+        normalized.settingsUpdatedAt = AUTO_MEMORY_SETTINGS_LAST_WRITE_AT;
+        writeStoredAutoMemorySettings(normalized);
         notifyAutoMemoryStatus(getChatId());
         setTimeout(function() { refreshAutoMemorySchedule(false); }, 0);
         return normalized;
@@ -497,7 +565,8 @@ This requirement controls coverage only. It must not change or add any output fo
         var source = settings || {};
         var maxCards = clampInteger(source.maxCards, 5, 20, AUTO_MEMORY_DEFAULTS.maxCards);
         return {
-            settingsVersion:2,
+            settingsVersion:3,
+            settingsUpdatedAt:Math.max(0, Number(source.settingsUpdatedAt) || 0),
             enabled:!!source.enabled,
             intervalTurns:clampInteger(source.intervalTurns, 1, 50, AUTO_MEMORY_DEFAULTS.intervalTurns),
             readTurns:clampInteger(source.readTurns, 1, 50, AUTO_MEMORY_DEFAULTS.readTurns),
@@ -508,6 +577,49 @@ This requirement controls coverage only. It must not change or add any output fo
             compactTarget:clampInteger(source.compactTarget, 1, maxCards, Math.min(AUTO_MEMORY_DEFAULTS.compactTarget, maxCards)),
             protectUserAdded:source.protectUserAdded !== false
         };
+    }
+
+    function getAutoMemorySettingsSignature(settings) {
+        var source = getNormalizedAutoMemorySettings(settings || {});
+        return JSON.stringify([
+            source.enabled,
+            source.intervalTurns,
+            source.readTurns,
+            source.excludeRecentTurns,
+            source.contextCards,
+            source.midMergeTurns,
+            source.maxCards,
+            source.compactTarget,
+            source.protectUserAdded
+        ]);
+    }
+
+    function isAutoMemorySettingsSignatureCurrent(signature) {
+        return String(signature || '') === getAutoMemorySettingsSignature(getAutoMemorySettings());
+    }
+
+    function reconcileAutoMemoryStateAfterSettingsChange(previousSettings, nextSettings) {
+        if (getAutoMemorySettingsSignature(previousSettings) === getAutoMemorySettingsSignature(nextSettings)) return false;
+        AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED = true;
+        notifyAutoMemoryStatus(getChatId());
+        if (!AUTO_MEMORY_BUSY) {
+            if (safelyResetAutoMemoryPlanningAfterSettingsSave(getChatId(), nextSettings)) AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED = false;
+            scheduleAutoMemoryResponseCheck(100);
+        }
+        return true;
+    }
+
+    function safelyClearAutoMemoryFailureAfterSettingsSave(chatId) {
+        if (!chatId || AUTO_MEMORY_BUSY || !acquireAutoMemoryLock(chatId)) return false;
+        try {
+            var state = getAutoMemoryState(chatId);
+            clearAutoMemoryFailure(state);
+            state.lastError = '';
+            saveAutoMemoryState(chatId, state);
+            return true;
+        } finally {
+            releaseAutoMemoryLock(chatId);
+        }
     }
 
     function makeAutoMemoryState() {
@@ -530,6 +642,7 @@ This requirement controls coverage only. It must not change or add any output fo
             processedSinceMidMerge:0,
             forceFullCompact:false,
             fullBeforeRoutine:false,
+            settingsSignature:'',
             needsV2InventoryMigration:false,
             lastSuccessAt:0,
             lastAutoUsage:null,
@@ -568,6 +681,7 @@ This requirement controls coverage only. It must not change or add any output fo
         state.processedSinceMidMerge = Math.max(0, Number(state.processedSinceMidMerge) || 0);
         state.forceFullCompact = !!state.forceFullCompact;
         state.fullBeforeRoutine = !!state.fullBeforeRoutine;
+        state.settingsSignature = String(state.settingsSignature || '');
         state.needsV2InventoryMigration = !!state.needsV2InventoryMigration;
         state.version = 2;
         if (state.pendingApply != null && typeof state.pendingApply !== 'object') state.pendingApply = { invalid:true };
@@ -2146,6 +2260,8 @@ try {
 .crack-ext-header-ai-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:0 8px!important;height:29px!important;border-radius:7px!important;background:transparent!important;color:#514e49!important;font-weight:680!important;font-size:11.5px!important;border:1px solid transparent!important;cursor:pointer;white-space:nowrap!important;box-shadow:none!important;opacity:1;transition:background .18s,border-color .18s,color .18s!important}
 .crack-ext-header-ai-btn:hover{background:rgba(31,29,26,.055)!important;border-color:rgba(31,29,26,.07)!important;color:#353330!important;opacity:1}
 .crack-ext-header-ai-btn .crack-ext-header-ai-icon{display:block;width:14px;height:14px;color:#6f6b65;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.crack-ext-header-ai-btn.crack-ext-floating{position:fixed!important;right:calc(12px + env(safe-area-inset-right,0px))!important;bottom:calc(84px + env(safe-area-inset-bottom,0px))!important;z-index:99990!important;min-width:56px!important;height:44px!important;padding:0 13px!important;margin:0!important;border:1px solid #d8cab7!important;border-radius:999px!important;background:rgba(255,251,244,.96)!important;color:#6e5f4c!important;box-shadow:0 7px 22px rgba(61,43,23,.22)!important;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);touch-action:manipulation;pointer-events:auto!important}
+.crack-ext-header-ai-btn.crack-ext-floating:active{transform:scale(.96)}
 .crack-ext-export-btn{padding:5px 10px;border-radius:6px;border:1px solid #ddd;background:#fff;color:#333;cursor:pointer;font-size:11px;transition:background 0.2s}
 .crack-ext-export-btn:hover{background:#f0f0f0}
 .crack-ext-compress-list{max-height:250px;overflow-y:auto;border:1px solid #ddd;border-radius:8px;padding:8px;margin-top:4px}
@@ -2740,6 +2856,7 @@ transition:border-color .25s,box-shadow .25s,opacity .25s;
 body[data-theme="dark"] .crack-ext-header-ai-btn,html[data-theme="dark"] .crack-ext-header-ai-btn,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn{color:#C9BBA5!important}
 body[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#D5A052!important}
 body[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn:hover{background:rgba(226,168,75,.1)!important;border-color:rgba(226,168,75,.16)!important;color:#EDE5D6!important}
+body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating{background:rgba(39,35,30,.96)!important;border-color:rgba(213,160,82,.34)!important;color:#EDE5D6!important;box-shadow:0 7px 24px rgba(0,0,0,.38)!important}
 @media(max-width:820px){
 #ce-ai-top-settings{
 grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(58px,.62fr);
@@ -2791,18 +2908,64 @@ margin-bottom:12px;
 .crack-ext-ai-modal-header{top:-14px;margin:-14px -14px 14px!important;padding:14px!important}
 .crack-ext-ai-modal-btns{bottom:-14px!important;margin:14px -14px -14px!important;padding:12px 14px!important}
 .crack-ext-editor-modal .crack-ext-ai-modal-btns{bottom:-14px!important}
-.crack-ext-editor-card-head{align-items:flex-start;padding:10px 12px}
+.crack-ext-editor-card-head{align-items:stretch!important;flex-direction:column;padding:10px 12px}
 .crack-ext-editor-pane{padding:12px}
-.crack-ext-editor-actions{justify-content:flex-end}
-#ce-ai-secondary-settings .crack-ext-export-btn{padding:6px 5px;font-size:10px}
+.crack-ext-editor-actions{justify-content:stretch;width:100%}
+.crack-ext-editor-actions .crack-ext-ai-mbtn{flex:1 1 0}
+.crack-ext-editor-meta{flex-wrap:wrap}
+#ce-ai-top-settings{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+#ce-ai-top-settings .ce-ai-provider-field{grid-column:1;grid-row:1}
+#ce-ai-top-settings .ce-ai-model-field{grid-column:2;grid-row:1}
+#ce-ai-top-settings .crack-ext-turn-field{grid-column:1;grid-row:2}
+#ce-ai-key-wrap,#ce-ai-firebase-wrap{grid-column:1/-1;grid-row:3}
+#ce-ai-secondary-settings{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+#ce-ai-secondary-settings .fg:nth-child(3){grid-column:1/-1}
+#ce-ai-secondary-settings .crack-ext-export-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%}
+#ce-ai-secondary-settings .crack-ext-export-btn{padding:6px 5px;font-size:11px}
+.crack-ext-auto-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.crack-ext-auto-grid .crack-ext-auto-field:last-child{grid-column:1/-1}
 }
+@media(max-width:760px),(pointer:coarse){
+.crack-ext-header-ai-btn:not(.crack-ext-floating){width:44px!important;min-width:44px!important;height:44px!important;padding:0!important;border-radius:9px!important;touch-action:manipulation}
+.crack-ext-header-ai-btn:not(.crack-ext-floating) span{display:none}
+.crack-ext-header-ai-btn:not(.crack-ext-floating) .crack-ext-header-ai-icon{width:18px;height:18px}
+.crack-ext-ai-modal input:not([type="checkbox"]),.crack-ext-ai-modal textarea,.crack-ext-ai-modal select,.crack-ext-ui-dialog input{font-size:16px!important;min-height:44px}
+#ce-ai-vertex-json{font-size:16px!important}
+.crack-ext-ai-mbtn,.crack-ext-export-btn,#ce-ai-card-nav button{min-height:44px;touch-action:manipulation}
+.crack-ext-ai-close-btn,.crack-ext-prompt-icon-btn{width:44px!important;height:44px!important;min-width:44px!important;touch-action:manipulation}
+.crack-ext-turn-info-btn{width:32px!important;height:32px!important;min-width:32px!important;margin:0!important;position:relative}
+.crack-ext-turn-info-btn::after{content:"";position:absolute;inset:-6px}
+.crack-ext-vertex-small-btn{font-size:13px!important}
+.crack-ext-auto-field input[type="number"]{height:44px!important}
+.crack-ext-auto-check,.crack-ext-editor-check-label{min-height:44px!important}
+.crack-ext-ai-modal .crack-ext-auto-check,.crack-ext-ai-modal .crack-ext-editor-check-label{font-size:14px!important;letter-spacing:0!important}
+.crack-ext-ai-modal{overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;scroll-padding:64px 0 112px}
+.crack-ext-ai-overlay,.crack-ext-ui-dialog-overlay{overscroll-behavior:contain}
+}
+@media(max-width:760px){
+.crack-ext-ai-overlay{padding:calc(8px + env(safe-area-inset-top,0px)) calc(8px + env(safe-area-inset-right,0px)) calc(8px + env(safe-area-inset-bottom,0px)) calc(8px + env(safe-area-inset-left,0px))}
+.crack-ext-ai-modal{width:100%!important;max-height:100%!important}
+.crack-ext-editor-toolbar{top:60px}
+}
+@media(max-width:430px){
+#ce-ai-top-settings .crack-ext-turn-info-popover{left:0;right:auto;max-width:min(290px,calc(100vw - 50px))}
+#ce-ai-top-settings .crack-ext-turn-info-popover::before{left:39px;right:auto}
+}
+@media(max-width:430px){.crack-ext-editor-toolbar{position:static!important;top:auto!important;padding-top:0}}
 /* 모바일 가로 화면: 편집 툴바가 카드 조작 영역을 덮지 않도록 일반 스크롤로 전환 */
 @media (max-height:520px) and (max-width:760px){
 .crack-ext-editor-toolbar{position:static!important;top:auto!important;padding-top:0}
+.crack-ext-ai-modal-btns,.crack-ext-editor-modal .crack-ext-ai-modal-btns{position:static!important;bottom:auto!important}
+}
+@media (pointer:coarse) and (max-height:520px){
+.crack-ext-ai-overlay{padding:calc(8px + env(safe-area-inset-top,0px)) calc(8px + env(safe-area-inset-right,0px)) calc(8px + env(safe-area-inset-bottom,0px)) calc(8px + env(safe-area-inset-left,0px))}
+.crack-ext-ai-modal{width:100%!important;max-width:100%!important;max-height:100%!important;overflow-x:hidden;overscroll-behavior:contain}
+.crack-ext-editor-toolbar,.crack-ext-ai-modal-btns,.crack-ext-editor-modal .crack-ext-ai-modal-btns{position:static!important;top:auto!important;bottom:auto!important}
 }
 /* 768px 태블릿에서도 스크롤 중 닫기 버튼을 유지 */
 @media (min-width:761px) and (max-width:820px){
 .crack-ext-ai-modal-header{position:sticky;top:-24px;z-index:20}
+.crack-ext-editor-toolbar{position:static!important;top:auto!important}
 }
 @media(prefers-reduced-motion:reduce){
 .crack-ext-ai-modal,.crack-ext-ai-modal-header::after,.crack-ext-prompt-heading-main::before,#ce-ai-generate:disabled::after{animation:none!important;transition:none!important}
@@ -3475,7 +3638,8 @@ margin-bottom:12px;
             midSegmentIds:(state.midSegmentIds || []).map(String).filter(Boolean),
             processedSinceMidMerge:Math.max(0, Number(state.processedSinceMidMerge) || 0),
             forceFullCompact:!!state.forceFullCompact,
-            fullBeforeRoutine:!!state.fullBeforeRoutine
+            fullBeforeRoutine:!!state.fullBeforeRoutine,
+            settingsSignature:String(state.settingsSignature || '')
         };
         if (!compactionOnly && batchTurns.length) {
             commit.lastProcessedTurnKey = laterTurnKey(turns, commit.lastProcessedTurnKey, batchTurns[batchTurns.length - 1].key);
@@ -3501,7 +3665,7 @@ margin-bottom:12px;
         return commit;
     }
 
-    function createPendingAutoApply(plan, cards, commit) {
+    function createPendingAutoApply(plan, cards, commit, settings) {
         var patches = cards.map(function(card, index) {
             var slot = plan.rewriteSlots[index];
             var id = String(getSummaryId(slot) || '');
@@ -3529,6 +3693,8 @@ margin-bottom:12px;
             mutationStarted:false,
             recoveryIds:(plan.recoveryIds || []).slice(),
             commit:commit,
+            settingsSignature:getAutoMemorySettingsSignature(settings),
+            settingsProtectUserAdded:settings.protectUserAdded !== false,
             createdAt:Date.now()
         };
     }
@@ -3546,7 +3712,7 @@ margin-bottom:12px;
         };
     }
 
-    function createPendingAutoAppend(plan, result, commit) {
+    function createPendingAutoAppend(plan, result, commit, settings) {
         var patches = [];
         if (result.tailAction === 'UPDATE') {
             var tailId = String(getSummaryId(plan.openTail) || '');
@@ -3585,6 +3751,8 @@ margin-bottom:12px;
             mutationStarted:false,
             recoveryIds:(plan.recoveryIds || []).slice(),
             commit:commit,
+            settingsSignature:getAutoMemorySettingsSignature(settings),
+            settingsProtectUserAdded:settings.protectUserAdded !== false,
             createdAt:Date.now()
         };
     }
@@ -3607,6 +3775,12 @@ margin-bottom:12px;
         if (pending.operationMode != null && !['legacy', 'routine', 'mid', 'full'].includes(String(pending.operationMode))) {
             throw new Error('미완료 저장 모드가 올바르지 않습니다. 자동으로 변경하지 않습니다.');
         }
+        if (pending.settingsSignature != null && typeof pending.settingsSignature !== 'string') {
+            throw new Error('미완료 저장 계획의 설정 기준이 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+        }
+        if (pending.settingsProtectUserAdded != null && typeof pending.settingsProtectUserAdded !== 'boolean') {
+            throw new Error('미완료 저장 계획의 보호 설정이 올바르지 않습니다. 자동으로 변경하지 않습니다.');
+        }
         if (pending.allowedDeleteIds != null) {
             if (!Array.isArray(pending.allowedDeleteIds)) throw new Error('미완료 삭제 허용목록이 올바르지 않습니다. 자동으로 변경하지 않습니다.');
             var allowedDeleteIds = new Set(pending.allowedDeleteIds.map(String));
@@ -3619,6 +3793,7 @@ margin-bottom:12px;
         if (pending.commit.processedSinceMidMerge != null && !Number.isFinite(Number(pending.commit.processedSinceMidMerge))) throw new Error('미완료 중간 병합 턴수가 올바르지 않습니다.');
         if (pending.commit.forceFullCompact != null && typeof pending.commit.forceFullCompact !== 'boolean') throw new Error('미완료 전체 압축 상태가 올바르지 않습니다.');
         if (pending.commit.fullBeforeRoutine != null && typeof pending.commit.fullBeforeRoutine !== 'boolean') throw new Error('미완료 전체 압축 순서 상태가 올바르지 않습니다.');
+        if (pending.commit.settingsSignature != null && typeof pending.commit.settingsSignature !== 'string') throw new Error('미완료 설정 기준 상태가 올바르지 않습니다.');
         var ids = new Set();
         pending.patches.forEach(function(entry) {
             if (!entry || !entry.id || !entry.beforeHash || !entry.afterHash || !entry.title || !entry.summary ||
@@ -3658,8 +3833,68 @@ margin-bottom:12px;
         }
     }
 
+    function resetAutoMemoryPlanningForSettings(state, settingsSignature) {
+        state.lastScheduleTurnKey = String(state.lastProcessedTurnKey || '');
+        state.pendingCutoffTurnKey = '';
+        state.observedNewTurns = 0;
+        state.forceFullCompact = false;
+        state.fullBeforeRoutine = false;
+        state.waitingForSlot = false;
+        state.settingsSignature = String(settingsSignature || getAutoMemorySettingsSignature(getAutoMemorySettings()));
+    }
+
+    function safelyResetAutoMemoryPlanningAfterSettingsSave(chatId, settings) {
+        if (!chatId || AUTO_MEMORY_BUSY || !acquireAutoMemoryLock(chatId)) return false;
+        try {
+            var state = getAutoMemoryState(chatId);
+            if (state.pendingApply && state.pendingApply.mutationStarted) return false;
+            state.pendingApply = null;
+            resetAutoMemoryPlanningForSettings(state, getAutoMemorySettingsSignature(settings));
+            clearAutoMemoryFailure(state);
+            state.lastError = '';
+            state.lastStatus = '설정 변경 반영 · 최신 값으로 재계획 대기';
+            saveAutoMemoryState(chatId, state);
+            return true;
+        } finally {
+            releaseAutoMemoryLock(chatId);
+        }
+    }
+
+    function finishAutoMemorySettingsTransition(chatId, state, planSettingsSignature, status) {
+        var latestSignature = getAutoMemorySettingsSignature(getAutoMemorySettings());
+        if (!AUTO_MEMORY_SETTINGS_EDIT_PENDING && String(planSettingsSignature || latestSignature) === latestSignature && state.settingsSignature === latestSignature) return false;
+        resetAutoMemoryPlanningForSettings(state, latestSignature);
+        state.lastStatus = status || '설정 변경 반영 · 최신 값으로 재계획 대기';
+        clearAutoMemoryFailure(state);
+        saveAutoMemoryState(chatId, state);
+        scheduleAutoMemoryResponseCheck(AUTO_MEMORY_SETTINGS_EDIT_PENDING ? AUTO_MEMORY_SETTINGS_AUTOSAVE_MS + 100 : 100);
+        return true;
+    }
+
+    function getPendingMutationSettings(pending, fallbackSettings) {
+        var effective = Object.assign({}, fallbackSettings || getAutoMemorySettings());
+        if (pending && pending.mutationStarted && typeof pending.settingsProtectUserAdded === 'boolean') {
+            effective.protectUserAdded = pending.settingsProtectUserAdded;
+        }
+        return effective;
+    }
+
+    function discardUnstartedPendingForSettingsChange(chatId, state, pending) {
+        if (!pending || pending.mutationStarted) return false;
+        if (!AUTO_MEMORY_SETTINGS_EDIT_PENDING && pending.settingsSignature && isAutoMemorySettingsSignatureCurrent(pending.settingsSignature)) return false;
+        state.pendingApply = null;
+        resetAutoMemoryPlanningForSettings(state);
+        state.lastStatus = '설정 변경 감지 · 최신 값으로 재계획 대기';
+        state.lastError = '';
+        saveAutoMemoryState(chatId, state);
+        return true;
+    }
+
     async function resumePendingAutoApply(chatId, state, settings) {
         var pending = validatePendingAutoApply(state.pendingApply);
+        if (discardUnstartedPendingForSettingsChange(chatId, state, pending)) {
+            return { replan:true, patched:0, deleted:0, deleteFailures:0, total:0 };
+        }
         if (!renewAutoMemoryLock(chatId)) throw new Error('자동 저장 잠금을 잃어 변경을 중단했습니다.');
         var summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
         var byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
@@ -3671,7 +3906,11 @@ margin-bottom:12px;
             var currentHash = summaryFingerprint(current);
             if (currentHash !== patch.afterHash) {
                 if (currentHash !== patch.beforeHash) throw new Error('PATCH 대상이 외부에서 변경되어 중단했습니다: ' + patch.id);
-                if (!canAutoMutateSummary(current, settings)) throw new Error('보호된 카드가 PATCH 대상에 포함되어 중단했습니다.');
+                if (discardUnstartedPendingForSettingsChange(chatId, state, pending)) {
+                    return { replan:true, patched:0, deleted:0, deleteFailures:0, total:summaries.length };
+                }
+                var currentSettings = getPendingMutationSettings(pending, getAutoMemorySettings());
+                if (!canAutoMutateSummary(current, currentSettings)) throw new Error('보호된 카드가 PATCH 대상에 포함되어 중단했습니다.');
                 if (!renewAutoMemoryLock(chatId)) throw new Error('PATCH 직전 자동 저장 잠금을 잃어 중단했습니다.');
                 pending.mutationStarted = true;
                 saveAutoMemoryState(chatId, state);
@@ -3690,7 +3929,7 @@ margin-bottom:12px;
 
         summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
         byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
-        assertPendingDeletePreflight(pending, byId, settings);
+        assertPendingDeletePreflight(pending, byId, getPendingMutationSettings(pending, getAutoMemorySettings()));
         if (pending.phase === 'patch') {
             pending.phase = 'delete';
             saveAutoMemoryState(chatId, state);
@@ -3699,12 +3938,16 @@ margin-bottom:12px;
         while (pending.deleteIndex < pending.deletes.length) {
             summaries = await fetchSummaries({ silent:true, strict:true, chatId:chatId });
             byId = new Map(summaries.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
-            assertPendingDeletePreflight(pending, byId, settings);
+            assertPendingDeletePreflight(pending, byId, getPendingMutationSettings(pending, getAutoMemorySettings()));
             var deletion = pending.deletes[pending.deleteIndex];
             var deleteTarget = byId.get(String(deletion.id));
             if (deleteTarget) {
                 if (summaryFingerprint(deleteTarget) !== deletion.beforeHash) throw new Error('DELETE 대상이 외부에서 변경되어 중단했습니다: ' + deletion.id);
-                if (!canAutoMutateSummary(deleteTarget, settings)) throw new Error('보호된 카드가 DELETE 대상에 포함되어 중단했습니다.');
+                if (discardUnstartedPendingForSettingsChange(chatId, state, pending)) {
+                    return { replan:true, patched:0, deleted:0, deleteFailures:0, total:summaries.length };
+                }
+                var latestSettings = getPendingMutationSettings(pending, getAutoMemorySettings());
+                if (!canAutoMutateSummary(deleteTarget, latestSettings)) throw new Error('보호된 카드가 DELETE 대상에 포함되어 중단했습니다.');
                 if (!renewAutoMemoryLock(chatId)) throw new Error('DELETE 직전 자동 저장 잠금을 잃어 중단했습니다.');
                 pending.mutationStarted = true;
                 saveAutoMemoryState(chatId, state);
@@ -3746,7 +3989,7 @@ margin-bottom:12px;
             delete state.managedHashes[id];
             delete state.managedCards[id];
         });
-        ['lastScheduleTurnKey', 'lastProcessedTurnKey', 'pendingCutoffTurnKey', 'observedNewTurns', 'openTailId', 'midSegmentIds', 'processedSinceMidMerge', 'forceFullCompact', 'fullBeforeRoutine'].forEach(function(key) {
+        ['lastScheduleTurnKey', 'lastProcessedTurnKey', 'pendingCutoffTurnKey', 'observedNewTurns', 'openTailId', 'midSegmentIds', 'processedSinceMidMerge', 'forceFullCompact', 'fullBeforeRoutine', 'settingsSignature'].forEach(function(key) {
             if (Object.prototype.hasOwnProperty.call(pending.commit, key)) state[key] = pending.commit[key];
         });
         state.midSegmentIds = Array.from(new Set((state.midSegmentIds || []).map(String).filter(function(id) { return byId.has(id); })));
@@ -3912,7 +4155,12 @@ margin-bottom:12px;
     }
 
     async function runAutoMemory(manual) {
+        if (AUTO_MEMORY_SETTINGS_EDIT_PENDING) {
+            if (!manual) scheduleAutoMemoryResponseCheck(AUTO_MEMORY_SETTINGS_AUTOSAVE_MS + 100);
+            return false;
+        }
         var settings = getAutoMemorySettings();
+        var settingsSignature = getAutoMemorySettingsSignature(settings);
         var chatId = getChatId();
         var lockHeartbeat = 0;
         if (!chatId || (!manual && !settings.enabled) || AUTO_MEMORY_BUSY) return false;
@@ -3925,12 +4173,35 @@ margin-bottom:12px;
         var state = getAutoMemoryState(chatId);
 
         try {
+            if (!state.settingsSignature) {
+                if (state.initialized && !(state.pendingApply && state.pendingApply.mutationStarted)) {
+                    state.pendingApply = null;
+                    resetAutoMemoryPlanningForSettings(state, settingsSignature);
+                    state.lastStatus = '자동 설정 저장 구조 갱신 · 현재 값으로 재계획';
+                    saveAutoMemoryState(chatId, state);
+                } else {
+                    state.settingsSignature = settingsSignature;
+                }
+            } else if (state.settingsSignature !== settingsSignature && !(state.pendingApply && state.pendingApply.mutationStarted)) {
+                state.pendingApply = null;
+                resetAutoMemoryPlanningForSettings(state, settingsSignature);
+                state.lastStatus = '저장된 자동 설정 변경 감지 · 최신 값으로 재계획';
+                saveAutoMemoryState(chatId, state);
+            }
             state.lastError = '';
             if (state.pendingApply) {
+                var resumedPlanSettingsSignature = String(state.pendingApply.settingsSignature || settingsSignature);
                 state.waitingForSlot = false;
                 state.lastStatus = '미완료 슬롯 저장 재개 중';
                 saveAutoMemoryState(chatId, state);
                 var resumed = await resumePendingAutoApply(chatId, state, settings);
+                if (resumed.replan) {
+                    clearAutoMemoryFailure(state);
+                    saveAutoMemoryState(chatId, state);
+                    scheduleAutoMemoryResponseCheck(100);
+                    return true;
+                }
+                if (finishAutoMemorySettingsTransition(chatId, state, resumedPlanSettingsSignature, '미완료 저장 완료 · 변경된 설정으로 다음 작업 재계획')) return true;
                 clearAutoMemoryFailure(state);
                 state.lastSuccessAt = Date.now();
                 state.waitingForSlot = !!state.pendingCutoffTurnKey;
@@ -4046,6 +4317,14 @@ margin-bottom:12px;
                 ? batchTurns.length + '대화턴 누적 정리 중'
                 : (mode === 'mid' ? '최근 구간 중간 병합 중' : '최대 슬롯 초과 · 전체 2차 압축 중');
             saveAutoMemoryState(chatId, state);
+            if (AUTO_MEMORY_SETTINGS_EDIT_PENDING || !isAutoMemorySettingsSignatureCurrent(settingsSignature)) {
+                resetAutoMemoryPlanningForSettings(state);
+                state.lastStatus = '설정 변경 감지 · AI 호출 전 최신 값으로 재계획 대기';
+                clearAutoMemoryFailure(state);
+                saveAutoMemoryState(chatId, state);
+                scheduleAutoMemoryResponseCheck(100);
+                return true;
+            }
             if (!renewAutoMemoryLock(chatId)) throw new Error('AI 호출 직전 자동 저장 잠금을 잃어 중단했습니다.');
             var rawResult = await callAI(
                 runtime.provider,
@@ -4067,6 +4346,14 @@ margin-bottom:12px;
             if (!renewAutoMemoryLock(chatId)) throw new Error('AI 호출 뒤 자동 저장 잠금을 잃어 저장을 중단했습니다.');
             recordAutoMemoryUsage(state, LAST_AI_USAGE);
             saveAutoMemoryState(chatId, state);
+            if (AUTO_MEMORY_SETTINGS_EDIT_PENDING || !isAutoMemorySettingsSignatureCurrent(settingsSignature)) {
+                resetAutoMemoryPlanningForSettings(state);
+                state.lastStatus = '설정 변경 감지 · AI 결과는 저장하지 않고 최신 값으로 재계획 대기';
+                clearAutoMemoryFailure(state);
+                saveAutoMemoryState(chatId, state);
+                scheduleAutoMemoryResponseCheck(100);
+                return true;
+            }
             var commit;
             if (mode === 'routine') {
                 var appendResult = validateAutoAppendResult(rawResult, plan);
@@ -4081,8 +4368,9 @@ margin-bottom:12px;
                 }
                 var routineMetadata = getRoutineCommitMetadata(state, plan, appendResult);
                 if (state.forceFullCompact) routineMetadata.fullBeforeRoutine = true;
+                routineMetadata.settingsSignature = settingsSignature;
                 commit = createAutoApplyCommit(state, turns, batchTurns, manual, false, routineMetadata);
-                state.pendingApply = createPendingAutoAppend(plan, appendResult, commit);
+                state.pendingApply = createPendingAutoAppend(plan, appendResult, commit, settings);
             } else {
                 var cards = validateAutoGeneratedCards(rawResult, plan.slotLimit, plan.expectedCount);
                 var survivingIds = plan.rewriteSlots.slice(0, cards.length).map(function(item) { return String(getSummaryId(item) || ''); });
@@ -4092,13 +4380,21 @@ margin-bottom:12px;
                     midSegmentIds:nextOpenTailId ? [nextOpenTailId] : [],
                     processedSinceMidMerge:0,
                     forceFullCompact:mode === 'full' ? false : !!state.forceFullCompact,
-                    fullBeforeRoutine:mode === 'full' ? false : !!state.fullBeforeRoutine
+                    fullBeforeRoutine:mode === 'full' ? false : !!state.fullBeforeRoutine,
+                    settingsSignature:settingsSignature
                 });
-                state.pendingApply = createPendingAutoApply(plan, cards, commit);
+                state.pendingApply = createPendingAutoApply(plan, cards, commit, settings);
             }
             state.lastStatus = '저장 계획 기록 완료 · 슬롯 치환 및 검증 중';
             saveAutoMemoryState(chatId, state);
             var result = await resumePendingAutoApply(chatId, state, settings);
+            if (result.replan) {
+                clearAutoMemoryFailure(state);
+                saveAutoMemoryState(chatId, state);
+                scheduleAutoMemoryResponseCheck(100);
+                return true;
+            }
+            if (finishAutoMemorySettingsTransition(chatId, state, settingsSignature, '슬롯 저장 완료 · 변경된 설정으로 다음 작업 재계획')) return true;
 
             state.lastSuccessAt = Date.now();
             state.waitingForSlot = !!state.pendingCutoffTurnKey;
@@ -4118,11 +4414,14 @@ margin-bottom:12px;
             if (manual) await showUiAlert(state.lastError, '자동 장기기억 정리 오류', { tone:'danger' });
             return false;
         } finally {
+            var settingsReplanRequested = AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED;
+            AUTO_MEMORY_SETTINGS_REPLAN_REQUESTED = false;
             if (lockHeartbeat) clearInterval(lockHeartbeat);
             AUTO_MEMORY_BUSY = false;
             releaseAutoMemoryLock(chatId);
             notifyAutoMemoryStatus(chatId);
             refreshAutoMemorySchedule(true);
+            if (settingsReplanRequested) scheduleAutoMemoryResponseCheck(100);
         }
     }
 
@@ -4912,6 +5211,10 @@ if (mainModel && mainProvider) {
         var btnAutoSaveSettings = overlay.querySelector('#ce-auto-save-settings');
         var btnAutoRun = overlay.querySelector('#ce-auto-run');
         var btnAutoReset = overlay.querySelector('#ce-auto-reset');
+        var autoSettingsSaveTimer = 0;
+        var autoSettingsDirty = false;
+        var autoSettingsDirtyFields = new Set();
+        var autoSettingsSaveLabelTimer = 0;
         // 턴 수 안내 팝업
 if (btnTurnInfo && turnInfoPopover) {
     btnTurnInfo.addEventListener('click', function(e) {
@@ -5165,16 +5468,33 @@ if (btnTurnInfo && turnInfoPopover) {
             localStorage.setItem('crack_ext_summary_style', selStyle.value);
         });
 
+        function readAutoInteger(input, min, max) {
+            var raw = String(input && input.value != null ? input.value : '').trim();
+            if (!/^-?\d+$/.test(raw)) return null;
+            var value = Number(raw);
+            if (!Number.isSafeInteger(value) || value < min || value > max) return null;
+            return value;
+        }
+
         function readAutoSettingsFromUi() {
+            var intervalTurns = readAutoInteger(autoInterval, 1, 50);
+            var readTurns = readAutoInteger(autoRead, 1, 50);
+            var excludeRecentTurns = readAutoInteger(autoExclude, 0, 10);
+            var contextCards = readAutoInteger(autoContext, 3, 5);
+            var midMergeTurns = readAutoInteger(autoMidMerge, 0, 500);
+            var maxCards = readAutoInteger(autoMax, 5, 20);
+            if ([intervalTurns, readTurns, excludeRecentTurns, contextCards, midMergeTurns, maxCards].some(function(value) { return value == null; })) return null;
+            var compactTarget = readAutoInteger(autoTarget, 1, maxCards);
+            if (compactTarget == null) return null;
             return getNormalizedAutoMemorySettings({
                 enabled:autoEnabled.checked,
-                intervalTurns:autoInterval.value,
-                readTurns:autoRead.value,
-                excludeRecentTurns:autoExclude.value,
-                contextCards:autoContext.value,
-                midMergeTurns:autoMidMerge.value,
-                maxCards:autoMax.value,
-                compactTarget:autoTarget.value,
+                intervalTurns:intervalTurns,
+                readTurns:readTurns,
+                excludeRecentTurns:excludeRecentTurns,
+                contextCards:contextCards,
+                midMergeTurns:midMergeTurns,
+                maxCards:maxCards,
+                compactTarget:compactTarget,
                 protectUserAdded:autoProtect.checked
             });
         }
@@ -5192,6 +5512,18 @@ if (btnTurnInfo && turnInfoPopover) {
             autoTarget.value = settings.compactTarget;
         }
 
+        function syncAutoTargetLimit() {
+            var maxCards = readAutoInteger(autoMax, 5, 20);
+            if (maxCards == null) return false;
+            autoTarget.max = maxCards;
+            var target = readAutoInteger(autoTarget, 1, 20);
+            if (target != null && target > maxCards) {
+                autoTarget.value = maxCards;
+                return true;
+            }
+            return false;
+        }
+
         function renderAutoMemoryStatus() {
             var chatId = getChatId();
             var state = getAutoMemoryState(chatId);
@@ -5203,7 +5535,86 @@ if (btnTurnInfo && turnInfoPopover) {
             btnAutoRun.disabled = AUTO_MEMORY_BUSY || !chatId;
             btnAutoSaveSettings.disabled = AUTO_MEMORY_BUSY;
             btnAutoReset.disabled = AUTO_MEMORY_BUSY || !chatId;
+            [autoEnabled, autoProtect, autoInterval, autoRead, autoExclude, autoContext, autoMidMerge, autoMax, autoTarget].forEach(function(control) {
+                if (control) control.disabled = AUTO_MEMORY_BUSY;
+            });
         }
+
+        function flashAutoSettingsSaved() {
+            clearTimeout(autoSettingsSaveLabelTimer);
+            btnAutoSaveSettings.textContent = '저장됨';
+            autoSettingsSaveLabelTimer = setTimeout(function() {
+                if (btnAutoSaveSettings && btnAutoSaveSettings.isConnected) btnAutoSaveSettings.textContent = '설정 저장';
+            }, 1000);
+        }
+
+        function saveAutoSettingsOnlyFromUi(options) {
+            options = options || {};
+            var uiSettings = readAutoSettingsFromUi();
+            if (!uiSettings) return null;
+            var previousSettings = getAutoMemorySettings();
+            var nextSettings = Object.assign({}, previousSettings);
+            autoSettingsDirtyFields.forEach(function(key) {
+                nextSettings[key] = uiSettings[key];
+            });
+            var saved = saveAutoMemorySettings(nextSettings);
+            var settingsChanged = reconcileAutoMemoryStateAfterSettingsChange(previousSettings, saved);
+            if (settingsChanged) safelyClearAutoMemoryFailureAfterSettingsSave(getChatId());
+            autoSettings = saved;
+            autoSettingsDirty = false;
+            AUTO_MEMORY_SETTINGS_EDIT_PENDING = false;
+            autoSettingsDirtyFields.clear();
+            if (options.writeBack) writeAutoSettingsToUi(saved);
+            if (options.flash) flashAutoSettingsSaved();
+            renderAutoMemoryStatus();
+            return saved;
+        }
+
+        function scheduleAutoSettingsSave(delay, fields) {
+            autoSettingsDirty = true;
+            AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+            (Array.isArray(fields) ? fields : [fields]).filter(Boolean).forEach(function(key) {
+                autoSettingsDirtyFields.add(String(key));
+            });
+            clearTimeout(autoSettingsSaveTimer);
+            autoSettingsSaveTimer = setTimeout(function() {
+                autoSettingsSaveTimer = 0;
+                try {
+                    var saved = saveAutoSettingsOnlyFromUi({ flash:true });
+                    if (!saved) {
+                        AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                        autoStatus.textContent = '설정 입력 완료 대기 · 자동 실행 잠시 멈춤';
+                    }
+                } catch (err) {
+                    AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                    autoStatus.textContent = '설정 자동 저장 실패 · ' + err.message;
+                }
+            }, delay == null ? AUTO_MEMORY_SETTINGS_AUTOSAVE_MS : delay);
+        }
+
+        var autoSettingsFieldMap = new Map([
+            [autoInterval, 'intervalTurns'],
+            [autoRead, 'readTurns'],
+            [autoExclude, 'excludeRecentTurns'],
+            [autoContext, 'contextCards'],
+            [autoMidMerge, 'midMergeTurns'],
+            [autoMax, 'maxCards'],
+            [autoTarget, 'compactTarget']
+        ]);
+        autoSettingsFieldMap.forEach(function(settingKey, input) {
+            input.addEventListener('input', function() {
+                var fields = [settingKey];
+                if (input === autoMax && syncAutoTargetLimit()) fields.push('compactTarget');
+                scheduleAutoSettingsSave(null, fields);
+            });
+            input.addEventListener('change', function() {
+                var fields = [settingKey];
+                if (input === autoMax && syncAutoTargetLimit()) fields.push('compactTarget');
+                scheduleAutoSettingsSave(0, fields);
+            });
+        });
+        autoEnabled.addEventListener('change', function() { scheduleAutoSettingsSave(0, 'enabled'); });
+        autoProtect.addEventListener('change', function() { scheduleAutoSettingsSave(0, 'protectUserAdded'); });
 
         function persistAutoSettingsFromUi() {
             saveVisibleCredentials(activeCredentialProvider);
@@ -5211,22 +5622,27 @@ if (btnTurnInfo && turnInfoPopover) {
             localStorage.setItem('crack_ext_' + selProvider.value + '_model', selModel.value);
             localStorage.setItem('crack_ext_summary_style', selStyle.value);
             localStorage.setItem(getReasoningStorageKey(selProvider.value, selModel.value), selReasoning.value || 'auto');
-            var saved = saveAutoMemorySettings(readAutoSettingsFromUi());
-            var chatId = getChatId();
-            if (chatId) {
-                var state = getAutoMemoryState(chatId);
-                clearAutoMemoryFailure(state);
-                saveAutoMemoryState(chatId, state);
+            clearTimeout(autoSettingsSaveTimer);
+            autoSettingsSaveTimer = 0;
+            var saved = saveAutoSettingsOnlyFromUi({ writeBack:true });
+            if (!saved) {
+                AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                throw new Error('자동 설정의 빈칸이나 범위를 확인해주세요. 최대 슬롯은 5~20, 압축 목표는 최대 슬롯 이하여야 합니다.');
             }
-            writeAutoSettingsToUi(saved);
+            safelyClearAutoMemoryFailureAfterSettingsSave(getChatId());
             renderAutoMemoryStatus();
             return saved;
         }
 
-        btnAutoSaveSettings.onclick = function(e) {
+        btnAutoSaveSettings.onclick = async function(e) {
             e.preventDefault();
             e.stopPropagation();
-            persistAutoSettingsFromUi();
+            try {
+                persistAutoSettingsFromUi();
+            } catch (err) {
+                await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
+                return;
+            }
             showToast('자동 장기기억 설정을 저장했습니다.');
             if (autoEnabled.checked) setTimeout(pollAutoMemory, 100);
         };
@@ -5234,7 +5650,12 @@ if (btnTurnInfo && turnInfoPopover) {
         btnAutoRun.onclick = async function(e) {
             e.preventDefault();
             e.stopPropagation();
-            persistAutoSettingsFromUi();
+            try {
+                persistAutoSettingsFromUi();
+            } catch (err) {
+                await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
+                return;
+            }
             renderAutoMemoryStatus();
             await runAutoMemory(true);
             renderAutoMemoryStatus();
@@ -5549,8 +5970,25 @@ if (btnTurnInfo && turnInfoPopover) {
         });
 
         async function closeMainModal() {
+            clearTimeout(autoSettingsSaveTimer);
+            autoSettingsSaveTimer = 0;
+            if (autoSettingsDirty) {
+                try {
+                    var savedAutoSettings = saveAutoSettingsOnlyFromUi({ writeBack:true });
+                    if (!savedAutoSettings) {
+                        AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                        await showUiAlert('자동 설정의 빈칸이나 범위를 확인해주세요. 최대 슬롯은 5~20, 압축 목표는 최대 슬롯 이하여야 합니다.', '자동 설정 확인', { tone:'warning' });
+                        return;
+                    }
+                } catch (err) {
+                    AUTO_MEMORY_SETTINGS_EDIT_PENDING = true;
+                    await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
+                    return;
+                }
+            }
             if (hasUnsavedPromptText() && !(await showUiConfirm('저장하지 않은 프롬프트 수정이 있습니다. 창을 닫을까요?', '저장하지 않은 변경사항', { confirmText:'닫기', danger:true }))) return;
             if (!isGenerating) saveAiResultDraft(isPromptMode ? tempResultContent : txtResult.value, resultMode);
+            clearTimeout(autoSettingsSaveLabelTimer);
             releaseVertexSessionSecrets();
             overlay.remove();
         }
@@ -5703,10 +6141,20 @@ if (btnTurnInfo && turnInfoPopover) {
 
     var topHeaderContainerCache = null;
     var topHeaderContainerRoute = '';
+    var topHeaderLayoutMode = '';
     var topHeaderAiBtn = null;
+    var topHeaderSearchRetryAt = 0;
+    var topHeaderRetryTimer = 0;
+    var topHeaderRetryDelay = 1200;
+
+    function isMobileHeaderLayout() {
+        var coarsePointer = false;
+        try { coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (e) {}
+        return window.innerWidth < 760 || (coarsePointer && Math.min(window.innerWidth || 0, window.innerHeight || 0) < 600);
+    }
 
     function getTopHeaderBandStart() {
-        return window.innerWidth < 760 ? 32 : 40;
+        return isMobileHeaderLayout() ? 8 : 40;
     }
 
     function getTopHeaderBandLimit() {
@@ -5715,7 +6163,7 @@ if (btnTurnInfo && turnInfoPopover) {
 
     function isExcludedHeaderArea(el) {
         if (!el || !el.closest) return true;
-        return !!el.closest('.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"],form');
+        return !!el.closest('.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"]');
     }
 
     function isRetainableTopHeaderContainer(el) {
@@ -5762,12 +6210,43 @@ if (btnTurnInfo && turnInfoPopover) {
         var controls = countVisibleTopHeaderControls(el);
         if (!controls) return -Infinity;
         var viewportWidth = Math.max(window.innerWidth || 0, 1);
-        var score = controls * 24 - Math.abs(rect.top - 76) * 1.4 - Math.max(0, rect.width - 360) * 0.08;
+        var score = Math.min(controls, 6) * 22 - Math.abs(rect.top - 76) * 1.4 - Math.max(0, rect.width - 360) * 0.22;
         score += Math.max(0, Math.min(36, (rect.left / viewportWidth) * 36));
         if (rect.right >= viewportWidth * 0.72) score += 48;
         var modelLike = el.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
         if (modelLike && isVisibleTopHeaderControl(modelLike)) score += 90;
+        var loreEntry = el.querySelector('#lore-inj-entry-button,[data-lore-inj-entry="true"]');
+        if (loreEntry && isVisibleTopHeaderControl(loreEntry)) score += 180;
         return score;
+    }
+
+    function findKnownTopActionGroup() {
+        var anchors = Array.prototype.slice.call(document.querySelectorAll(
+            '#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]'
+        ));
+        var best = null;
+        var bestScore = -Infinity;
+        for (var i = 0; i < anchors.length; i++) {
+            if (!isVisibleTopHeaderControl(anchors[i])) continue;
+            var parent = anchors[i].parentElement;
+            var depth = 0;
+            while (parent && parent !== document.body && depth < 5) {
+                if (isUsableTopHeaderContainer(parent)) {
+                    var display = window.getComputedStyle(parent).display;
+                    var controls = countVisibleTopHeaderControls(parent);
+                    if ((display === 'flex' || display === 'inline-flex' || display === 'grid') && controls >= 1 && controls <= 10) {
+                        var score = scoreTopHeaderCandidate(parent);
+                        if (score > bestScore) {
+                            best = parent;
+                            bestScore = score;
+                        }
+                    }
+                }
+                parent = parent.parentElement;
+                depth++;
+            }
+        }
+        return best;
     }
 
     function findBestSelectorCandidate(selector) {
@@ -5776,6 +6255,11 @@ if (btnTurnInfo && turnInfoPopover) {
         var best = null;
         var bestScore = -Infinity;
         for (var i = 0; i < found.length; i++) {
+            if (isMobileHeaderLayout()) {
+                var rect = found[i].getBoundingClientRect();
+                var viewportWidth = Math.max(window.innerWidth || 0, 1);
+                if (rect.top < 36 || rect.right < viewportWidth * 0.55) continue;
+            }
             var score = scoreTopHeaderCandidate(found[i]);
             if (score > bestScore) {
                 best = found[i];
@@ -5809,17 +6293,19 @@ if (btnTurnInfo && turnInfoPopover) {
 
     function findGeometricTopActionGroup() {
         // 제목·모델 선택 줄과 같은 세로 대역만 검사한다. 페이지 전역 최상단 바는 제외한다.
-        // 모바일은 전역 상단바와 제목 줄의 기하 구분이 불안정하므로 정확 선택자 실패 시 floating을 쓴다.
-        if (!getChatId() || window.innerWidth < 760) return null;
+        // 화면 폭과 무관하게 제한된 기하 탐색을 쓰며, 모바일도 입력창 FAB로 내리지 않는다.
+        if (!getChatId()) return null;
 
         var controls = document.querySelectorAll('button,[role="button"]');
         var candidates = [];
         var seen = new Set();
         var viewportWidth = Math.max(window.innerWidth || 0, 1);
-        var minLeft = viewportWidth >= 760 ? Math.max(260, Math.floor(viewportWidth * 0.28)) : 0;
+        var mobileLayout = isMobileHeaderLayout();
+        var minLeft = mobileLayout ? 0 : Math.max(260, Math.floor(viewportWidth * 0.28));
         for (var i = 0; i < controls.length; i++) {
             if (!isVisibleTopHeaderControl(controls[i])) continue;
             var controlRect = controls[i].getBoundingClientRect();
+            if (mobileLayout && controlRect.top < 36) continue;
             if (controlRect.left < minLeft || controlRect.right > viewportWidth + 8) continue;
             var parent = controls[i].parentElement;
             var depth = 0;
@@ -5827,7 +6313,10 @@ if (btnTurnInfo && turnInfoPopover) {
                 if (!seen.has(parent) && isUsableTopHeaderContainer(parent)) {
                     var display = window.getComputedStyle(parent).display;
                     var controlCount = countVisibleTopHeaderControls(parent);
-                    if ((display === 'flex' || display === 'inline-flex' || display === 'grid') && controlCount >= 1 && controlCount <= 10) {
+                    var modelLike = parent.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
+                    var parentRect = parent.getBoundingClientRect();
+                    var mobileScopeOk = !mobileLayout || (!!parent.closest('main') && parentRect.top >= 36 && parentRect.right >= viewportWidth * 0.55);
+                    if (mobileScopeOk && (display === 'flex' || display === 'inline-flex' || display === 'grid') && controlCount >= 1 && controlCount <= (mobileLayout ? 8 : 10)) {
                         seen.add(parent);
                         candidates.push(parent);
                     }
@@ -5851,14 +6340,42 @@ if (btnTurnInfo && turnInfoPopover) {
 
     function findTopHeaderContainer() {
         var currentRoute = getChatId() || location.pathname || 'current';
+        var currentLayoutMode = isMobileHeaderLayout() ? 'mobile' : 'desktop';
+        if (topHeaderLayoutMode && topHeaderLayoutMode !== currentLayoutMode && topHeaderContainerCache) {
+            var cachedStyle = window.getComputedStyle(topHeaderContainerCache);
+            if (cachedStyle.display === 'none' || !topHeaderContainerCache.getClientRects().length) topHeaderContainerCache = null;
+        }
+        topHeaderLayoutMode = currentLayoutMode;
         var retainedHiddenContainer = null;
         if (topHeaderContainerRoute === currentRoute && isRetainableTopHeaderContainer(topHeaderContainerCache)) {
-            if (isUsableTopHeaderContainer(topHeaderContainerCache)) return topHeaderContainerCache;
+            if (isUsableTopHeaderContainer(topHeaderContainerCache)) {
+                var knownReplacement = findKnownTopActionGroup();
+                if (knownReplacement && knownReplacement !== topHeaderContainerCache) {
+                    topHeaderContainerCache = knownReplacement;
+                    return knownReplacement;
+                }
+                return topHeaderContainerCache;
+            }
             retainedHiddenContainer = topHeaderContainerCache;
         } else {
             topHeaderContainerCache = null;
         }
         topHeaderContainerRoute = currentRoute;
+        // 같은 제목창이 접혀 화면 밖으로 나간 동안에는 다른 상단 툴바로 옮기지 않는다.
+        if (retainedHiddenContainer) {
+            var visibleKnownReplacement = findKnownTopActionGroup();
+            if (visibleKnownReplacement && visibleKnownReplacement !== retainedHiddenContainer) {
+                topHeaderContainerCache = visibleKnownReplacement;
+                return visibleKnownReplacement;
+            }
+            var retainedStyle = window.getComputedStyle(retainedHiddenContainer);
+            if (retainedStyle.display === 'none' || !retainedHiddenContainer.getClientRects().length) {
+                topHeaderContainerCache = null;
+            } else {
+                topHeaderContainerCache = retainedHiddenContainer;
+                return retainedHiddenContainer;
+            }
+        }
 
         var legacy = findLegacyTopActionGroup();
         if (legacy) {
@@ -5866,12 +6383,25 @@ if (btnTurnInfo && turnInfoPopover) {
             return legacy;
         }
 
+        var known = findKnownTopActionGroup();
+        if (known) {
+            topHeaderContainerCache = known;
+            return known;
+        }
+
         // 구체적인 제목창 액션 영역만 찾고, 실패하면 제한된 기하 탐색을 사용한다.
         var selectors = [
             '.absolute.z-\\[5\\] .flex.gap-3.items-center',
             '.absolute.z-\\[5\\] [class*="items-center"]',
-            'main [role="toolbar"]'
+            '[data-testid*="chat-header"] [class*="items-center"]',
+            '[class*="chat-header"] [class*="items-center"]'
         ];
+        selectors = selectors.concat([
+            'main header [class*="items-center"]',
+            'main [class*="sticky"] [class*="items-center"]',
+            'main [class*="absolute"] [class*="items-center"]',
+            'main [role="toolbar"]'
+        ]);
 
         for (var i = 0; i < selectors.length; i++) {
             var candidate = findBestSelectorCandidate(selectors[i]);
@@ -5886,11 +6416,25 @@ if (btnTurnInfo && turnInfoPopover) {
             topHeaderContainerCache = geometric;
             return geometric;
         }
-        if (retainedHiddenContainer) {
-            topHeaderContainerCache = retainedHiddenContainer;
-            return retainedHiddenContainer;
-        }
         return null;
+    }
+
+    function getDirectHeaderChild(host, descendant) {
+        if (!host || !descendant || !host.contains(descendant)) return null;
+        var node = descendant;
+        while (node && node.parentElement !== host) node = node.parentElement;
+        return node && node.parentElement === host ? node : null;
+    }
+
+    function findTopHeaderInsertBefore(host) {
+        if (!host) return null;
+        var preferred = host.querySelector('#lore-inj-entry-button,[data-lore-inj-entry="true"]');
+        if (!preferred) preferred = host.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
+        var directPreferred = getDirectHeaderChild(host, preferred);
+        if (directPreferred) return directPreferred;
+        var controls = Array.prototype.slice.call(host.querySelectorAll('button,[role="button"]')).filter(isVisibleTopHeaderControl);
+        controls.sort(function(a, b) { return a.getBoundingClientRect().left - b.getBoundingClientRect().left; });
+        return controls.length ? getDirectHeaderChild(host, controls[0]) : null;
     }
 
     function createTopHeaderBtn() {
@@ -5899,6 +6443,8 @@ if (btnTurnInfo && turnInfoPopover) {
         aiBtn.type = 'button';
         aiBtn.innerHTML = '<svg class="crack-ext-header-ai-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z"/><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4.5"/></svg><span>요약</span>';
         aiBtn.title = '요약 및 장기기억 도구';
+        aiBtn.setAttribute('aria-label', '요약 및 장기기억 도구');
+        aiBtn.setAttribute('aria-haspopup', 'dialog');
         aiBtn.addEventListener('click', function(e) {
             e.stopPropagation();
             e.preventDefault();
@@ -5926,14 +6472,60 @@ if (btnTurnInfo && turnInfoPopover) {
         return aiBtn;
     }
 
+    function clearTopHeaderRetry() {
+        if (topHeaderRetryTimer) clearTimeout(topHeaderRetryTimer);
+        topHeaderRetryTimer = 0;
+        topHeaderSearchRetryAt = 0;
+        topHeaderRetryDelay = 1200;
+    }
+
+    function scheduleTopHeaderRetry() {
+        if (topHeaderRetryTimer || !getChatId()) return;
+        var delay = topHeaderRetryDelay;
+        topHeaderSearchRetryAt = Date.now() + delay;
+        topHeaderRetryTimer = setTimeout(function() {
+            topHeaderRetryTimer = 0;
+            injectTopHeaderBtn();
+        }, delay);
+        topHeaderRetryDelay = Math.min(5000, Math.round(delay * 1.8));
+    }
+
+    function mutationContainsKnownHeaderAnchor(mutation) {
+        var selector = '#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]';
+        var nodes = mutation && mutation.addedNodes ? Array.prototype.slice.call(mutation.addedNodes) : [];
+        if (mutation && mutation.type === 'attributes') nodes.push(mutation.target);
+        for (var i = 0; i < nodes.length; i++) {
+            var element = nodes[i] && nodes[i].nodeType === 1 ? nodes[i] : null;
+            if (!element) continue;
+            if ((element.matches && element.matches(selector)) || (element.querySelector && element.querySelector(selector))) return true;
+        }
+        return false;
+    }
+
     function injectTopHeaderBtn() {
+        if (!getChatId()) {
+            clearTopHeaderRetry();
+            topHeaderContainerCache = null;
+            topHeaderContainerRoute = location.pathname || 'current';
+            topHeaderLayoutMode = isMobileHeaderLayout() ? 'mobile' : 'desktop';
+            if (topHeaderAiBtn && topHeaderAiBtn.isConnected) topHeaderAiBtn.remove();
+            return;
+        }
         var headerContainer = findTopHeaderContainer();
         var aiBtn = getOrCreateTopHeaderBtn(headerContainer);
 
         if (headerContainer) {
-            if (aiBtn.parentElement !== headerContainer) headerContainer.prepend(aiBtn);
+            clearTopHeaderRetry();
+            aiBtn.classList.remove('crack-ext-floating');
+            var before = findTopHeaderInsertBefore(headerContainer);
+            if (aiBtn.parentElement !== headerContainer || (before && aiBtn.nextSibling !== before)) {
+                if (before) headerContainer.insertBefore(aiBtn, before);
+                else headerContainer.appendChild(aiBtn);
+            }
             return;
         }
+        scheduleTopHeaderRetry();
+        aiBtn.classList.remove('crack-ext-floating');
         if (aiBtn.isConnected) aiBtn.remove();
     }
 
@@ -5947,12 +6539,13 @@ if (btnTurnInfo && turnInfoPopover) {
             if (!document.getElementById('crack-ext-ai-css')) return true;
 
             var buttons = document.querySelectorAll('.crack-ext-header-ai-btn');
+            if (!getChatId()) return buttons.length > 0;
             if (buttons.length !== 1) return true;
 
             var aiBtn = buttons[0];
             var headerContainer = findTopHeaderContainer();
             if (headerContainer) {
-                return aiBtn.parentElement !== headerContainer;
+                return aiBtn.parentElement !== headerContainer || aiBtn.classList.contains('crack-ext-floating');
             }
             return aiBtn.isConnected;
         }
@@ -5973,11 +6566,21 @@ if (btnTurnInfo && turnInfoPopover) {
             var currentRoute = getChatId() || location.pathname || 'current';
             var routeChanged = !!topHeaderContainerRoute && topHeaderContainerRoute !== currentRoute;
             if (routeChanged) {
+                clearTopHeaderRetry();
                 topHeaderContainerCache = null;
+                topHeaderContainerRoute = currentRoute;
+                topHeaderLayoutMode = isMobileHeaderLayout() ? 'mobile' : 'desktop';
+                topHeaderSearchRetryAt = 0;
                 if (topHeaderAiBtn && topHeaderAiBtn.isConnected) topHeaderAiBtn.remove();
             }
-            var shouldRescan = routeChanged || !isRetainableTopHeaderContainer(topHeaderContainerCache) ||
-                !topHeaderAiBtn || !topHeaderAiBtn.isConnected;
+            var retryDue = Date.now() >= topHeaderSearchRetryAt;
+            var duplicateButtons = document.querySelectorAll('.crack-ext-header-ai-btn').length !== 1;
+            var knownAnchorAdded = false;
+            for (var anchorIndex = 0; anchorIndex < mutations.length; anchorIndex++) {
+                if (mutationContainsKnownHeaderAnchor(mutations[anchorIndex])) { knownAnchorAdded = true; break; }
+            }
+            var shouldRescan = routeChanged || duplicateButtons || knownAnchorAdded || (retryDue && (!topHeaderAiBtn || !topHeaderAiBtn.isConnected ||
+                !isRetainableTopHeaderContainer(topHeaderContainerCache)));
             if (shouldRescan) scheduleInject();
             for (var i = 0; i < mutations.length; i++) {
                 if (mutationTouchesAutoMemoryResponse(mutations[i])) {
