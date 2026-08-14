@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.3.1
+// @version      2.3.2
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -420,11 +420,25 @@ This requirement controls coverage only. It must not change or add any output fo
 
     // ============== 유틸 함수 ==============
     function getChatId() {
-        const patterns = [/\/episodes\/([a-f0-9-]+)/i, /\/chats\/([a-f0-9-]+)/i, /\/c\/([a-f0-9-]+)/i];
-        for (var i = 0; i < patterns.length; i++) {
-            var match = location.pathname.match(patterns[i]);
-            if (match) return match[1];
+        const patterns = [/\/episodes\/([a-z0-9_-]{8,})/i, /\/chats\/([a-z0-9_-]{8,})/i, /\/c\/([a-z0-9_-]{8,})/i];
+        var routeSources = [location.pathname || '', location.hash || ''];
+        for (var sourceIndex = 0; sourceIndex < routeSources.length; sourceIndex++) {
+            for (var i = 0; i < patterns.length; i++) {
+                var match = routeSources[sourceIndex].match(patterns[i]);
+                if (match) return match[1];
+            }
         }
+        try {
+            var params = new URLSearchParams(location.search || '');
+            var queryId = params.get('chatId') || params.get('chat_id') || params.get('conversationId') || params.get('episodeId');
+            if (/^[a-z0-9_-]{8,}$/i.test(String(queryId || ''))) return String(queryId);
+            var hashQueryIndex = String(location.hash || '').indexOf('?');
+            if (hashQueryIndex >= 0) {
+                var hashParams = new URLSearchParams(String(location.hash).slice(hashQueryIndex + 1));
+                var hashId = hashParams.get('chatId') || hashParams.get('chat_id') || hashParams.get('conversationId') || hashParams.get('episodeId');
+                if (/^[a-z0-9_-]{8,}$/i.test(String(hashId || ''))) return String(hashId);
+            }
+        } catch (e) {}
         return null;
     }
 
@@ -2336,8 +2350,10 @@ try {
 .crack-ext-header-ai-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:0 8px!important;height:29px!important;border-radius:7px!important;background:transparent!important;color:#514e49!important;font-weight:680!important;font-size:11.5px!important;border:1px solid transparent!important;cursor:pointer;white-space:nowrap!important;box-shadow:none!important;opacity:1;transition:background .18s,border-color .18s,color .18s!important}
 .crack-ext-header-ai-btn:hover{background:rgba(31,29,26,.055)!important;border-color:rgba(31,29,26,.07)!important;color:#353330!important;opacity:1}
 .crack-ext-header-ai-btn .crack-ext-header-ai-icon{display:block;width:14px;height:14px;color:#6f6b65;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
-.crack-ext-header-ai-btn.crack-ext-floating{position:fixed!important;right:calc(12px + env(safe-area-inset-right,0px))!important;bottom:calc(84px + env(safe-area-inset-bottom,0px))!important;z-index:99990!important;min-width:56px!important;height:44px!important;padding:0 13px!important;margin:0!important;border:1px solid #d8cab7!important;border-radius:999px!important;background:rgba(255,251,244,.96)!important;color:#6e5f4c!important;box-shadow:0 7px 22px rgba(61,43,23,.22)!important;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);touch-action:manipulation;pointer-events:auto!important}
-.crack-ext-header-ai-btn.crack-ext-floating:active{transform:scale(.96)}
+.crack-ext-header-ai-btn.crack-ext-floating,.crack-ext-header-ai-btn.crack-ext-header-fallback{position:fixed!important;top:max(56px,calc(env(safe-area-inset-top,0px) + 44px))!important;right:max(10px,env(safe-area-inset-right,0px))!important;bottom:auto!important;left:auto!important;z-index:99990!important;width:44px!important;min-width:44px!important;height:44px!important;padding:0!important;margin:0!important;border:1px solid #d8cab7!important;border-radius:12px!important;background:rgba(255,251,244,.96)!important;color:#6e5f4c!important;box-shadow:0 7px 22px rgba(61,43,23,.22)!important;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);touch-action:manipulation;pointer-events:auto!important}
+.crack-ext-header-ai-btn.crack-ext-floating span,.crack-ext-header-ai-btn.crack-ext-header-fallback span{display:none!important}
+.crack-ext-header-ai-btn.crack-ext-floating .crack-ext-header-ai-icon,.crack-ext-header-ai-btn.crack-ext-header-fallback .crack-ext-header-ai-icon{width:18px!important;height:18px!important}
+.crack-ext-header-ai-btn.crack-ext-floating:active,.crack-ext-header-ai-btn.crack-ext-header-fallback:active{transform:scale(.96)}
 .crack-ext-export-btn{padding:5px 10px;border-radius:6px;border:1px solid #ddd;background:#fff;color:#333;cursor:pointer;font-size:11px;transition:background 0.2s}
 .crack-ext-export-btn:hover{background:#f0f0f0}
 .crack-ext-compress-list{max-height:250px;overflow-y:auto;border:1px solid #ddd;border-radius:8px;padding:8px;margin-top:4px}
@@ -2932,7 +2948,7 @@ transition:border-color .25s,box-shadow .25s,opacity .25s;
 body[data-theme="dark"] .crack-ext-header-ai-btn,html[data-theme="dark"] .crack-ext-header-ai-btn,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn{color:#C9BBA5!important}
 body[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#D5A052!important}
 body[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn:hover{background:rgba(226,168,75,.1)!important;border-color:rgba(226,168,75,.16)!important;color:#EDE5D6!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating{background:rgba(39,35,30,.96)!important;border-color:rgba(213,160,82,.34)!important;color:#EDE5D6!important;box-shadow:0 7px 24px rgba(0,0,0,.38)!important}
+body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-header-fallback,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-header-fallback,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-header-fallback{background:rgba(39,35,30,.96)!important;border-color:rgba(213,160,82,.34)!important;color:#EDE5D6!important;box-shadow:0 7px 24px rgba(0,0,0,.38)!important}
 @media(max-width:820px){
 #ce-ai-top-settings{
 grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(58px,.62fr);
@@ -6265,6 +6281,10 @@ if (btnTurnInfo && turnInfoPopover) {
     var topHeaderSearchRetryAt = 0;
     var topHeaderRetryTimer = 0;
     var topHeaderRetryDelay = 1200;
+    var topHeaderFallbackTimer = 0;
+    var topHeaderMissStartedAt = 0;
+    var topHeaderMissRoute = '';
+    var topHeaderFallbackDelay = 1600;
 
     function isMobileHeaderLayout() {
         var coarsePointer = false;
@@ -6282,7 +6302,22 @@ if (btnTurnInfo && turnInfoPopover) {
 
     function isExcludedHeaderArea(el) {
         if (!el || !el.closest) return true;
-        return !!el.closest('.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"]');
+        if (el.closest('.crack-ext-ai-overlay,.crack-ext-ui-dialog-overlay')) return true;
+        var dialog = el.closest('[role="dialog"],[aria-modal="true"]');
+        if (dialog) {
+            var dialogRect = dialog.getBoundingClientRect();
+            var viewportWidth = Math.max(window.innerWidth || 0, 1);
+            var viewportHeight = Math.max(window.innerHeight || 0, 1);
+            if (dialogRect.width < viewportWidth * 0.82 || dialogRect.height < viewportHeight * 0.72) return true;
+        }
+        return !!el.closest('article,pre,code,footer,[data-message-id],[data-message-author-role],[data-role="assistant"],[data-role="user"],[data-testid*="message"],[data-testid*="composer"],[data-testid*="code"],[class*="markdown"],[class*="prose"],[class*="codeblock"],[class*="code-block"],[class*="codeBlock"],[class*="code-header"],[class*="copy-code"],[class*="message-content"],[class*="chat-message"],[class*="composer"],[class*="chat-input"],[class*="message-input"]');
+    }
+
+    function isHeaderMeaningAnchor(el) {
+        if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
+        if (el.matches && el.matches('#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"],button[aria-label*="더보기"],button[title*="더보기"],[data-testid*="chat-header"] button,[class*="chat-header"] button')) return true;
+        var text = String(el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title')) || '').toLowerCase();
+        return /model|more|option|메뉴|모델|더보기|옵션/.test(text);
     }
 
     function isRetainableTopHeaderContainer(el) {
@@ -6315,7 +6350,7 @@ if (btnTurnInfo && turnInfoPopover) {
     }
 
     function countVisibleTopHeaderControls(el) {
-        var controls = el.querySelectorAll('button,[role="button"]');
+        var controls = el.querySelectorAll('button,[role="button"],[role="combobox"]');
         var count = 0;
         for (var i = 0; i < controls.length; i++) {
             if (isVisibleTopHeaderControl(controls[i])) count++;
@@ -6341,7 +6376,7 @@ if (btnTurnInfo && turnInfoPopover) {
 
     function findKnownTopActionGroup() {
         var anchors = Array.prototype.slice.call(document.querySelectorAll(
-            '#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]'
+            '#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"],button[aria-label*="더보기"],button[title*="더보기"],[data-testid*="chat-header"] button,[class*="chat-header"] button'
         ));
         var best = null;
         var bestScore = -Infinity;
@@ -6349,11 +6384,11 @@ if (btnTurnInfo && turnInfoPopover) {
             if (!isVisibleTopHeaderControl(anchors[i])) continue;
             var parent = anchors[i].parentElement;
             var depth = 0;
-            while (parent && parent !== document.body && depth < 5) {
+            while (parent && parent !== document.body && depth < 8) {
                 if (isUsableTopHeaderContainer(parent)) {
                     var display = window.getComputedStyle(parent).display;
                     var controls = countVisibleTopHeaderControls(parent);
-                    if ((display === 'flex' || display === 'inline-flex' || display === 'grid') && controls >= 1 && controls <= 10) {
+                    if ((display === 'flex' || display === 'inline-flex' || display === 'grid' || display === 'block') && controls >= 1 && controls <= 12) {
                         var score = scoreTopHeaderCandidate(parent);
                         if (score > bestScore) {
                             best = parent;
@@ -6407,6 +6442,108 @@ if (btnTurnInfo && turnInfoPopover) {
                 }
             }
         });
+        return best;
+    }
+
+    function isVisibleCompatibleHeaderControl(el) {
+        if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
+        if (el.classList && el.classList.contains('crack-ext-header-ai-btn')) return false;
+        var rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8 || rect.bottom <= 0 || rect.top > Math.min(220, window.innerHeight * 0.3)) return false;
+        var style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
+    }
+
+    function countVisibleCompatibleHeaderControls(el) {
+        var controls = el.querySelectorAll('button,[role="button"],[role="combobox"]');
+        var count = 0;
+        for (var i = 0; i < controls.length; i++) {
+            if (isVisibleCompatibleHeaderControl(controls[i])) count++;
+        }
+        return count;
+    }
+
+    function findPositionedTopHeaderShell(el) {
+        var node = el;
+        var depth = 0;
+        var limit = Math.min(220, Math.max(150, window.innerHeight * 0.28));
+        while (node && node !== document.body && depth < 8) {
+            if (isExcludedHeaderArea(node)) return null;
+            var rect = node.getBoundingClientRect();
+            var style = window.getComputedStyle(node);
+            if ((style.position === 'fixed' || style.position === 'sticky' || style.position === 'absolute') &&
+                rect.bottom > 0 && rect.top <= limit && rect.height > 16 && rect.height <= 220) return node;
+            node = node.parentElement;
+            depth++;
+        }
+        return null;
+    }
+
+    function getNonInteractiveHeaderText(el) {
+        if (!el || !document.createTreeWalker) return '';
+        var walker = document.createTreeWalker(el, 4);
+        var parts = [];
+        var node;
+        while ((node = walker.nextNode()) && parts.join(' ').length < 120) {
+            var parent = node.parentElement;
+            if (!parent || parent.closest('button,[role="button"],[role="combobox"],script,style')) continue;
+            var text = String(node.nodeValue || '').replace(/\s+/g, ' ').trim();
+            if (text) parts.push(text);
+        }
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function hasCompatibleHeaderMeaning(el, shell) {
+        var scope = el || shell;
+        if (!scope) return false;
+        if (scope.querySelector('[data-testid*="title"],[class*="title"],[role="heading"],h1,h2,button[aria-label*="뒤로"],button[title*="뒤로"],button[aria-label*="back" i],button[title*="back" i]')) return true;
+        var text = getNonInteractiveHeaderText(scope);
+        if (!text && shell && shell !== scope) text = getNonInteractiveHeaderText(shell);
+        if (!text || text.length > 100) return false;
+        return !/^(크랙|wrtn|설정|검색|메뉴|홈)$/i.test(text.replace(/[\s·|/]+/g, ''));
+    }
+
+    function findCompatibleMobileTopActionGroup() {
+        if (!getChatId()) return null;
+        var controls = document.querySelectorAll('button,[role="button"],[role="combobox"]');
+        var seen = new Set();
+        var best = null;
+        var bestScore = -Infinity;
+        var viewportWidth = Math.max(window.innerWidth || 0, 1);
+        var limit = Math.min(220, Math.max(150, window.innerHeight * 0.28));
+
+        for (var i = 0; i < controls.length; i++) {
+            if (!isVisibleCompatibleHeaderControl(controls[i])) continue;
+            var parent = controls[i].parentElement;
+            var depth = 0;
+            while (parent && parent !== document.body && depth < 7) {
+                if (!seen.has(parent) && !isExcludedHeaderArea(parent) && !parent.querySelector('textarea,[contenteditable="true"]')) {
+                    seen.add(parent);
+                    var rect = parent.getBoundingClientRect();
+                    var style = window.getComputedStyle(parent);
+                    var displayOk = style.display === 'flex' || style.display === 'inline-flex' || style.display === 'grid';
+                    var controlCount = countVisibleCompatibleHeaderControls(parent);
+                    var shell = findPositionedTopHeaderShell(parent);
+                    var meaning = hasCompatibleHeaderMeaning(parent, shell);
+                    var topOk = rect.top >= 0 && rect.top <= limit;
+                    var sizeOk = rect.width >= 48 && rect.height >= 16 && rect.height <= 104;
+                    var horizontalOk = rect.right >= viewportWidth * 0.45 && rect.left < viewportWidth + 8;
+                    if (displayOk && shell && meaning && topOk && sizeOk && horizontalOk && controlCount >= 2 && controlCount <= 14) {
+                        var score = Math.min(controlCount, 6) * 18 - Math.abs(rect.top - 72) * 0.9 - Math.max(0, rect.width - 420) * 0.14;
+                        score += Math.max(0, Math.min(44, (rect.left / viewportWidth) * 44));
+                        if (rect.right >= viewportWidth * 0.72) score += 52;
+                        if (meaning) score += 72;
+                        if (parent.closest('header,[data-testid*="header"],[class*="header"]')) score += 56;
+                        if (score > bestScore) {
+                            best = parent;
+                            bestScore = score;
+                        }
+                    }
+                }
+                parent = parent.parentElement;
+                depth++;
+            }
+        }
         return best;
     }
 
@@ -6530,6 +6667,12 @@ if (btnTurnInfo && turnInfoPopover) {
             }
         }
 
+        var compatibleMobile = findCompatibleMobileTopActionGroup();
+        if (compatibleMobile) {
+            topHeaderContainerCache = compatibleMobile;
+            return compatibleMobile;
+        }
+
         var geometric = findGeometricTopActionGroup();
         if (geometric) {
             topHeaderContainerCache = geometric;
@@ -6551,7 +6694,7 @@ if (btnTurnInfo && turnInfoPopover) {
         if (!preferred) preferred = host.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
         var directPreferred = getDirectHeaderChild(host, preferred);
         if (directPreferred) return directPreferred;
-        var controls = Array.prototype.slice.call(host.querySelectorAll('button,[role="button"]')).filter(isVisibleTopHeaderControl);
+        var controls = Array.prototype.slice.call(host.querySelectorAll('button,[role="button"],[role="combobox"]')).filter(isVisibleTopHeaderControl);
         controls.sort(function(a, b) { return a.getBoundingClientRect().left - b.getBoundingClientRect().left; });
         return controls.length ? getDirectHeaderChild(host, controls[0]) : null;
     }
@@ -6593,36 +6736,70 @@ if (btnTurnInfo && turnInfoPopover) {
 
     function clearTopHeaderRetry() {
         if (topHeaderRetryTimer) clearTimeout(topHeaderRetryTimer);
+        if (topHeaderFallbackTimer) clearTimeout(topHeaderFallbackTimer);
         topHeaderRetryTimer = 0;
+        topHeaderFallbackTimer = 0;
         topHeaderSearchRetryAt = 0;
         topHeaderRetryDelay = 1200;
+        topHeaderMissStartedAt = 0;
+        topHeaderMissRoute = '';
     }
 
     function scheduleTopHeaderRetry() {
-        if (topHeaderRetryTimer || !getChatId()) return;
-        var delay = topHeaderRetryDelay;
-        topHeaderSearchRetryAt = Date.now() + delay;
-        topHeaderRetryTimer = setTimeout(function() {
+        var chatId = getChatId();
+        if (!chatId) return;
+        var now = Date.now();
+        if (topHeaderMissRoute !== chatId) {
+            if (topHeaderRetryTimer) clearTimeout(topHeaderRetryTimer);
+            if (topHeaderFallbackTimer) clearTimeout(topHeaderFallbackTimer);
             topHeaderRetryTimer = 0;
-            injectTopHeaderBtn();
-        }, delay);
-        topHeaderRetryDelay = Math.min(5000, Math.round(delay * 1.8));
+            topHeaderFallbackTimer = 0;
+            topHeaderRetryDelay = 1200;
+            topHeaderMissRoute = chatId;
+            topHeaderMissStartedAt = now;
+        } else if (!topHeaderMissStartedAt) {
+            topHeaderMissStartedAt = now;
+        }
+
+        if (!topHeaderRetryTimer) {
+            var delay = topHeaderRetryDelay;
+            topHeaderSearchRetryAt = now + delay;
+            topHeaderRetryTimer = setTimeout(function() {
+                topHeaderRetryTimer = 0;
+                if (getChatId() !== chatId) return;
+                injectTopHeaderBtn(false);
+            }, delay);
+            topHeaderRetryDelay = Math.min(5000, Math.round(delay * 1.8));
+        }
+
+        var fallbackElapsed = now - topHeaderMissStartedAt;
+        var fallbackVisible = !!(topHeaderAiBtn && topHeaderAiBtn.isConnected && topHeaderAiBtn.classList.contains('crack-ext-header-fallback'));
+        if (!topHeaderFallbackTimer && !fallbackVisible && fallbackElapsed < topHeaderFallbackDelay) {
+            var fallbackDelay = topHeaderFallbackDelay - fallbackElapsed;
+            topHeaderFallbackTimer = setTimeout(function() {
+                topHeaderFallbackTimer = 0;
+                if (getChatId() !== chatId) return;
+                injectTopHeaderBtn(true);
+            }, fallbackDelay);
+        }
     }
 
     function mutationContainsKnownHeaderAnchor(mutation) {
-        var selector = '#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]';
+        var selector = '#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"],button[aria-label*="더보기"],button[title*="더보기"],[data-testid*="chat-header"],[class*="chat-header"]';
         var nodes = mutation && mutation.addedNodes ? Array.prototype.slice.call(mutation.addedNodes) : [];
         if (mutation && mutation.type === 'attributes') nodes.push(mutation.target);
         for (var i = 0; i < nodes.length; i++) {
             var element = nodes[i] && nodes[i].nodeType === 1 ? nodes[i] : null;
             if (!element) continue;
-            if ((element.matches && element.matches(selector)) || (element.querySelector && element.querySelector(selector))) return true;
+            var matched = (element.matches && element.matches(selector)) || (element.querySelector && element.querySelector(selector));
+            if (matched && !isExcludedHeaderArea(element)) return true;
         }
         return false;
     }
 
-    function injectTopHeaderBtn() {
-        if (!getChatId()) {
+    function injectTopHeaderBtn(forceFallback) {
+        var chatId = getChatId();
+        if (!chatId) {
             clearTopHeaderRetry();
             topHeaderContainerCache = null;
             topHeaderContainerRoute = location.pathname || 'current';
@@ -6635,7 +6812,8 @@ if (btnTurnInfo && turnInfoPopover) {
 
         if (headerContainer) {
             clearTopHeaderRetry();
-            aiBtn.classList.remove('crack-ext-floating');
+            aiBtn.classList.remove('crack-ext-floating', 'crack-ext-header-fallback');
+            aiBtn.dataset.placement = 'header';
             var before = findTopHeaderInsertBefore(headerContainer);
             if (aiBtn.parentElement !== headerContainer || (before && aiBtn.nextSibling !== before)) {
                 if (before) headerContainer.insertBefore(aiBtn, before);
@@ -6644,8 +6822,17 @@ if (btnTurnInfo && turnInfoPopover) {
             return;
         }
         scheduleTopHeaderRetry();
+        var fallbackDue = !!forceFallback || (!!topHeaderMissStartedAt && Date.now() - topHeaderMissStartedAt >= topHeaderFallbackDelay);
         aiBtn.classList.remove('crack-ext-floating');
-        if (aiBtn.isConnected) aiBtn.remove();
+        if (fallbackDue && document.body) {
+            aiBtn.classList.add('crack-ext-header-fallback');
+            aiBtn.dataset.placement = 'emergency';
+            if (aiBtn.parentElement !== document.body) document.body.appendChild(aiBtn);
+        } else {
+            aiBtn.classList.remove('crack-ext-header-fallback');
+            aiBtn.dataset.placement = 'pending';
+            if (aiBtn.isConnected) aiBtn.remove();
+        }
     }
 
     function inject() { injectAiStyles(); injectTopHeaderBtn(); }
@@ -6659,14 +6846,15 @@ if (btnTurnInfo && turnInfoPopover) {
 
             var buttons = document.querySelectorAll('.crack-ext-header-ai-btn');
             if (!getChatId()) return buttons.length > 0;
-            if (buttons.length !== 1) return true;
+            if (buttons.length > 1) return true;
+            if (!buttons.length) return !topHeaderRetryTimer && Date.now() >= topHeaderSearchRetryAt;
 
             var aiBtn = buttons[0];
             var headerContainer = findTopHeaderContainer();
             if (headerContainer) {
-                return aiBtn.parentElement !== headerContainer || aiBtn.classList.contains('crack-ext-floating');
+                return aiBtn.parentElement !== headerContainer || aiBtn.classList.contains('crack-ext-floating') || aiBtn.classList.contains('crack-ext-header-fallback');
             }
-            return aiBtn.isConnected;
+            return !(aiBtn.isConnected && aiBtn.parentElement === document.body && aiBtn.classList.contains('crack-ext-header-fallback'));
         }
 
         function scheduleInject(force) {
@@ -6694,13 +6882,15 @@ if (btnTurnInfo && turnInfoPopover) {
                 topHeaderSearchRetryAt = 0;
                 if (topHeaderAiBtn && topHeaderAiBtn.isConnected) topHeaderAiBtn.remove();
             }
-            var retryDue = Date.now() >= topHeaderSearchRetryAt;
-            var duplicateButtons = document.querySelectorAll('.crack-ext-header-ai-btn').length !== 1;
+            var buttonCount = document.querySelectorAll('.crack-ext-header-ai-btn').length;
+            var retryDue = !topHeaderRetryTimer && Date.now() >= topHeaderSearchRetryAt;
+            var duplicateButtons = buttonCount > 1;
+            var missingButtonDue = buttonCount === 0 && retryDue;
             var knownAnchorAdded = false;
             for (var anchorIndex = 0; anchorIndex < mutations.length; anchorIndex++) {
                 if (mutationContainsKnownHeaderAnchor(mutations[anchorIndex])) { knownAnchorAdded = true; break; }
             }
-            var shouldRescan = routeChanged || duplicateButtons || knownAnchorAdded || (retryDue && (!topHeaderAiBtn || !topHeaderAiBtn.isConnected ||
+            var shouldRescan = routeChanged || duplicateButtons || missingButtonDue || knownAnchorAdded || (retryDue && (!topHeaderAiBtn || !topHeaderAiBtn.isConnected ||
                 !isRetainableTopHeaderContainer(topHeaderContainerCache)));
             if (shouldRescan) scheduleInject();
             for (var i = 0; i < mutations.length; i++) {
