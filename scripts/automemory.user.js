@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.3.3
+// @version      2.3.4
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -6397,9 +6397,34 @@ if (btnTurnInfo && turnInfoPopover) {
         return Math.min(150, Math.max(112, window.innerHeight * 0.16));
     }
 
+    function findStructuralRoomTopBar(el) {
+        var node = el;
+        var depth = 0;
+        while (node && node !== document.body && depth < 7) {
+            if (node.matches && node.matches('[data-crack-ui-room-top-bar="1"]')) return node;
+            var className = String(node.className || '');
+            if (className.includes('h-12') && className.includes('justify-between') &&
+                (className.includes('bg-bg_screen') || className.includes('border-b')) &&
+                !(node.closest && node.closest('[data-message-group-id]'))) return node;
+            node = node.parentElement;
+            depth++;
+        }
+        return null;
+    }
+
+    function isTrustedTopHeaderContext(el) {
+        if (!el || !el.closest) return false;
+        if (el.closest('[data-message-group-id]')) return false;
+        if (el.closest('[data-crack-ui-room-top-bar="1"],main header,[data-testid*="chat-header"],[class*="chat-header"]')) return true;
+        return !!findStructuralRoomTopBar(el);
+    }
+
     function isExcludedHeaderArea(el) {
         if (!el || !el.closest) return true;
-        return !!el.closest('.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"]');
+        // 답변 하단 툴바도 flex/button 구조와 화면 좌표가 상단바와 비슷하다.
+        // 특히 UI 확장의 답변별 모델 버튼(title/aria-label에 "모델" 포함)이
+        // 스크롤 중 상단 탐색 대역을 지나면 헤더 앵커로 오인되므로 메시지 그룹은 절대 허용하지 않는다.
+        return !!el.closest('[data-message-group-id],.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"],[data-radix-popper-content-wrapper]');
     }
 
     function isRetainableTopHeaderContainer(el) {
@@ -6413,8 +6438,9 @@ if (btnTurnInfo && turnInfoPopover) {
 
         var rect = el.getBoundingClientRect();
         var viewportWidth = Math.max(window.innerWidth || 0, 1);
+        var bandStart = isTrustedTopHeaderContext(el) ? -8 : getTopHeaderBandStart();
         if (rect.width < 48 || rect.height < 16 || rect.height > 80) return false;
-        if (rect.top < getTopHeaderBandStart() || rect.top > getTopHeaderBandLimit()) return false;
+        if (rect.top < bandStart || rect.top > getTopHeaderBandLimit()) return false;
         if (viewportWidth >= 760 && (rect.width > Math.min(680, viewportWidth * 0.65) || rect.right < viewportWidth * 0.5)) return false;
 
         var style = window.getComputedStyle(el);
@@ -6425,8 +6451,9 @@ if (btnTurnInfo && turnInfoPopover) {
         if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
         if (el.classList && el.classList.contains('crack-ext-header-ai-btn')) return false;
         var rect = el.getBoundingClientRect();
+        var bandStart = isTrustedTopHeaderContext(el) ? -16 : getTopHeaderBandStart() - 8;
         if (rect.width < 8 || rect.height < 8 || rect.bottom < 0) return false;
-        if (rect.top < getTopHeaderBandStart() - 8 || rect.top > getTopHeaderBandLimit() || rect.bottom > getTopHeaderBandLimit() + 28) return false;
+        if (rect.top < bandStart || rect.top > getTopHeaderBandLimit() || rect.bottom > getTopHeaderBandLimit() + 28) return false;
         var style = window.getComputedStyle(el);
         return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
     }
@@ -6449,6 +6476,7 @@ if (btnTurnInfo && turnInfoPopover) {
         var score = Math.min(controls, 6) * 22 - Math.abs(rect.top - 76) * 1.4 - Math.max(0, rect.width - 360) * 0.22;
         score += Math.max(0, Math.min(36, (rect.left / viewportWidth) * 36));
         if (rect.right >= viewportWidth * 0.72) score += 48;
+        if (isTrustedTopHeaderContext(el)) score += 260;
         var modelLike = el.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
         if (modelLike && isVisibleTopHeaderControl(modelLike)) score += 90;
         var loreEntry = el.querySelector('#lore-inj-entry-button,[data-lore-inj-entry="true"]');
@@ -6494,7 +6522,7 @@ if (btnTurnInfo && turnInfoPopover) {
             if (isMobileHeaderLayout()) {
                 var rect = found[i].getBoundingClientRect();
                 var viewportWidth = Math.max(window.innerWidth || 0, 1);
-                if (rect.top < 36 || rect.right < viewportWidth * 0.55) continue;
+                if ((!isTrustedTopHeaderContext(found[i]) && rect.top < 36) || rect.right < viewportWidth * 0.55) continue;
             }
             var score = scoreTopHeaderCandidate(found[i]);
             if (score > bestScore) {
@@ -6627,6 +6655,10 @@ if (btnTurnInfo && turnInfoPopover) {
 
         // 구체적인 제목창 액션 영역만 찾고, 실패하면 제한된 기하 탐색을 사용한다.
         var selectors = [
+            '[data-crack-ui-room-top-bar="1"] [class*="items-center"]',
+            '[data-crack-ui-room-top-bar="1"]',
+            'main [class~="h-12"][class~="justify-between"][class*="bg-bg_screen"] [class*="items-center"]',
+            'main [class~="h-12"][class~="justify-between"][class*="border-b"] [class*="items-center"]',
             '.absolute.z-\\[5\\] .flex.gap-3.items-center',
             '.absolute.z-\\[5\\] [class*="items-center"]',
             '[data-testid*="chat-header"] [class*="items-center"]',
@@ -6677,6 +6709,7 @@ if (btnTurnInfo && turnInfoPopover) {
         var aiBtn = document.createElement('button');
         aiBtn.className = 'crack-ext-header-ai-btn';
         aiBtn.type = 'button';
+        aiBtn.setAttribute('data-ce-ai-summary', 'true');
         aiBtn.innerHTML = '<svg class="crack-ext-header-ai-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z"/><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4.5"/></svg><span>요약</span>';
         aiBtn.title = '요약 및 장기기억 도구';
         aiBtn.setAttribute('aria-label', '요약 및 장기기억 도구');
