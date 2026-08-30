@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.3.4
+// @version      2.3.5
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -2332,6 +2332,9 @@ try {
 .crack-ext-auto-toggle-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:16px 0 0}
 .crack-ext-auto-check{display:inline-flex!important;align-items:center!important;justify-content:flex-start!important;gap:8px!important;width:auto!important;margin:0!important;color:var(--ce-ink-dim,#555)!important;font-size:.875rem!important;font-weight:600!important}
 .crack-ext-auto-check input[type="checkbox"]{width:18px!important;height:18px!important;min-width:18px!important;margin:0!important;padding:0!important;accent-color:var(--ce-sage,#4f8069)}
+.crack-ext-entry-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0 0 16px;padding:8px 16px;border:1px solid var(--ce-line-soft,#eee);border-radius:10px;background:var(--ce-panel-2,#fafafa)}
+.crack-ext-entry-toggle-note{min-width:0;color:var(--ce-ink-faint,#777);font-size:.875rem;line-height:1.6;text-align:right;word-break:keep-all}
+@media(max-width:430px){.crack-ext-entry-toggle-row{align-items:flex-start;flex-direction:column;gap:8px}.crack-ext-entry-toggle-note{text-align:left}}
 .crack-ext-auto-note{margin:16px 0 0;padding:12px 16px;border-left:3px solid var(--ce-sage,#4f8069);background:var(--ce-sage-glow,rgba(79,128,105,.13));color:var(--ce-ink-dim,#555);font-size:.875rem;line-height:1.6}
 .crack-ext-auto-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:16px}
 .crack-ext-auto-status{flex:1 1 240px;min-width:0;color:var(--ce-ink-faint,#777);font-size:.875rem;line-height:1.6;word-break:break-word}
@@ -5153,6 +5156,7 @@ if (mainModel && mainProvider) {
         var savedVertexProjectId = getSavedVertexProjectId();
         var savedTurns = localStorage.getItem('crack_ext_turn_count') || '15';
         var savedStyle = localStorage.getItem('crack_ext_summary_style') || 'concise';
+        var showTopHeaderButton = isTopHeaderButtonEnabled();
         var currentKey = getSavedApiKey(savedProvider);
         var autoSettings = getAutoMemorySettings(modalChatId);
 
@@ -5211,6 +5215,11 @@ if (mainModel && mainProvider) {
             '<button class="crack-ext-export-btn" data-export="json">JSON</button>' +
             '<button class="crack-ext-export-btn" data-export="md">Markdown</button>' +
             '</div></div>';
+        html += '</div>';
+
+        html += '<div class="crack-ext-entry-toggle-row">';
+        html += '<label class="crack-ext-auto-check"><input type="checkbox" id="ce-top-header-button"' + (showTopHeaderButton ? ' checked' : '') + '><span>상단 요약 버튼 표시</span></label>';
+        html += '<span class="crack-ext-entry-toggle-note">끄면 사이드바의 AI 요약·메모리 메뉴로만 엽니다.</span>';
         html += '</div>';
 
         html += '<details class="crack-ext-auto-panel" id="ce-auto-panel"' + (autoSettings.enabled ? ' open' : '') + '>';
@@ -5310,6 +5319,7 @@ if (mainModel && mainProvider) {
         var vertexWrap = overlay.querySelector('#ce-ai-vertex-wrap');
         var topSettings = overlay.querySelector('#ce-ai-top-settings');
         var secondarySettings = overlay.querySelector('#ce-ai-secondary-settings');
+        var topHeaderButtonToggle = overlay.querySelector('#ce-top-header-button');
         var autoPanel = overlay.querySelector('#ce-auto-panel');
         var autoEnabled = overlay.querySelector('#ce-auto-enabled');
         var autoProtect = overlay.querySelector('#ce-auto-protect');
@@ -5331,6 +5341,15 @@ if (mainModel && mainProvider) {
         var autoSettingsDirtyFields = new Set();
         var autoSettingsSaveLabelTimer = 0;
         var autoSettingsStorageHandler = null;
+        if (topHeaderButtonToggle) {
+            topHeaderButtonToggle.addEventListener('change', function() {
+                setTopHeaderButtonEnabled(topHeaderButtonToggle.checked);
+                injectTopHeaderBtn();
+                showToast(topHeaderButtonToggle.checked
+                    ? '상단 요약 버튼을 표시합니다.'
+                    : '상단 요약 버튼을 숨겼습니다. 사이드바 메뉴는 계속 사용할 수 있습니다.');
+            });
+        }
         // 턴 수 안내 팝업
 if (btnTurnInfo && turnInfoPopover) {
     btnTurnInfo.addEventListener('click', function(e) {
@@ -6278,6 +6297,7 @@ if (btnTurnInfo && turnInfoPopover) {
         }
     }
 
+    var TOP_HEADER_BUTTON_STORAGE_KEY = 'crack_ext_top_header_button_enabled';
     var topHeaderContainerCache = null;
     var topHeaderContainerRoute = '';
     var topHeaderLayoutMode = '';
@@ -6285,6 +6305,23 @@ if (btnTurnInfo && turnInfoPopover) {
     var topHeaderSearchRetryAt = 0;
     var topHeaderRetryTimer = 0;
     var topHeaderRetryDelay = 1200;
+
+    function isTopHeaderButtonEnabled() {
+        try {
+            var saved = localStorage.getItem(TOP_HEADER_BUTTON_STORAGE_KEY);
+            return saved !== '0' && saved !== 'false';
+        } catch (e) {
+            return true;
+        }
+    }
+
+    function setTopHeaderButtonEnabled(enabled) {
+        try { localStorage.setItem(TOP_HEADER_BUTTON_STORAGE_KEY, enabled ? '1' : '0'); } catch (e) {}
+    }
+
+    function removeAllTopHeaderButtons() {
+        document.querySelectorAll('.crack-ext-header-ai-btn').forEach(function(button) { button.remove(); });
+    }
 
     function isVisibleAiSummarySidebarAnchor(element) {
         if (!element || !element.parentNode || element.isConnected === false) return false;
@@ -6610,36 +6647,15 @@ if (btnTurnInfo && turnInfoPopover) {
             if (cachedStyle.display === 'none' || !topHeaderContainerCache.getClientRects().length) topHeaderContainerCache = null;
         }
         topHeaderLayoutMode = currentLayoutMode;
-        var retainedHiddenContainer = null;
+
+        // iPhone Safari는 주소창 접기/펼치기와 스크롤 중 viewport 좌표를 자주 바꾼다.
+        // 이미 검증한 상단바가 같은 방의 DOM에 남아 있으면 좌표·가시성 점수를 다시 비교하지 않는다.
+        // 부모가 실제로 교체되거나 방/모바일·데스크톱 레이아웃이 바뀐 경우에만 새로 찾는다.
         if (topHeaderContainerRoute === currentRoute && isRetainableTopHeaderContainer(topHeaderContainerCache)) {
-            if (isUsableTopHeaderContainer(topHeaderContainerCache)) {
-                var knownReplacement = findKnownTopActionGroup();
-                if (knownReplacement && knownReplacement !== topHeaderContainerCache) {
-                    topHeaderContainerCache = knownReplacement;
-                    return knownReplacement;
-                }
-                return topHeaderContainerCache;
-            }
-            retainedHiddenContainer = topHeaderContainerCache;
-        } else {
-            topHeaderContainerCache = null;
+            return topHeaderContainerCache;
         }
+        topHeaderContainerCache = null;
         topHeaderContainerRoute = currentRoute;
-        // 같은 제목창이 접혀 화면 밖으로 나간 동안에는 다른 상단 툴바로 옮기지 않는다.
-        if (retainedHiddenContainer) {
-            var visibleKnownReplacement = findKnownTopActionGroup();
-            if (visibleKnownReplacement && visibleKnownReplacement !== retainedHiddenContainer) {
-                topHeaderContainerCache = visibleKnownReplacement;
-                return visibleKnownReplacement;
-            }
-            var retainedStyle = window.getComputedStyle(retainedHiddenContainer);
-            if (retainedStyle.display === 'none' || !retainedHiddenContainer.getClientRects().length) {
-                topHeaderContainerCache = null;
-            } else {
-                topHeaderContainerCache = retainedHiddenContainer;
-                return retainedHiddenContainer;
-            }
-        }
 
         var legacy = findLegacyTopActionGroup();
         if (legacy) {
@@ -6772,6 +6788,14 @@ if (btnTurnInfo && turnInfoPopover) {
     }
 
     function injectTopHeaderBtn() {
+        if (!isTopHeaderButtonEnabled()) {
+            clearTopHeaderRetry();
+            removeAllTopHeaderButtons();
+            topHeaderContainerCache = null;
+            topHeaderContainerRoute = getChatId() || location.pathname || 'current';
+            topHeaderLayoutMode = isMobileHeaderLayout() ? 'mobile' : 'desktop';
+            return;
+        }
         if (!getChatId()) {
             clearTopHeaderRetry();
             topHeaderContainerCache = null;
@@ -6813,6 +6837,7 @@ if (btnTurnInfo && turnInfoPopover) {
             if (aiSummarySidebarMenuNeedsInjection()) return true;
 
             var buttons = document.querySelectorAll('.crack-ext-header-ai-btn');
+            if (!isTopHeaderButtonEnabled()) return buttons.length > 0;
             if (!getChatId()) return buttons.length > 0;
             if (buttons.length !== 1) return true;
 
@@ -6850,7 +6875,9 @@ if (btnTurnInfo && turnInfoPopover) {
                 if (topHeaderAiBtn && topHeaderAiBtn.isConnected) topHeaderAiBtn.remove();
             }
             var retryDue = Date.now() >= topHeaderSearchRetryAt;
-            var duplicateButtons = document.querySelectorAll('.crack-ext-header-ai-btn').length !== 1;
+            var buttonCount = document.querySelectorAll('.crack-ext-header-ai-btn').length;
+            var headerButtonEnabled = isTopHeaderButtonEnabled();
+            var duplicateButtons = headerButtonEnabled ? buttonCount !== 1 : buttonCount !== 0;
             var knownAnchorAdded = false;
             var sidebarAnchorChanged = false;
             for (var anchorIndex = 0; anchorIndex < mutations.length; anchorIndex++) {
@@ -6858,8 +6885,9 @@ if (btnTurnInfo && turnInfoPopover) {
                 if (!sidebarAnchorChanged && mutationTouchesAiSummarySidebar(mutations[anchorIndex])) sidebarAnchorChanged = true;
                 if (knownAnchorAdded && sidebarAnchorChanged) break;
             }
-            var shouldRescan = routeChanged || duplicateButtons || knownAnchorAdded || sidebarAnchorChanged || (retryDue && (!topHeaderAiBtn || !topHeaderAiBtn.isConnected ||
-                !isRetainableTopHeaderContainer(topHeaderContainerCache)));
+            var shouldRescan = routeChanged || duplicateButtons || sidebarAnchorChanged || (headerButtonEnabled &&
+                (knownAnchorAdded || (retryDue && (!topHeaderAiBtn || !topHeaderAiBtn.isConnected ||
+                    !isRetainableTopHeaderContainer(topHeaderContainerCache)))));
             if (shouldRescan) scheduleInject();
             for (var i = 0; i < mutations.length; i++) {
                 if (mutationTouchesAutoMemoryResponse(mutations[i])) {
@@ -6886,6 +6914,10 @@ if (btnTurnInfo && turnInfoPopover) {
         window.addEventListener('focus', wakeAutoMemoryOnReturn, { passive:true });
         window.addEventListener('pageshow', wakeAutoMemoryOnReturn, { passive:true });
         window.addEventListener('storage', function(event) {
+            if (event && event.key === TOP_HEADER_BUTTON_STORAGE_KEY) {
+                injectTopHeaderBtn();
+                return;
+            }
             var chatId = getChatId();
             if (!chatId || !event || event.key !== getAutoMemorySettingsStorageKey(chatId, false)) return;
             notifyAutoMemoryStatus(chatId);
