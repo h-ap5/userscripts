@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.3.5
+// @version      2.3.6
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -1407,7 +1407,7 @@ async function fetchRecentMessages(limit) {
     }
 
     var LAST_AI_USAGE = null;
-    var MODEL_PRICING_UPDATED_AT = '2026-08-13';
+    var MODEL_PRICING_UPDATED_AT = '2026-09-03';
     var USD_KRW_FALLBACK = 1400;
     var USD_KRW_CACHE_KEY = 'crack_ext_usd_krw_rate_v1';
     var USD_KRW_CACHE_TTL = 12 * 60 * 60 * 1000;
@@ -1415,7 +1415,8 @@ async function fetchRecentMessages(limit) {
     // 유료 API 표준 처리 기준, USD / 1M tokens. 실제 청구액은 무료 티어·캐시·지역·세금에 따라 달라질 수 있음.
     var MODEL_PRICING_USD_PER_M = {
         google: {
-            // Gemini 3.7/3.6 프로모션 단가: 2026-12-31까지. 2027-01-01부터 표준 단가로 갱신 필요.
+            // Gemini 3.8/3.7/3.6 프로모션 단가: 2026-12-31까지. 2027-01-01부터 표준 단가로 갱신 필요.
+            'gemini-3.8-flash': { input:0.75, cachedInput:0.075, output:3.75 },
             'gemini-3.7-flash': { input:0.75, cachedInput:0.075, output:3.75 },
             'gemini-3.6-flash': { input:0.75, cachedInput:0.075, output:3.75 },
             'gemini-3.5-flash': { input:1.50, cachedInput:0.15, output:9.00 },
@@ -1486,7 +1487,7 @@ async function fetchRecentMessages(limit) {
         }
         if (provider === 'google' || provider === 'firebase' || provider === 'vertex') {
             var m = String(model || '').toLowerCase();
-            if (m === 'gemini-3.7-flash') {
+            if (m === 'gemini-3.8-flash' || m === 'gemini-3.7-flash') {
                 return auto.concat([
                     { v:'low', t:'낮음' },
                     { v:'medium', t:'보통' },
@@ -1581,7 +1582,7 @@ async function fetchRecentMessages(limit) {
     function getGeminiThinkingConfig(model, value) {
         if (!value || value === 'auto') return null;
         var m = String(model || '').toLowerCase();
-        if (m === 'gemini-3.7-flash' && value === 'minimal') return null;
+        if ((m === 'gemini-3.8-flash' || m === 'gemini-3.7-flash') && value === 'minimal') return null;
         if (m.includes('2.5-')) {
             var budget = geminiThinkingBudget(model, value);
             return budget == null ? null : { thinkingBudget:budget };
@@ -3190,6 +3191,7 @@ margin-bottom:12px;
         var models = [];
         if (provider === 'google' || provider === 'vertex') {
             models = [
+                {v:'gemini-3.8-flash', t:'3.8 Flash'},
                 {v:'gemini-3.7-flash', t:'3.7 Flash'},
                 {v:'gemini-3.6-flash', t:'3.6 Flash'},
                 {v:'gemini-3.5-flash', t:'3.5 Flash'},
