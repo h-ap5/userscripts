@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.3.6
+// @version      2.3.7
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -493,6 +493,22 @@ This requirement controls coverage only. It must not change or add any output fo
         return Math.max(min, Math.min(max, parsed));
     }
 
+    function positiveSafeInteger(value, fallback) {
+        if (value == null) return fallback;
+        var text = typeof value === 'string' ? value.trim() : value;
+        if (text === '') return fallback;
+        var parsed = Number(text);
+        return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : fallback;
+    }
+
+    function nonNegativeSafeInteger(value, fallback) {
+        if (value == null) return fallback;
+        var text = typeof value === 'string' ? value.trim() : value;
+        if (text === '') return fallback;
+        var parsed = Number(text);
+        return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
+    }
+
     function hashText(value) {
         var text = String(value || '');
         var hash = 2166136261;
@@ -605,21 +621,16 @@ This requirement controls coverage only. It must not change or add any output fo
 
     function getAutoMemorySettings(chatId) {
         var saved = readStoredAutoMemorySettings(chatId);
-        if (!Number.isFinite(Number(saved.settingsVersion)) || Number(saved.settingsVersion) < 2) {
-            if (saved.intervalTurns == null || Number(saved.intervalTurns) === 5) saved.intervalTurns = 10;
-            if (saved.readTurns == null || Number(saved.readTurns) === 5) saved.readTurns = 10;
-            if (saved.midMergeTurns == null) saved.midMergeTurns = 10;
-        }
         var settings = Object.assign({}, AUTO_MEMORY_DEFAULTS, saved);
         settings.settingsVersion = 4;
         settings.settingsUpdatedAt = Math.max(0, Number(settings.settingsUpdatedAt) || 0);
         settings.enabled = !!settings.enabled;
-        settings.intervalTurns = clampInteger(settings.intervalTurns, 1, 50, AUTO_MEMORY_DEFAULTS.intervalTurns);
-        settings.readTurns = clampInteger(settings.readTurns, 1, 50, AUTO_MEMORY_DEFAULTS.readTurns);
-        settings.excludeRecentTurns = clampInteger(settings.excludeRecentTurns, 0, 10, AUTO_MEMORY_DEFAULTS.excludeRecentTurns);
-        settings.contextCards = clampInteger(settings.contextCards, 3, 5, AUTO_MEMORY_DEFAULTS.contextCards);
-        settings.midMergeTurns = clampInteger(settings.midMergeTurns, 0, 500, AUTO_MEMORY_DEFAULTS.midMergeTurns);
-        settings.maxCards = clampInteger(settings.maxCards, 5, 20, AUTO_MEMORY_DEFAULTS.maxCards);
+        settings.intervalTurns = positiveSafeInteger(settings.intervalTurns, AUTO_MEMORY_DEFAULTS.intervalTurns);
+        settings.readTurns = positiveSafeInteger(settings.readTurns, AUTO_MEMORY_DEFAULTS.readTurns);
+        settings.excludeRecentTurns = nonNegativeSafeInteger(settings.excludeRecentTurns, AUTO_MEMORY_DEFAULTS.excludeRecentTurns);
+        settings.contextCards = nonNegativeSafeInteger(settings.contextCards, AUTO_MEMORY_DEFAULTS.contextCards);
+        settings.midMergeTurns = nonNegativeSafeInteger(settings.midMergeTurns, AUTO_MEMORY_DEFAULTS.midMergeTurns);
+        settings.maxCards = positiveSafeInteger(settings.maxCards, AUTO_MEMORY_DEFAULTS.maxCards);
         settings.compactTarget = clampInteger(settings.compactTarget, 1, settings.maxCards, Math.min(AUTO_MEMORY_DEFAULTS.compactTarget, settings.maxCards));
         settings.protectUserAdded = settings.protectUserAdded !== false;
         return settings;
@@ -641,16 +652,16 @@ This requirement controls coverage only. It must not change or add any output fo
 
     function getNormalizedAutoMemorySettings(settings) {
         var source = settings || {};
-        var maxCards = clampInteger(source.maxCards, 5, 20, AUTO_MEMORY_DEFAULTS.maxCards);
+        var maxCards = positiveSafeInteger(source.maxCards, AUTO_MEMORY_DEFAULTS.maxCards);
         return {
             settingsVersion:4,
             settingsUpdatedAt:Math.max(0, Number(source.settingsUpdatedAt) || 0),
             enabled:!!source.enabled,
-            intervalTurns:clampInteger(source.intervalTurns, 1, 50, AUTO_MEMORY_DEFAULTS.intervalTurns),
-            readTurns:clampInteger(source.readTurns, 1, 50, AUTO_MEMORY_DEFAULTS.readTurns),
-            excludeRecentTurns:clampInteger(source.excludeRecentTurns, 0, 10, AUTO_MEMORY_DEFAULTS.excludeRecentTurns),
-            contextCards:clampInteger(source.contextCards, 3, 5, AUTO_MEMORY_DEFAULTS.contextCards),
-            midMergeTurns:clampInteger(source.midMergeTurns, 0, 500, AUTO_MEMORY_DEFAULTS.midMergeTurns),
+            intervalTurns:positiveSafeInteger(source.intervalTurns, AUTO_MEMORY_DEFAULTS.intervalTurns),
+            readTurns:positiveSafeInteger(source.readTurns, AUTO_MEMORY_DEFAULTS.readTurns),
+            excludeRecentTurns:nonNegativeSafeInteger(source.excludeRecentTurns, AUTO_MEMORY_DEFAULTS.excludeRecentTurns),
+            contextCards:nonNegativeSafeInteger(source.contextCards, AUTO_MEMORY_DEFAULTS.contextCards),
+            midMergeTurns:nonNegativeSafeInteger(source.midMergeTurns, AUTO_MEMORY_DEFAULTS.midMergeTurns),
             maxCards:maxCards,
             compactTarget:clampInteger(source.compactTarget, 1, maxCards, Math.min(AUTO_MEMORY_DEFAULTS.compactTarget, maxCards)),
             protectUserAdded:source.protectUserAdded !== false
@@ -3498,9 +3509,11 @@ margin-bottom:12px;
         var contextCandidates = items.filter(function(item) { return settings.protectUserAdded && isUserAddedSummary(item); })
             .concat(managedLive.filter(function(item) { return !openTail || String(getSummaryId(item)) !== String(getSummaryId(openTail)); }));
         var contextById = new Map();
-        sortSummariesOldest(contextCandidates).slice(-settings.contextCards).forEach(function(item) {
-            contextById.set(String(getSummaryId(item)), item);
-        });
+        if (settings.contextCards > 0) {
+            sortSummariesOldest(contextCandidates).slice(-settings.contextCards).forEach(function(item) {
+                contextById.set(String(getSummaryId(item)), item);
+            });
+        }
 
         return {
             byId:byId,
@@ -3552,10 +3565,12 @@ margin-bottom:12px;
             return !editableIds.has(String(getSummaryId(item)));
         }).map(function(item) { return [String(getSummaryId(item)), item]; }));
         if (inventory.openTail) contextById.set(openTailId, inventory.openTail);
-        inventory.managedLive.slice(-settings.contextCards).forEach(function(item) {
-            var id = String(getSummaryId(item));
-            if (!editableIds.has(id)) contextById.set(id, item);
-        });
+        if (settings.contextCards > 0) {
+            inventory.managedLive.slice(-settings.contextCards).forEach(function(item) {
+                var id = String(getSummaryId(item));
+                if (!editableIds.has(id)) contextById.set(id, item);
+            });
+        }
         return {
             mode:'mid',
             editableTrusted:editable,
@@ -3571,23 +3586,51 @@ margin-bottom:12px;
         };
     }
 
+    function getAutoMemoryCapacityCounts(summaries, settings) {
+        var items = summaries || [];
+        var protectedUserCount = items.filter(function(item) {
+            return settings.protectUserAdded && isUserAddedSummary(item);
+        }).length;
+        var mutableCount = items.filter(function(item) {
+            return canAutoMutateSummary(item, settings);
+        }).length;
+        return {
+            protectedUserCount:protectedUserCount,
+            mutableCount:mutableCount,
+            otherProtectedCount:Math.max(0, items.length - protectedUserCount - mutableCount),
+            totalCount:items.length
+        };
+    }
+
+    function makeAutoMemoryCapacityError(summaries, settings) {
+        var counts = getAutoMemoryCapacityCounts(summaries, settings);
+        var minimumTotal = counts.protectedUserCount + counts.otherProtectedCount + (counts.mutableCount ? 1 : 0);
+        var countText = '[추가] 보호 카드 ' + counts.protectedUserCount + '개 · 자동 관리 가능 카드 ' + counts.mutableCount + '개';
+        if (counts.otherProtectedCount) countText += ' · 기타 비관리 카드 ' + counts.otherProtectedCount + '개';
+        countText += ' · 전체 ' + counts.totalCount + '개 · 설정된 전체 유지 상한 ' + settings.maxCards + '개';
+        if (!counts.mutableCount) {
+            return new Error('전체 압축 불가: ' + countText + '입니다. 자동 정리가 수정·삭제할 수 있는 카드가 없습니다. 보호 카드는 전체 개수에 포함되므로, 유지 상한을 최소 ' + minimumTotal + '개로 올리거나 [추가] 보호 카드를 줄여주세요.');
+        }
+        return new Error('전체 압축 불가: ' + countText + '입니다. 보호 카드는 전체 개수에 포함되고 수정·삭제되지 않으므로, 자동 관리 카드 1개를 남기려면 유지 상한이 최소 ' + minimumTotal + '개여야 합니다. 유지 상한을 ' + minimumTotal + '개 이상으로 올리거나 [추가] 보호 카드를 줄여주세요.');
+    }
+
     function selectFullCompactPlan(summaries, state, settings) {
         var inventory = collectAutoMemoryInventory(summaries, state, settings);
         var mutable = sortSummariesOldest((summaries || []).filter(function(item) { return canAutoMutateSummary(item, settings); }));
-        if (!mutable.length) return null;
+        if (!mutable.length) throw makeAutoMemoryCapacityError(summaries, settings);
         var mutableIds = new Set(mutable.map(function(item) { return String(getSummaryId(item)); }));
         var protectedContext = sortSummariesOldest((summaries || []).filter(function(item) {
             return !mutableIds.has(String(getSummaryId(item)));
         }));
         var untouchedCount = protectedContext.length;
         var desiredCount = Math.max(1, settings.compactTarget - untouchedCount);
-        if (untouchedCount + desiredCount > settings.maxCards) throw new Error('보호된 [추가] 카드만으로 최대 슬롯 수에 도달해 전체 압축이 불가능합니다.');
+        if (untouchedCount + desiredCount > settings.maxCards) throw makeAutoMemoryCapacityError(summaries, settings);
         var userEditable = mutable.filter(function(item) { return isUserAddedSummary(item); });
         var editableById = new Map(inventory.managedLive.concat(userEditable).map(function(item) { return [String(getSummaryId(item)), item]; }));
         var editableTrusted = sortSummariesOldest(Array.from(editableById.values()));
         var informationSourceCount = editableTrusted.length + inventory.recoveryContext.length;
         var expectedCount = Math.min(mutable.length, desiredCount, Math.max(1, informationSourceCount));
-        if (untouchedCount + expectedCount > settings.maxCards) throw new Error('보호된 [추가] 카드 때문에 최대 슬롯 수를 맞출 수 없습니다.');
+        if (untouchedCount + expectedCount > settings.maxCards) throw makeAutoMemoryCapacityError(summaries, settings);
         return {
             mode:'full',
             editableTrusted:editableTrusted,
@@ -4316,7 +4359,7 @@ margin-bottom:12px;
 
             state.lastStatus = '대화와 슬롯 확인 중';
             saveAutoMemoryState(chatId, state);
-            var messageLimit = Math.min(500, Math.max(100, (settings.intervalTurns + settings.readTurns + settings.excludeRecentTurns + 10) * 4));
+            var messageLimit = Math.max(100, (settings.intervalTurns + settings.readTurns + settings.excludeRecentTurns + 10) * 4);
             var messageOptions = { silent:true, strict:true, chatId:chatId };
             if (state.initialized) {
                 messageLimit = 0;
@@ -4402,7 +4445,7 @@ margin-bottom:12px;
             }
 
             if (!plan) {
-                if (mode === 'full' || state.forceFullCompact) throw new Error('보호된 카드만 남아 최대 슬롯 수를 맞출 수 없습니다.');
+                if (mode === 'full' || state.forceFullCompact) throw makeAutoMemoryCapacityError(summaries, settings);
                 state.waitingForSlot = !manual || settings.enabled;
                 state.lastStatus = batchTurns.length + '대화턴 보류 · 수정할 마지막 카드 또는 새 assistant 슬롯 대기 중';
                 clearAutoMemoryFailure(state);
@@ -4417,7 +4460,7 @@ margin-bottom:12px;
             var inputPrompt = mode === 'routine' ? buildAutoAppendInput(plan, batchTurns) : buildAutoCompactionInput(plan);
             state.lastStatus = mode === 'routine'
                 ? batchTurns.length + '대화턴 누적 정리 중'
-                : (mode === 'mid' ? '최근 구간 중간 병합 중' : '최대 슬롯 초과 · 전체 2차 압축 중');
+                : (mode === 'mid' ? '최근 구간 중간 병합 중' : '전체 ' + summaries.length + '개 / 유지 상한 ' + settings.maxCards + '개 · 전체 2차 압축 중');
             saveAutoMemoryState(chatId, state);
             if (isAutoMemorySettingsEditPending(chatId) || !isAutoMemorySettingsSignatureCurrent(settingsSignature, chatId)) {
                 resetAutoMemoryPlanningForSettings(state, '', chatId);
@@ -5190,7 +5233,7 @@ if (mainModel && mainProvider) {
         '<span>턴 수</span>' +
         '<button type="button" class="crack-ext-turn-info-btn" id="ce-ai-turn-info" aria-label="턴 수 계산 안내" aria-expanded="false">' + UI_ICONS.info + '</button>' +
     '</label>' +
-    '<input type="number" id="ce-ai-turns" value="' + escapeHtml(savedTurns) + '" min="0">' +
+    '<input type="number" id="ce-ai-turns" value="' + escapeHtml(savedTurns) + '" min="0" step="1" inputmode="numeric">' +
     '<div class="crack-ext-turn-info-popover" id="ce-ai-turn-info-popover" hidden>' +
         '<strong>사용자 1 + LLM 1 = 총 2턴</strong>' +
         '<span>일반적인 대화 30턴을 원하면 <b>60턴</b>으로 설정하세요.</span>' +
@@ -5232,15 +5275,15 @@ if (mainModel && mainProvider) {
         html += '<label class="crack-ext-auto-check"><input type="checkbox" id="ce-auto-protect"' + (autoSettings.protectUserAdded ? ' checked' : '') + '><span>[추가] 카드 보호</span></label>';
         html += '</div>';
         html += '<div class="crack-ext-auto-grid">';
-        html += '<div class="crack-ext-auto-field"><label for="ce-auto-interval">실행 주기 (대화턴)</label><input type="number" id="ce-auto-interval" min="1" max="50" value="' + autoSettings.intervalTurns + '"></div>';
-        html += '<div class="crack-ext-auto-field"><label for="ce-auto-read">한 번에 읽을 대화턴</label><input type="number" id="ce-auto-read" min="1" max="50" value="' + autoSettings.readTurns + '"></div>';
-        html += '<div class="crack-ext-auto-field"><label for="ce-auto-exclude">최근 제외 (대화턴)</label><input type="number" id="ce-auto-exclude" min="0" max="10" value="' + autoSettings.excludeRecentTurns + '"></div>';
-        html += '<div class="crack-ext-auto-field"><label for="ce-auto-context">참고 장기기억</label><input type="number" id="ce-auto-context" min="3" max="5" value="' + autoSettings.contextCards + '"></div>';
-        html += '<div class="crack-ext-auto-field"><label for="ce-auto-mid-merge">중간 병합 주기 (처리턴)</label><input type="number" id="ce-auto-mid-merge" min="0" max="500" value="' + autoSettings.midMergeTurns + '" title="0이면 중간 병합을 끕니다."></div>';
-        html += '<div class="crack-ext-auto-field"><label for="ce-auto-max">최대 슬롯</label><input type="number" id="ce-auto-max" min="5" max="20" value="' + autoSettings.maxCards + '"></div>';
-        html += '<div class="crack-ext-auto-field"><label for="ce-auto-target">전체 압축 목표 슬롯</label><input type="number" id="ce-auto-target" min="1" max="' + autoSettings.maxCards + '" value="' + autoSettings.compactTarget + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-interval">실행 주기 (대화턴)</label><input type="number" id="ce-auto-interval" min="1" step="1" inputmode="numeric" value="' + autoSettings.intervalTurns + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-read">한 번에 읽을 대화턴</label><input type="number" id="ce-auto-read" min="1" step="1" inputmode="numeric" value="' + autoSettings.readTurns + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-exclude">최근 제외 (대화턴)</label><input type="number" id="ce-auto-exclude" min="0" step="1" inputmode="numeric" value="' + autoSettings.excludeRecentTurns + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-context">참고 장기기억</label><input type="number" id="ce-auto-context" min="0" step="1" inputmode="numeric" value="' + autoSettings.contextCards + '" title="0이면 기존 장기기억을 추가 참고자료로 넣지 않습니다."></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-mid-merge">중간 병합 주기 (처리턴)</label><input type="number" id="ce-auto-mid-merge" min="0" step="1" inputmode="numeric" value="' + autoSettings.midMergeTurns + '" title="0이면 중간 병합을 끕니다."></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-max">전체 장기기억 유지 상한</label><input type="number" id="ce-auto-max" min="1" step="1" inputmode="numeric" value="' + autoSettings.maxCards + '"></div>';
+        html += '<div class="crack-ext-auto-field"><label for="ce-auto-target">압축 후 전체 카드 목표</label><input type="number" id="ce-auto-target" min="1" max="' + autoSettings.maxCards + '" step="1" inputmode="numeric" value="' + autoSettings.compactTarget + '"></div>';
         html += '</div>';
-        html += '<div class="crack-ext-auto-note">자동 정리 사용 여부와 아래 숫자 설정은 현재 채팅방별로 따로 저장됩니다. 대화턴 1개 = 사용자 1회 + AI 답변 1회입니다. 평상시에는 오래된 카드를 유지하고, 마지막 카드의 직접 후속만 수정하며, 독립 사건은 새 assistant 슬롯에 누적합니다. 새 슬롯이 없으면 로그를 버리거나 옛 카드에 밀어 넣지 않고 보류합니다. “중간 병합 주기”마다 최근 누적 구간만 2차 압축 지침에 따라 필요한 만큼 병합하며, 0이면 끕니다. 전체 카드가 최대 슬롯을 초과한 순간에만 압축 목표 슬롯까지 전체 정리합니다. 아래 “자동 정리” 프롬프트는 평상시 누적 판단에, “2차 압축” 프롬프트는 중간·전체 압축에 사용됩니다. 최근 제외는 마지막 경계를 다음 실행으로 보류합니다. [추가] 카드 보호를 켜면 해당 카드는 절대 수정·삭제하지 않습니다. assistant 슬롯만 치환·삭제하며 새 [추가] 카드는 만들지 않습니다.</div>';
+        html += '<div class="crack-ext-auto-note">자동 정리 사용 여부와 아래 숫자 설정은 현재 채팅방별로 따로 저장됩니다. 모든 숫자 입력은 고정 최댓값 없이 사용자가 입력한 정수를 그대로 적용합니다. 실행 주기·한 번에 읽기·전체 유지 상한·압축 후 목표는 1 이상이어야 하며, 최근 제외·참고 장기기억·중간 병합은 0도 사용할 수 있습니다. 참고 장기기억 0은 추가 참고 카드 없음, 중간 병합 0은 중간 병합 끔을 뜻합니다. 값이 클수록 불러오는 대화와 AI 입력량·비용이 커질 수 있습니다. 대화턴 1개 = 사용자 1회 + AI 답변 1회입니다. 평상시에는 오래된 카드를 유지하고, 마지막 카드의 직접 후속만 수정하며, 독립 사건은 새 assistant 슬롯에 누적합니다. 새 슬롯이 없으면 로그를 버리거나 옛 카드에 밀어 넣지 않고 보류합니다. “중간 병합 주기”마다 최근 누적 구간만 2차 압축 지침에 따라 필요한 만큼 병합합니다. 전체 카드가 “전체 장기기억 유지 상한”을 초과한 순간에만 “압축 후 전체 카드 목표”까지 전체 정리합니다. 유지 상한에는 보호된 [추가] 카드도 포함되며, 플랫폼의 [추가] 카드 100개 제한과는 별개입니다. 아래 “자동 정리” 프롬프트는 평상시 누적 판단에, “2차 압축” 프롬프트는 중간·전체 압축에 사용됩니다. 최근 제외는 마지막 경계를 다음 실행으로 보류합니다. [추가] 카드 보호를 켜면 해당 카드는 절대 수정·삭제하지 않습니다. assistant 슬롯만 치환·삭제하며 새 [추가] 카드는 만들지 않습니다.</div>';
         html += '<div class="crack-ext-auto-actions"><button class="crack-ext-ai-mbtn" id="ce-auto-save-settings">설정 저장</button><button class="crack-ext-ai-mbtn" id="ce-auto-run">지금 실행</button><button class="crack-ext-ai-mbtn" id="ce-auto-reset">기준점 초기화</button><span class="crack-ext-auto-status" id="ce-auto-status"></span></div>';
         html += '<div class="crack-ext-auto-usage" id="ce-auto-usage"></div>';
         html += '</div></details>';
@@ -5609,17 +5652,17 @@ if (btnTurnInfo && turnInfoPopover) {
             var raw = String(input && input.value != null ? input.value : '').trim();
             if (!/^-?\d+$/.test(raw)) return null;
             var value = Number(raw);
-            if (!Number.isSafeInteger(value) || value < min || value > max) return null;
+            if (!Number.isSafeInteger(value) || value < min || (max != null && value > max)) return null;
             return value;
         }
 
         function readAutoSettingsFromUi() {
-            var intervalTurns = readAutoInteger(autoInterval, 1, 50);
-            var readTurns = readAutoInteger(autoRead, 1, 50);
-            var excludeRecentTurns = readAutoInteger(autoExclude, 0, 10);
-            var contextCards = readAutoInteger(autoContext, 3, 5);
-            var midMergeTurns = readAutoInteger(autoMidMerge, 0, 500);
-            var maxCards = readAutoInteger(autoMax, 5, 20);
+            var intervalTurns = readAutoInteger(autoInterval, 1, null);
+            var readTurns = readAutoInteger(autoRead, 1, null);
+            var excludeRecentTurns = readAutoInteger(autoExclude, 0, null);
+            var contextCards = readAutoInteger(autoContext, 0, null);
+            var midMergeTurns = readAutoInteger(autoMidMerge, 0, null);
+            var maxCards = readAutoInteger(autoMax, 1, null);
             if ([intervalTurns, readTurns, excludeRecentTurns, contextCards, midMergeTurns, maxCards].some(function(value) { return value == null; })) return null;
             var compactTarget = readAutoInteger(autoTarget, 1, maxCards);
             if (compactTarget == null) return null;
@@ -5650,10 +5693,10 @@ if (btnTurnInfo && turnInfoPopover) {
         }
 
         function syncAutoTargetLimit() {
-            var maxCards = readAutoInteger(autoMax, 5, 20);
+            var maxCards = readAutoInteger(autoMax, 1, null);
             if (maxCards == null) return false;
             autoTarget.max = maxCards;
-            var target = readAutoInteger(autoTarget, 1, 20);
+            var target = readAutoInteger(autoTarget, 1, null);
             if (target != null && target > maxCards) {
                 autoTarget.value = maxCards;
                 return true;
@@ -5745,9 +5788,7 @@ if (btnTurnInfo && turnInfoPopover) {
         ]);
         autoSettingsFieldMap.forEach(function(settingKey, input) {
             input.addEventListener('input', function() {
-                var fields = [settingKey];
-                if (input === autoMax && syncAutoTargetLimit()) fields.push('compactTarget');
-                scheduleAutoSettingsSave(null, fields);
+                scheduleAutoSettingsSave(null, settingKey);
             });
             input.addEventListener('change', function() {
                 var fields = [settingKey];
@@ -5769,7 +5810,7 @@ if (btnTurnInfo && turnInfoPopover) {
             var saved = saveAutoSettingsOnlyFromUi({ writeBack:true });
             if (!saved) {
                 setAutoMemorySettingsEditPending(modalChatId, true);
-                throw new Error('자동 설정의 빈칸이나 범위를 확인해주세요. 최대 슬롯은 5~20, 압축 목표는 최대 슬롯 이하여야 합니다.');
+                throw new Error('자동 설정을 확인해주세요. 실행 주기·한 번에 읽기·전체 장기기억 유지 상한은 1 이상의 정수, 최근 제외·참고 장기기억·중간 병합은 0 이상의 정수여야 하며 별도 최댓값은 없습니다. 압축 후 전체 카드 목표는 1 이상이면서 유지 상한 이하여야 합니다.');
             }
             safelyClearAutoMemoryFailureAfterSettingsSave(modalChatId);
             renderAutoMemoryStatus();
@@ -6136,7 +6177,7 @@ if (btnTurnInfo && turnInfoPopover) {
                     var savedAutoSettings = saveAutoSettingsOnlyFromUi({ writeBack:true });
                     if (!savedAutoSettings) {
                         setAutoMemorySettingsEditPending(modalChatId, true);
-                        await showUiAlert('자동 설정의 빈칸이나 범위를 확인해주세요. 최대 슬롯은 5~20, 압축 목표는 최대 슬롯 이하여야 합니다.', '자동 설정 확인', { tone:'warning' });
+                        await showUiAlert('자동 설정을 확인해주세요. 실행 주기·한 번에 읽기·전체 장기기억 유지 상한은 1 이상의 정수, 최근 제외·참고 장기기억·중간 병합은 0 이상의 정수여야 하며 별도 최댓값은 없습니다. 압축 후 전체 카드 목표는 1 이상이면서 유지 상한 이하여야 합니다.', '자동 설정 확인', { tone:'warning' });
                         return;
                     }
                 } catch (err) {
@@ -6189,11 +6230,11 @@ if (btnTurnInfo && turnInfoPopover) {
             var vertexLocation = inputVertexLocation.value.trim() || 'global';
             var vertexProjectId = inputVertexProject.value.trim();
             var model = selModel.value;
-            var turnsVal = parseInt(inputTurns.value, 10);
-            var turns = isNaN(turnsVal) ? 15 : turnsVal;
+            var turns = nonNegativeSafeInteger(inputTurns.value, null);
             var style = selStyle.value;
             var reasoning = selReasoning.value || 'auto';
 
+            if (turns == null) { await showUiAlert('턴 수는 0 이상의 정수로 입력해주세요. 별도 최댓값은 없습니다.', '턴 수 확인', { tone:'warning' }); return; }
             if (provider !== 'firebase' && provider !== 'vertex' && !apiKey) { await showUiAlert('API Key를 입력해주세요.', 'API Key 필요', { tone:'warning' }); return; }
             if (provider === 'firebase' && !firebaseScript) { await showUiAlert('Firebase 스크립트를 입력해주세요.', 'Firebase 설정 필요', { tone:'warning' }); return; }
             if (provider === 'vertex' && !vertexJson) { await showUiAlert('서비스 계정 JSON을 입력하거나 저장해주세요.', 'Vertex JSON 필요', { tone:'warning' }); return; }
