@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.1.3
+// @version      4.1.4
 // @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -2458,7 +2458,7 @@ ${TRANSLATION_ONLY_RULE}`;
   }
 
   async function fetchChatMessages(chatId) {
-    const res = await fetch(`${API_BASE}/v3/chats/${chatId}/messages?limit=20`, {
+    const res = await fetch(`${API_BASE}/v3/chats/${chatId}/messages?limit=50`, {
       headers: buildHeaders(),
       credentials: 'include',
       cache: 'no-store',
@@ -2466,14 +2466,19 @@ ${TRANSLATION_ONLY_RULE}`;
     if (!res.ok) throw new Error(`메시지 조회 실패 (${res.status})`);
 
     const json = await res.json();
-    return (json.data ?? json).messages ?? [];
+    const payload = json?.data ?? json;
+    if (Array.isArray(payload)) return payload;
+    if (Array.isArray(payload?.messages)) return payload.messages;
+    if (Array.isArray(payload?.items)) return payload.items;
+    if (Array.isArray(json?.messages)) return json.messages;
+    return [];
   }
 
   async function fetchLatestBotMessage(chatId) {
     const msgs = await fetchChatMessages(chatId);
-    const bot = msgs.find(m => m.role === 'assistant');
+    const bot = msgs.find(isAssistantMessage);
     if (!bot) throw new Error('최신 AI 메시지를 찾을 수 없습니다.');
-    return { id: bot._id ?? bot.id, content: getMessageContent(bot), allMsgs: msgs };
+    return { id: getPrimaryMessageId(bot), content: getMessageContent(bot), allMsgs: msgs };
   }
 
   async function patchMessage(chatId, messageId, content) {
@@ -2496,7 +2501,26 @@ ${TRANSLATION_ONLY_RULE}`;
 
   function findMessageById(messages, messageId) {
     if (!messageId) return null;
-    return messages.find(m => String(m._id || m.id || '') === String(messageId)) || null;
+    const targetId = String(messageId);
+    const primaryMatch = messages.find(message => String(getPrimaryMessageId(message)) === targetId);
+    if (primaryMatch) return primaryMatch;
+    return messages.find(message => getMessageIdentityValues(message).includes(targetId)) || null;
+  }
+
+  function getPrimaryMessageId(message) {
+    return message?._id ?? message?.id ?? message?.messageId ?? message?.message_id ?? '';
+  }
+
+  function isAssistantMessage(message) {
+    const role = String(
+      message?.role
+      ?? message?.senderRole
+      ?? message?.sender_role
+      ?? message?.author?.role
+      ?? message?.sender?.role
+      ?? ''
+    ).toLocaleLowerCase();
+    return role === 'assistant' || role === 'bot' || role === 'character' || role === 'ai';
   }
 
   function normalizeForMessageMatch(text) {
@@ -2562,16 +2586,61 @@ ${TRANSLATION_ONLY_RULE}`;
       message?.group_id,
       message?.clientMessageId,
       message?.client_message_id,
+      message?.messageGroup?._id,
+      message?.messageGroup?.id,
+      message?.message_group?._id,
+      message?.message_group?.id,
+      message?.group?._id,
+      message?.group?.id,
+      message?.metadata?.messageId,
+      message?.metadata?.message_id,
+      message?.metadata?.messageGroupId,
+      message?.metadata?.message_group_id,
+      message?.meta?.messageId,
+      message?.meta?.message_id,
+      message?.meta?.messageGroupId,
+      message?.meta?.message_group_id,
     ]
       .filter(value => value !== undefined && value !== null)
       .map(String);
   }
 
+  function normalizeIdentityCandidates(value) {
+    const candidates = Array.isArray(value) ? value : [value];
+    return [...new Set(candidates
+      .filter(candidate => candidate !== undefined && candidate !== null)
+      .map(candidate => String(candidate).trim())
+      .filter(Boolean))];
+  }
+
+  function getBubbleIdentityValues(messageBlock, fallbackMsgId = '') {
+    const values = [fallbackMsgId];
+    if (messageBlock) {
+      const nodes = [messageBlock, ...messageBlock.querySelectorAll('[data-message-id], [data-message-group-id], [data-id]')];
+      nodes.forEach(node => {
+        values.push(
+          node.getAttribute?.('data-message-id'),
+          node.getAttribute?.('data-message-group-id'),
+          node.getAttribute?.('data-id')
+        );
+      });
+    }
+    return normalizeIdentityCandidates(values);
+  }
+
+  function isStrongContainedMatch(messageText, visibleText) {
+    const messageNorm = normalizeForMessageMatch(messageText);
+    const visibleNorm = normalizeForMessageMatch(visibleText);
+    const shorterLength = Math.min(messageNorm.length, visibleNorm.length);
+    if (shorterLength < 12) return false;
+    return messageNorm.includes(visibleNorm) || visibleNorm.includes(messageNorm);
+  }
+
   function resolveTargetBotMessage(messages, fallbackMsgId, visibleText) {
-    const assistants = (Array.isArray(messages) ? messages : []).filter(message => message?.role === 'assistant');
-    const fallbackId = String(fallbackMsgId || '');
-    const identityMatches = fallbackId
-      ? assistants.filter(message => getMessageIdentityValues(message).includes(fallbackId))
+    const assistants = (Array.isArray(messages) ? messages : []).filter(isAssistantMessage);
+    const fallbackIds = normalizeIdentityCandidates(fallbackMsgId);
+    const identityMatches = fallbackIds.length
+      ? assistants.filter(message => getMessageIdentityValues(message).some(id => fallbackIds.includes(id)))
       : [];
     const visibleNorm = normalizeForMessageMatch(visibleText);
 
@@ -2584,19 +2653,44 @@ ${TRANSLATION_ONLY_RULE}`;
     const identityAndContent = contentMatches.filter(message => identityMatches.includes(message));
     if (identityAndContent.length === 1) return identityAndContent[0];
     if (contentMatches.length === 1) return contentMatches[0];
+
+    const identityCandidates = identityMatches.map(message => ({
+      message,
+      score: getMessageMatchStrength(getMessageContent(message), visibleText),
+      contained: isStrongContainedMatch(getMessageContent(message), visibleText),
+    })).sort((a, b) => b.score - a.score);
+    const bestIdentity = identityCandidates[0];
+    const nextIdentity = identityCandidates[1];
+    if (bestIdentity && (bestIdentity.contained || bestIdentity.score >= 60)
+      && (!nextIdentity || bestIdentity.score - nextIdentity.score >= 8 || !nextIdentity.contained)) {
+      return bestIdentity.message;
+    }
     throw new Error('선택한 답변을 정확히 찾을 수 없습니다. 잠시 후 다시 시도해주세요.');
   }
 
   function getMessageContent(message) {
-    const raw = message?.content ?? message?.message ?? message?.text ?? '';
+    const raw = message?.content
+      ?? message?.message
+      ?? message?.text
+      ?? message?.body
+      ?? message?.payload?.content
+      ?? message?.payload?.message
+      ?? message?.data?.content
+      ?? '';
     if (typeof raw === 'string') return raw;
     if (Array.isArray(raw)) {
       return raw.map(part => {
         if (typeof part === 'string') return part;
-        return part?.text ?? part?.content ?? part?.value ?? '';
+        const value = part?.text ?? part?.content ?? part?.value ?? part?.body ?? '';
+        if (typeof value === 'string') return value;
+        return value?.value ?? value?.text ?? value?.content ?? '';
       }).filter(Boolean).join('\n\n');
     }
-    if (raw && typeof raw === 'object') return raw.text ?? raw.content ?? raw.value ?? '';
+    if (raw && typeof raw === 'object') {
+      const value = raw.text ?? raw.content ?? raw.value ?? raw.body ?? '';
+      if (typeof value === 'string') return value;
+      return value?.value ?? value?.text ?? value?.content ?? '';
+    }
     return String(raw || '');
   }
 
@@ -2621,24 +2715,30 @@ ${TRANSLATION_ONLY_RULE}`;
   }
 
   function resolveApproximateBotMessage(messages, fallbackMsgId, visibleText) {
-    const assistants = (Array.isArray(messages) ? messages : []).filter(message => message?.role === 'assistant');
-    const fallbackId = String(fallbackMsgId || '');
+    const assistants = (Array.isArray(messages) ? messages : []).filter(isAssistantMessage);
+    const fallbackIds = normalizeIdentityCandidates(fallbackMsgId);
     const visibleNorm = normalizeForMessageMatch(visibleText);
     const scored = assistants.map(message => {
       const messageText = getMessageContent(message);
       const messageNorm = normalizeForMessageMatch(messageText);
-      const identityMatch = fallbackId && getMessageIdentityValues(message).includes(fallbackId);
+      const identityMatch = fallbackIds.length
+        && getMessageIdentityValues(message).some(id => fallbackIds.includes(id));
       const edgeLength = Math.min(24, messageNorm.length, visibleNorm.length);
       const edgesMatch = edgeLength >= 12
         && messageNorm.slice(0, edgeLength) === visibleNorm.slice(0, edgeLength)
         && messageNorm.slice(-edgeLength) === visibleNorm.slice(-edgeLength);
-      return { message, score: getMessageMatchStrength(messageText, visibleText), identityMatch, edgesMatch };
+      const contained = isStrongContainedMatch(messageText, visibleText);
+      return { message, score: getMessageMatchStrength(messageText, visibleText), identityMatch, edgesMatch, contained };
     }).sort((a, b) => b.score - a.score);
 
     const best = scored[0];
     const runnerUp = scored[1];
-    if (!best || best.score < 82) return null;
-    if (!best.identityMatch && !best.edgesMatch) return null;
+    if (!best) return null;
+    if (best.identityMatch) {
+      if (!best.contained && best.score < 60) return null;
+    } else if (best.score < 82 || !best.edgesMatch) {
+      return null;
+    }
     if (runnerUp && best.score - runnerUp.score < 8 && !best.identityMatch) return null;
     return best.message;
   }
@@ -2650,19 +2750,22 @@ ${TRANSLATION_ONLY_RULE}`;
     let lastExact = null;
     let lastMessages = [];
     let lastVisibleText = visibleText;
-    let lastBubbleId = fallbackMsgId;
+    let lastBubbleIds = normalizeIdentityCandidates(fallbackMsgId);
+    let lastBubbleId = lastBubbleIds[0] || '';
 
     for (let attempt = 0; attempt < 12; attempt++) {
       const allMsgs = await fetchChatMessages(chatId);
       const currentVisibleText = getBubbleVisibleText(bubbleElement) || visibleText;
-      const currentBubbleId = bubbleElement?.getAttribute('data-message-group-id') || fallbackMsgId;
+      const currentBubbleIds = getBubbleIdentityValues(bubbleElement, fallbackMsgId);
+      const currentBubbleId = bubbleElement?.getAttribute('data-message-group-id') || currentBubbleIds[0] || '';
       lastMessages = allMsgs;
       lastVisibleText = currentVisibleText;
+      lastBubbleIds = currentBubbleIds;
       lastBubbleId = currentBubbleId;
       try {
-        const targetMsg = resolveTargetBotMessage(allMsgs, currentBubbleId, currentVisibleText);
+        const targetMsg = resolveTargetBotMessage(allMsgs, currentBubbleIds, currentVisibleText);
         const targetContent = getMessageContent(targetMsg);
-        const targetMsgId = targetMsg._id || targetMsg.id;
+        const targetMsgId = getPrimaryMessageId(targetMsg);
         const signature = `${targetMsgId}::${normalizeForMessageMatch(targetContent)}::${normalizeForMessageMatch(currentVisibleText)}`;
         lastExact = {
           allMsgs,
@@ -2695,18 +2798,23 @@ ${TRANSLATION_ONLY_RULE}`;
     }
 
     if (lastExact) return lastExact;
-    const approximateTarget = resolveApproximateBotMessage(lastMessages, lastBubbleId, lastVisibleText);
+    const approximateTarget = resolveApproximateBotMessage(lastMessages, lastBubbleIds, lastVisibleText);
     if (approximateTarget) {
       return {
         allMsgs: lastMessages,
         targetMsg: approximateTarget,
-        targetMsgId: approximateTarget._id || approximateTarget.id,
+        targetMsgId: getPrimaryMessageId(approximateTarget),
         targetContent: getMessageContent(approximateTarget),
         bubbleId: lastBubbleId,
         bubbleElement,
         visibleText: lastVisibleText,
       };
     }
+    console.warn('[Crack Translator] Failed to resolve the selected message.', {
+      assistantCount: lastMessages.filter(isAssistantMessage).length,
+      bubbleIds: lastBubbleIds,
+      visibleTextLength: String(lastVisibleText || '').length,
+    });
     throw lastError || new Error('선택한 답변을 정확히 찾을 수 없습니다.');
   }
 
@@ -2757,7 +2865,7 @@ Redistribution and use in source and binary forms, with or without modification,
 
 This software is provided by the copyright holders and contributors “as is” and any express or implied warranties, including, but not limited to, the implied warranties of merchantability and fitness for a particular purpose are disclaimed. In no event shall the copyright owner or contributors be liable for any direct, indirect, incidental, special, exemplary, or consequential damages (including, but not limited to, procurement of substitute goods or services; loss of use, data, or profits; or business interruption) however caused and on any theory of liability, whether in contract, strict liability, or tort (including negligence or otherwise) arising in any way out of the use of this software, even if advised of the possibility of such damage.
  */
-  /*
+  /* 
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
