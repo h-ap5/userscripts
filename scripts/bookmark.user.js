@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 버블 북마크 🔖
 // @namespace    https://crack.wrtn.ai/
-// @version      1.3.3
+// @version      1.0.0
 // @description  버블별 색상, 턴 방향 탐색, 입력창 테두리 고정, 유저 버블 ON/OFF, 좌우반전, 3줄 미리보기
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
