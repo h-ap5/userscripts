@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         크랙 버블 북마크 🔖
 // @namespace    https://crack.wrtn.ai/
-// @version      1.1.0
-// @description  소설형·채팅형 리본 북마크, 색상·위치 설정, 모바일 지원, 제목·턴수·3줄 미리보기
+// @version      1.3.3
+// @description  버블별 색상, 턴 방향 탐색, 입력창 테두리 고정, 유저 버블 ON/OFF, 좌우반전, 3줄 미리보기
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
 // @run-at       document-idle
@@ -14,19 +14,30 @@
     if (document.getElementById('cbb-panel')) return;
 
     // 사이트 구조가 바뀌면 이 선택자부터 확인하세요. API/인증 정보는 사용하지 않습니다.
-    const BODY = '.wrtn-markdown, .markdown-body, [data-message-content]';
+    const BODY = '.wrtn-markdown, .markdown-body, [data-message-content], [data-message-group-id] .prose';
     const GROUP = '[data-message-group-id], [data-message-id]';
     const INPUT = '.__chat_input_textarea, .ProseMirror[contenteditable="true"], [contenteditable="true"][role="textbox"], [contenteditable="true"][data-placeholder], textarea';
     const OWN = '[data-cbb-ui]';
-    const POPUPS = '[role="dialog"], [role="menu"], #hlp-popup, #chud-sidebar, #chud-infobar, #chud-side-menu, #chud-settings-menu, #igx-live-popup, #sgb-bg-settings-modal, [id^="novcap-"], .csp-generated-scene-image, .crack-ext-ai-modal, #trans-setting-panel, #trans-result-modal';
+    const CMU_UI = '#cmu-settings-panel, #cmu-toolbar-wrapper, #cmu-log-capture-bar, #cmu-log-capture-preview, #cmu-message-select-copy, .cmu-message-badge, .cmu-user-badge-row, .cac-answer-cost, .cmi-model-slot, #cmu-input-counter-wrap';
+    const BLOCKERS = '[role="dialog"], [role="menu"], #sgb-bg-settings-modal, #chud-side-menu, #chud-settings-menu, #chud-info-menu, #hlp-popup, #cmu-settings-panel.open, #cmu-log-capture-bar, #cmu-log-capture-preview.open, #cmu-message-select-copy';
+    const POPUPS = `${CMU_UI}, [role="dialog"], [role="menu"], #hlp-popup, #chud-sidebar, #chud-infobar, #chud-side-menu, #chud-settings-menu, #chud-info-menu, #igx-live-popup, #sgb-bg-settings-modal, [id^="novcap-"], .csp-generated-scene-image, .crack-ext-ai-modal, #trans-setting-panel, #trans-result-modal`;
     const EXCLUDED = `${OWN}, [contenteditable="true"], textarea, ${POPUPS}, .not-wrtn-markdown, .trans-live-content`;
+    // CSP 원본의 추천 답변은 main button > .wrtn-markdown이며 메시지 그룹 밖에 있다.
+    // 제목/메뉴에서도 같은 마크다운 클래스가 쓰이므로 클래스만으로 버블을 판정하지 않는다.
+    const NON_MESSAGE = 'button, a, [role="button"], [role="link"], [data-sgb-suggestion-button], header, nav, aside, [role="banner"], [role="navigation"], h1, h2, h3, h4, h5, h6, [role="heading"]';
+    const USER_SURFACE = '[data-sgb-bubble], [data-cmu-theme-bubble], .bg-surface_chat_secondary, div.relative.mb-5.items-end, div[class*="border-y"][class*="py-5"]';
+    const SEARCH_SURFACE = '[data-sgb-bubble], [data-cmu-theme-bubble], div[class*="bg-surface_chat"], div[class*="break-all"]';
+    const PLAIN_SEARCH_SURFACE = '[data-sgb-bubble], [data-cmu-theme-bubble], div[class*="bg-surface_chat"]';
     const PREFIX = 'CrackBubbleBookmarks_v1:';
     const APPEARANCE_KEY = 'CrackBubbleBookmarks_Appearance_v1';
     const MAX_SEARCH_MS = 90000;
     const MAX_SEARCH_STEPS = 100;
+    const HIGHLIGHT = 'mark.custom-hlp, mark[data-hlp-id]';
+    const PALETTE = [['차콜', '#374047'], ['민트', '#367c68'], ['로즈', '#b65371'], ['머스터드', '#987029'], ['블루', '#4a72a6'], ['라일락', '#856496']];
+    const validColor = color => /^#[\da-f]{6}$/i.test(color || '');
     const BOOK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-4-6 4V4Z"/></svg>';
     // 참고 이미지의 접힌 윗면 + V자 꼬리를 직접 그린 벡터. 외부 이미지 요청 없음.
-    const RIBBON = '<svg viewBox="0 0 36 48" aria-hidden="true"><path d="M27 2h2c4 0 5 4 5 9h-9Z" fill="currentColor"/><path d="M27 2h2c4 0 5 4 5 9h-9Z" fill="#000" opacity=".32"/><path d="M8 2h21c-4 0-5 4-5 9v34L14 37 3 45V11c0-6 1-9 5-9Z" fill="currentColor"/><path d="M8 2h21c-3 0-4 2-5 5H4c1-4 2-5 4-5Z" fill="#fff" opacity=".2"/><path class="cbb-check" d="m8 21 4 4 8-9" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const RIBBON = '<svg viewBox="0 0 36 48" aria-hidden="true"><g class="cbb-ribbon-shape"><path d="M27 2h2c4 0 5 4 5 9h-9Z" fill="currentColor"/><path d="M27 2h2c4 0 5 4 5 9h-9Z" fill="#000" opacity=".32"/><path d="M8 2h21c-4 0-5 4-5 9v34L14 37 3 45V11c0-6 1-9 5-9Z" fill="currentColor"/><path d="M8 2h21c-3 0-4 2-5 5H4c1-4 2-5 4-5Z" fill="#fff" opacity=".2"/></g><path class="cbb-check" d="m8 21 4 4 8-9" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     const GEAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m9 3-.5 3-2.5 1.5-3-.5-1 3 2.5 2v3L2 17l2 3 3-1 2 1 .5 3h4l.5-3 2-1 3 1 2-3-2.5-2v-3L21 10l-1-3-3 .5L14.5 6 14 3Z" transform="translate(1 -1) scale(.92)"/><circle cx="12" cy="12" r="3"/></svg>';
     const PEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 4 5 5M4 20l5-1L20 8a2 2 0 0 0-5-5L4 14Z"/></svg>';
     const CROSS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
@@ -60,10 +71,12 @@
     [data-cbb-ui] :focus-visible, button[data-cbb-ui]:focus-visible { outline: 2px solid var(--cbb-primary); outline-offset: 2px; }
     [data-cbb-ui] svg { width: 18px; height: 18px; flex-shrink: 0; pointer-events: none; }
     #cbb-overlay-root { position: fixed !important; inset: 0 !important; z-index: 40 !important; pointer-events: none !important; overflow: visible !important; contain: layout style; }
-    #cbb-overlay-root .cbb-ribbon { position: absolute !important; width: 44px !important; height: 48px !important; min-height: 48px !important; margin: 0 !important; padding: 2px 4px !important; border: 0 !important; border-radius: 4px !important; background: transparent !important; color: var(--cbb-ribbon-color, #374047) !important; pointer-events: auto; touch-action: none; cursor: grab; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+    #cbb-overlay-root .cbb-ribbon { position: absolute !important; width: 44px !important; height: 48px !important; min-height: 48px !important; margin: 0 !important; padding: 2px 4px !important; border: 0 !important; border-radius: 4px !important; background: transparent !important; color: var(--cbb-ribbon-color, #374047) !important; pointer-events: auto; touch-action: pan-y; cursor: pointer; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
     #cbb-overlay-root .cbb-ribbon svg { width: 32px; height: 44px; transform: translateX(4px); filter: drop-shadow(0 2px 2px #0003); opacity: .62; transition: opacity 140ms; }
     #cbb-overlay-root .cbb-ribbon:hover svg, #cbb-overlay-root .cbb-ribbon:focus-visible svg, #cbb-overlay-root .cbb-ribbon[aria-pressed="true"] svg, #cbb-toolbar svg { opacity: 1; }
-    #cbb-overlay-root .cbb-ribbon:active { cursor: grabbing; }
+    #cbb-overlay-root .cbb-bubble-ribbon, #cbb-overlay-root .cbb-bubble-ribbon:active { cursor: pointer; touch-action: pan-y; }
+    #cbb-overlay-root[data-cbb-mirror="true"] .cbb-ribbon-shape { transform: translateX(36px) scaleX(-1); }
+    #cbb-overlay-root[data-cbb-mirror="true"] .cbb-check { transform: translateX(8px); }
     #cbb-overlay-root .cbb-check { display: none; }
     #cbb-overlay-root [aria-pressed="true"] .cbb-check { display: block; }
     #cbb-toolbar[data-has-items="true"]::after { content: ''; position: absolute; width: 6px; height: 6px; border: 1px solid var(--cbb-bg); border-radius: 50%; right: 8px; top: 9px; background: var(--cbb-primary); pointer-events: none; }
@@ -87,17 +100,26 @@
     #cbb-settings .cbb-custom-color { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
     #cbb-settings input[type="color"] { width: 48px; padding: 4px; flex-shrink: 0; cursor: pointer; }
     #cbb-settings .cbb-reset { border: 1px solid var(--cbb-border); }
-    #cbb-settings .cbb-nudge { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 8px 0 16px; }
-    #cbb-settings select { width: 100%; min-height: 40px; padding: 8px; border: 1px solid var(--cbb-border); border-radius: 8px; background: var(--cbb-bg); color: var(--cbb-text); font: inherit; }
+    #cbb-settings .cbb-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; min-height: 48px; margin: 8px 0; padding: 8px; border: 1px solid var(--cbb-border); text-align: left; }
+    #cbb-settings .cbb-toggle::after { content: 'OFF'; flex-shrink: 0; color: var(--cbb-muted); }
+    #cbb-settings .cbb-toggle[aria-checked="true"]::after { content: 'ON'; color: var(--cbb-primary); font-weight: 700; }
     #cbb-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; padding: 8px 16px 16px; }
-    #cbb-list .cbb-item { border: 1px solid var(--cbb-border); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+    #cbb-list .cbb-item { border: 1px solid var(--cbb-border); border-left: 4px solid var(--cbb-item-color, var(--cbb-border)); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+    #cbb-list .cbb-record-color-toggle::before { content: ''; width: 16px; height: 16px; border-radius: 50%; background: var(--cbb-item-color); border: 1px solid var(--cbb-border); }
+    #cbb-list .cbb-record-palette { padding: 8px 16px 16px; display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--cbb-border); }
+    #cbb-list .cbb-record-palette button[data-record-color] { width: 40px; min-height: 40px; background: var(--swatch); border: 1px solid var(--cbb-border); }
+    #cbb-list .cbb-record-palette button[aria-pressed="true"] { outline: 2px solid var(--cbb-primary); outline-offset: 2px; }
+    #cbb-list .cbb-record-palette label { width: 100%; margin: 0; }
+    #cbb-list .cbb-record-palette input[type="color"] { width: 48px; padding: 4px; }
+    #cbb-navigation-preview { position: fixed !important; z-index: 41 !important; overflow: hidden !important; padding: 0 !important; margin: 0 !important; contain: strict; touch-action: none; cursor: progress; }
     #cbb-list .cbb-jump { display: block; width: 100%; text-align: left; padding: 16px 16px 8px; border: 0; border-radius: 0; }
     #cbb-list .cbb-item-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
     #cbb-list .cbb-title { flex: 1; min-width: 0; font-size: 16px; font-weight: 650; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #cbb-list .cbb-turn { flex-shrink: 0; color: var(--cbb-primary); font-size: 14px; font-variant-numeric: tabular-nums; }
     #cbb-list .cbb-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; max-height: 4.8em; color: var(--cbb-muted); }
-    #cbb-list .cbb-item-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 8px 16px; }
-    #cbb-list .cbb-open-label { color: var(--cbb-muted); font-size: 14px; }
+    #cbb-list .cbb-item-bottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px 16px; }
+    #cbb-list .cbb-item-bottom > div { display: flex; align-items: center; flex-shrink: 0; }
+    #cbb-list .cbb-open-label { color: var(--cbb-muted); font-size: 14px; white-space: nowrap; }
     #cbb-list .cbb-delete { color: var(--cbb-danger); }
     #cbb-list .cbb-edit-form { padding: 8px 16px 16px; background: var(--cbb-card); }
     #cbb-list .cbb-edit-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
@@ -135,15 +157,21 @@
             || path.match(/^\/(?:episodes|chats?)\/[a-zA-Z0-9_-]{8,}/)?.[0] || '';
     }
     const normal = text => String(text || '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
+    const textKey = text => normal(text).normalize('NFC').replace(/\s/g, '');
+    function wholeTextRelated(saved, current) {
+        if (!saved || !current) return false;
+        return current.includes(saved)
+            || (current.length >= 40 && saved.includes(current) && current.length / saved.length >= .72);
+    }
     const key = () => PREFIX + currentRoom;
     let currentRoom = roomPath(), records = [], bodies = [], editingId = null, dirty = true;
     let scanTimer = 0, frame = 0, noticeTimer = 0, navigation = null, dark = false;
-    let undo = null;
+    let undo = null, colorEditingId = null, lastLocation = null, navigationView = null;
     const ribbons = new Map(), suppressClicks = new WeakMap();
     let appearance = readAppearance(), composerInput = null, composerAnchor = null;
     const overlay = own(el('div')); overlay.id = 'cbb-overlay-root';
 
-    const toolbar = own(button('버블 북마크 열기 · 드래그로 위치 이동', RIBBON, () => setOpen(panel.hidden)));
+    const toolbar = own(button('버블 북마크 열기 · 입력창 우측 상단 고정', RIBBON, () => setOpen(panel.hidden)));
     toolbar.className = 'cbb-ribbon'; toolbar.dataset.cbbKind = 'composer';
     toolbar.id = 'cbb-toolbar'; toolbar.setAttribute('aria-haspopup', 'dialog');
     toolbar.setAttribute('aria-controls', 'cbb-panel'); toolbar.setAttribute('aria-expanded', 'false');
@@ -160,7 +188,7 @@
     searchLabel.htmlFor = search.id; searchArea.append(searchLabel, search);
     const list = el('div'); list.id = 'cbb-list';
     const settingsPane = el('div'); settingsPane.id = 'cbb-settings'; settingsPane.hidden = true;
-    const footer = el('footer', '', '우측 위 책갈피로 저장 · 드래그로 위치 이동');
+    const footer = el('footer', '', '버블 우측 위 책갈피를 눌러 저장');
     panel.append(header, searchArea, list, settingsPane, footer);
     const notice = own(el('div')); notice.id = 'cbb-notice'; notice.hidden = true;
     const noticeText = el('span'); noticeText.setAttribute('role', 'status'); noticeText.setAttribute('aria-live', 'polite');
@@ -168,21 +196,18 @@
     notice.append(noticeText, noticeAction);
     overlay.append(toolbar); document.body.append(overlay, panel, notice);
     buildSettings(); applyAppearance();
-    attachDrag(toolbar, () => 'composer'); attachDrag(header, () => 'panel');
+    attachFixedTap(toolbar); attachDrag(header, () => 'panel');
 
-    function defaultPlacement() { return { chat: { x: 0, y: 0 }, novel: { x: 0, y: 0 }, composer: { x: 0, y: 0 }, panel: null }; }
-    function defaultAppearance() { return { color: '#374047', desktop: defaultPlacement(), mobile: defaultPlacement() }; }
+    function defaultPlacement() { return { panel: null }; }
+    function defaultAppearance() { return { color: '#374047', showUser: true, mirror: false, desktop: defaultPlacement(), mobile: defaultPlacement() }; }
     function deviceKey() { return innerWidth <= 640 || matchMedia('(pointer: coarse)').matches ? 'mobile' : 'desktop'; }
     function readAppearance() {
         const defaults = defaultAppearance();
         try {
             const raw = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || 'null');
             if (/^#[\da-f]{6}$/i.test(raw?.color)) defaults.color = raw.color;
+            for (const key of ['showUser', 'mirror']) if (typeof raw?.[key] === 'boolean') defaults[key] = raw[key];
             for (const device of ['desktop', 'mobile']) {
-                for (const kind of ['chat', 'novel', 'composer']) {
-                    const point = raw?.[device]?.[kind];
-                    if (Number.isFinite(point?.x) && Number.isFinite(point?.y)) defaults[device][kind] = { x: Math.max(-2000, Math.min(2000, point.x)), y: Math.max(-2000, Math.min(2000, point.y)) };
-                }
                 const point = raw?.[device]?.panel;
                 if (Number.isFinite(point?.x) && Number.isFinite(point?.y)) defaults[device].panel = { x: Math.max(0, Math.min(1, point.x)), y: Math.max(0, Math.min(1, point.y)) };
             }
@@ -191,25 +216,33 @@
     }
     function saveAppearance() {
         try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance)); }
-        catch { toast('색상·위치를 저장하지 못했어요. 현재 화면에만 적용됩니다.'); }
+        catch { toast('책갈피 설정을 저장하지 못했어요. 현재 화면에만 적용됩니다.'); }
     }
     function applyAppearance() {
         overlay.style.setProperty('--cbb-ribbon-color', appearance.color);
+        overlay.dataset.cbbMirror = String(appearance.mirror);
+        settingsPane.querySelectorAll('[data-setting]').forEach(node => node.setAttribute('aria-checked', String(appearance[node.dataset.setting])));
         settingsPane.querySelectorAll('[data-color]').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.color === appearance.color)));
         const picker = settingsPane.querySelector('input[type="color"]'); if (picker) picker.value = appearance.color;
-        schedulePosition();
+        schedulePosition(); scheduleScan();
     }
     function showSettings(show) {
         settingsPane.hidden = !show; searchArea.hidden = show; list.hidden = show;
         appearanceButton.setAttribute('aria-pressed', String(show));
         appearanceButton.title = show ? '북마크 목록으로 돌아가기' : '책갈피 색상·위치 설정';
-        footer.textContent = show ? '설정은 이 브라우저에 저장됩니다.' : '우측 위 책갈피로 저장 · 드래그로 위치 이동';
+        footer.textContent = show ? '설정은 이 브라우저에 저장됩니다.' : '버블 우측 위 책갈피를 눌러 저장';
         if (!show) renderList(); position();
     }
     function buildSettings() {
-        settingsPane.append(el('h3', '', '책갈피 색상'));
+        settingsPane.append(el('h3', '', '표시 설정'));
+        for (const [key, label] of [['showUser', '유저 입력 버블 책갈피'], ['mirror', '책갈피 아이콘 좌우반전']]) {
+            const toggle = button(label, '', () => { appearance[key] = !appearance[key]; applyAppearance(); saveAppearance(); });
+            toggle.className = 'cbb-toggle'; toggle.dataset.setting = key; toggle.setAttribute('role', 'switch'); settingsPane.append(toggle);
+        }
+        settingsPane.append(el('p', '', '유저 버블을 OFF로 해도 저장한 북마크와 원문 이동은 유지돼요. 좌우반전은 버블·입력창 아이콘에 함께 적용돼요.'));
+        settingsPane.append(el('h3', '', '입력창 · 새 책갈피 기본 색상'), el('p', '', '저장한 책갈피의 색은 목록에서 각 항목의 색상 버튼으로 바꿔요. 기본 색상을 바꿔도 기존 책갈피 색은 유지됩니다.'));
         const colors = el('div', 'cbb-colors');
-        for (const [label, color] of [['차콜', '#374047'], ['민트', '#367c68'], ['로즈', '#b65371'], ['머스터드', '#987029'], ['블루', '#4a72a6'], ['라일락', '#856496']]) {
+        for (const [label, color] of PALETTE) {
             const swatch = button(label, '', () => { appearance.color = color; applyAppearance(); saveAppearance(); });
             swatch.textContent = ''; swatch.className = 'cbb-color'; swatch.dataset.color = color; swatch.style.setProperty('--swatch', color); colors.append(swatch);
         }
@@ -217,16 +250,9 @@
         const picker = el('input'); picker.type = 'color'; picker.id = label.htmlFor;
         picker.addEventListener('input', () => { appearance.color = picker.value; applyAppearance(); });
         picker.addEventListener('change', saveAppearance); custom.append(label, picker);
-        settingsPane.append(colors, custom, el('h3', '', '위치 이동'), el('p', '', '책갈피를 잡고 끌어 위치를 바꿀 수 있어요. 소설형·채팅형·입력창 위치를 따로 기억하며, 모바일과 PC 설정도 나눠 저장해요. 같은 보기 방식의 버블 책갈피는 함께 이동합니다.'));
-        const moveLabel = el('label', '', '미세 조정할 책갈피'); moveLabel.htmlFor = 'cbb-position-target';
-        const target = el('select'); target.id = moveLabel.htmlFor;
-        for (const [value, text] of [['composer', '입력창'], ['chat', '채팅형 버블'], ['novel', '소설형 버블']]) { const option = el('option', '', text); option.value = value; target.append(option); }
-        const nudge = el('div', 'cbb-nudge');
-        for (const [label, x, y] of [['← 왼쪽', -4, 0], ['위 ↑', 0, -4], ['아래 ↓', 0, 4], ['오른쪽 →', 4, 0]]) {
-            nudge.append(button(label, '', () => { const point = appearance[deviceKey()][target.value]; point.x += x; point.y += y; position(); saveAppearance(); }));
-        }
-        const reset = button('색상·위치 초기화', '', () => { appearance = defaultAppearance(); applyAppearance(); position(); saveAppearance(); }); reset.className = 'cbb-reset';
-        settingsPane.append(moveLabel, target, nudge, el('p', '', '설정창은 위쪽 제목 부분을 잡고 이동하세요. 스크롤 중에는 책갈피가 원래 버블과 입력창을 따라갑니다.'), reset);
+        settingsPane.append(colors, custom, el('h3', '', '책갈피 위치 고정'), el('p', '', '입력창 책갈피는 입력 박스 위 테두리에 붙어요. 정보바 전체를 피해 위로 떠오르지 않고, 테두리의 빈 자리에 걸칩니다. 드래그로 움직이지 않아요.'));
+        const reset = button('색상·위치 초기화', '', () => { const { showUser, mirror } = appearance; appearance = { ...defaultAppearance(), showUser, mirror }; applyAppearance(); position(); saveAppearance(); }); reset.className = 'cbb-reset';
+        settingsPane.append(el('p', '', '열린 설정창은 위쪽 제목 부분을 잡고 이동할 수 있어요. 책갈피는 버블과 입력창을 계속 따라갑니다.'), reset);
     }
     function attachDrag(node, getKind) {
         let gesture = null;
@@ -246,7 +272,7 @@
             if (gesture.kind === 'panel') {
                 const view = viewport(), rect = panel.getBoundingClientRect();
                 appearance[gesture.device].panel = { x: Math.max(0, Math.min(1, (gesture.left + dx - view.left - 8) / Math.max(1, view.width - rect.width - 16))), y: Math.max(0, Math.min(1, (gesture.top + dy - view.top - 8) / Math.max(1, view.height - rect.height - 16))) };
-            } else appearance[gesture.device][gesture.kind] = { x: gesture.old.x + dx, y: gesture.old.y + dy };
+            }
             position();
         });
         function finish(event) {
@@ -262,6 +288,19 @@
         node.addEventListener('pointerup', finish); node.addEventListener('pointercancel', finish);
         node.addEventListener('lostpointercapture', () => { if (gesture?.moved) { suppressClicks.set(node, performance.now() + 700); saveAppearance(); } gesture = null; });
         node.addEventListener('contextmenu', event => event.preventDefault());
+    }
+    function attachFixedTap(node) {
+        // 스와이프/길게 누르기를 저장/설정 열기 탭으로 오인하지 않음. 리본은 모두 위치 고정.
+        let start = null;
+        node.addEventListener('pointerdown', event => { start = { x: event.clientX, y: event.clientY, at: performance.now() }; });
+        const moved = event => start && Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 6;
+        node.addEventListener('pointermove', event => { if (moved(event)) suppressClicks.set(node, performance.now() + 700); });
+        node.addEventListener('pointerup', event => {
+            if (moved(event) || (start && performance.now() - start.at > 650)) suppressClicks.set(node, performance.now() + 700);
+            start = null;
+        });
+        node.addEventListener('pointercancel', () => { start = null; suppressClicks.set(node, performance.now() + 700); });
+        node.addEventListener('contextmenu', event => { event.preventDefault(); suppressClicks.set(node, performance.now() + 700); });
     }
 
     function toast(message, label, action, persistent = false) {
@@ -280,7 +319,14 @@
         return data.items;
     }
     function loadRecords() {
-        try { records = currentRoom ? readRecords() : []; }
+        try {
+            records = currentRoom ? readRecords() : [];
+            if (records.some(record => !validColor(record.color) || (!record.turn && headerTurn(record.text)))) {
+                records = records.map(record => ({ ...record, color: validColor(record.color) ? record.color : appearance.color, turn: record.turn || headerTurn(record.text) }));
+                try { localStorage.setItem(key(), JSON.stringify({ version: 1, items: records })); }
+                catch { toast('기존 책갈피 표시 정보를 저장하지 못했어요. 현재 화면에는 적용했습니다.'); }
+            }
+        }
         catch { records = []; toast('북마크 데이터를 읽지 못했어요. 기존 데이터는 덮어쓰지 않습니다.', null, null, true); }
         updateCount();
     }
@@ -306,31 +352,77 @@
         return node instanceof HTMLElement && node.isConnected && node.getClientRects().length > 0
             && getComputedStyle(node).visibility !== 'hidden';
     }
-    function collectBodies() {
+    function isMessageBody(node) {
+        const group = node.closest('[data-message-group-id]') || node.closest('[data-message-id]');
+        return !!group && !!(group.getAttribute('data-message-group-id') || group.getAttribute('data-message-id') || '').trim()
+            && !node.closest(`${EXCLUDED}, ${NON_MESSAGE}`) && visible(node);
+    }
+    function isPlainUserBody(node) {
+        if (!isMessageBody(node) || roleFor(node) !== 'user') return false;
+        const group = node.closest(GROUP), surface = node.closest(USER_SURFACE);
+        // break-all / whitespace-pre-wrap 은 이름에도 붙는다. 확인된 유저 말풍선 안에서만 보조 본문으로 허용.
+        return !!surface && surface !== group && group.contains(surface);
+    }
+    function isSearchBody(node) {
+        if (node.closest(`${EXCLUDED}, ${NON_MESSAGE}`) || !visible(node)) return false;
+        // 과거 로그 로딩 중 ID가 아직 붙지 않은 실제 말풍선도 읽는다. 표시할 리본의 판정은 계속 엄격하게 유지.
+        return isMessageBody(node) || !!node.closest(SEARCH_SURFACE);
+    }
+    function collectBodies(forSearch = false) {
         const root = document.querySelector('main') || document.body;
-        const candidates = [...root.querySelectorAll(BODY)].filter(node => !node.closest(EXCLUDED)
-            && !node.parentElement?.closest(BODY) && visible(node));
-        // 일반 텍스트로 렌더링된 유저 버블도 수집. 본문 안의 줄/코드 블록은 별도 버블로 세지 않음.
+        const selector = forSearch ? `${BODY}, .prose, [class*="wrtn-markdown"]` : BODY;
+        const candidates = [...root.querySelectorAll(selector)].filter(node => (forSearch ? isSearchBody(node) : isMessageBody(node)) && !node.parentElement?.closest(selector));
+        // 마크다운이 없는 유저 말풍선만 보조 수집. 프로필 이름/제목에는 이 경로를 적용하지 않음.
         root.querySelectorAll(`${GROUP}`).forEach(group => {
             group.querySelectorAll('[class*="whitespace-pre-wrap"], [class*="break-all"]').forEach(node => {
-                if (node.closest(EXCLUDED) || !visible(node) || node.querySelector(BODY) || node.closest(BODY)) return;
+                if (!isPlainUserBody(node) || node.querySelector(BODY) || node.closest(BODY)) return;
                 if (candidates.some(body => body.contains(node) || node.contains(body))) return;
                 if (normal(node.textContent)) candidates.push(node);
             });
         });
+        if (forSearch) root.querySelectorAll(PLAIN_SEARCH_SURFACE).forEach(node => {
+            if (!isSearchBody(node) || node.querySelector(selector) || node.closest(selector) || !normal(node.textContent)) return;
+            if (!candidates.some(body => body.contains(node) || node.contains(body))) candidates.push(node);
+        });
         return candidates.sort((a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
     }
-    function bodyText(body) {
-        const clone = body.cloneNode(true);
-        clone.querySelectorAll(`${OWN}, button, [role="button"], script, style, [aria-hidden="true"]`).forEach(node => node.remove());
-        clone.querySelectorAll('br').forEach(node => node.replaceWith('\n'));
-        clone.querySelectorAll('p, div, li, pre, blockquote, h1, h2, h3, h4, tr').forEach(node => node.append('\n'));
-        clone.querySelectorAll('img').forEach(node => node.replaceWith(`[이미지${node.alt ? ': ' + node.alt : ''}]`));
-        return (clone.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    function bodyText(body, legacy = false) {
+        // DOM을 매번 복제하지 않고 텍스트만 읽는다. 형광펜 mark의 버튼 역할은 본문으로 보존.
+        const chunks = [];
+        const visit = node => {
+            if (node.nodeType === 3) { chunks.push(node.nodeValue); return; }
+            if (node.nodeType !== 1) return;
+            if (node !== body && (node.matches(`${OWN}, ${CMU_UI}, button, script, style, textarea, [aria-hidden="true"]`)
+                || (node.getAttribute('role') === 'button' && (legacy || !node.matches(HIGHLIGHT))))) return;
+            if (node.tagName === 'BR') { chunks.push('\n'); return; }
+            if (node.tagName === 'IMG') { chunks.push(`[이미지${node.alt ? ': ' + node.alt : ''}]`); return; }
+            node.childNodes.forEach(visit);
+            if (node !== body && /^(P|DIV|LI|PRE|BLOCKQUOTE|H[1-4]|TR)$/.test(node.tagName)) chunks.push('\n');
+        };
+        visit(body);
+        return chunks.join('').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     }
     function parseTurn(value) {
         const match = normal(value).match(/^(?:[\[【(]\s*)?(?:(?:턴(?:수)?|turn)\s*[:#：-]?\s*(\d[\d,]*)|#?\s*(\d[\d,]*)\s*(?:번째\s*)?(?:턴|turn))(?:\s*[\]】)])?$/i);
         return match ? String(Number((match[1] || match[2]).replace(/,/g, ''))) : '';
+    }
+    function headerTurn(text) {
+        const header = normal(text).match(/^[\[【]\s*#(\d[\d,]*)\s*[|｜]/);
+        return header ? String(Number(header[1].replace(/,/g, ''))) : '';
+    }
+    function roleFor(body) {
+        const group = body.closest(GROUP);
+        for (let node = body; node; node = node.parentElement) {
+            const role = (node.getAttribute('data-message-role') || node.getAttribute('data-role') || '').toLowerCase();
+            if (['user', 'human'].includes(role)) return 'user';
+            if (['assistant', 'ai', 'bot'].includes(role)) return 'assistant';
+            if (node === group || node === document.body) break;
+        }
+        // CMU 4.2.4가 사용하는 실제 크랙 유저 말풍선/소설형 입력 구조. 본문 문자열로 역할을 추측하지 않음.
+        const wrap = body.closest('div.relative.mb-5.items-end, div[class*="border-y"][class*="py-5"], .bg-surface_chat_secondary');
+        if (wrap && group?.contains(wrap)) return 'user';
+        if (group?.querySelector('.cmu-user-badge-row')) return 'user';
+        return '';
     }
     function turnFor(body, group) {
         for (let node = body; node; node = node.parentElement) {
@@ -343,19 +435,26 @@
         // 헤더/상태창의 독립된 '12턴' 또는 '턴: 12'만 인식. 일반 문장 속 숫자나 DOM 순서는 추측하지 않음.
         const scope = group || body.parentElement || body;
         for (const node of scope.querySelectorAll('[data-turn-number], [data-turn], [data-turn-label], .turn-number, span, small, p, div')) {
-            if (node.closest(OWN) || !visible(node) || (node.children.length && !node.matches('[data-turn-label], .turn-number'))) continue;
+            if (node.closest(`${OWN}, ${CMU_UI}`) || !visible(node) || (node.children.length && !node.matches('[data-turn-label], .turn-number'))) continue;
             if (node.closest(BODY) && !body.contains(node)) continue;
             const parsed = parseTurn(node.getAttribute('aria-label') || node.textContent);
             if (parsed) return parsed;
         }
-        return '';
+        return headerTurn(body.querySelector('p')?.textContent || body.textContent);
     }
     function resolve(record, descriptions) {
         let pool = descriptions;
         if (record.messageId) pool = pool.filter(d => d.messageId === record.messageId);
         else if (record.groupId) pool = pool.filter(d => d.groupId === record.groupId);
+        // 보기 전환 후 개별 ID 속성이 사라져도 같은 그룹의 전체 본문으로 재확인.
+        if (!pool.length && record.messageId && record.groupId) pool = descriptions.filter(d => d.groupId === record.groupId);
         if (record.role) pool = pool.filter(d => !d.role || d.role === record.role);
-        const exact = pool.filter(d => normal(d.text) === normal(record.text));
+        let exact = pool.filter(d => textKey(d.text) === textKey(record.text));
+        // 1.2.0까지 형광펜 부분이 빠져 저장된 항목: 같은 식별자 안에서 당시 추출 결과를 재현.
+        // 같은 그룹의 다른 리롤을 고르지 않도록 임의 부분 일치/슬롯 번호만으로 연결하지 않는다.
+        if (!exact.length && record.textVersion !== 2 && (record.messageId || record.groupId) && textKey(record.text)) {
+            exact = pool.filter(d => d.body.querySelector(HIGHLIGHT) && textKey(bodyText(d.body, true)) === textKey(record.text));
+        }
         if (exact.length === 1) return { match: exact[0] };
         if (exact.length > 1) {
             // 안정적인 그룹 안의 같은 문장만 슬롯 번호로 구별. 전체 DOM 인덱스는 저장하지 않음.
@@ -369,19 +468,36 @@
         }
         // 개별 메시지 ID가 유일한 경우에는 본문 수정 후에도 같은 버블로 이동 가능.
         // 그룹 ID만 같고 내용이 바뀐 리롤 답변은 다른 로그로 취급.
-        if (record.messageId && pool.length === 1 && !pool[0].multipleParts && record.singleMessage) return { match: pool[0] };
+        if (record.messageId && pool.length === 1 && pool[0].messageId === record.messageId && !pool[0].multipleParts && record.singleMessage) return { match: pool[0] };
+        // 저장한 전체 문장이 그대로 있고 앞뒤에 표시 정보만 늘어난 경우도 같은 그룹에서 확인.
+        // 짧은 일부 대사나 단어 유사도로 다른 답변을 추측하지 않는다.
+        const savedText = textKey(record.text);
+        if (savedText.length >= 40) {
+            const compatible = d => (!record.role || !d.role || d.role === record.role) && (!record.turn || !d.turn || record.turn === d.turn);
+            const related = (pool.length ? pool : descriptions).filter(compatible);
+            const contained = related.filter(d => wholeTextRelated(savedText, textKey(d.text)));
+            if (contained.length === 1) return { match: contained[0] };
+            if (contained.length > 1) return { ambiguous: true };
+        }
+        // 렌더링 과정에서 ID가 바뀌어도 긴 전체 본문이 유일하게 일치하면 바로 연결한다.
+        // 짧은 반복 대사나 턴수가 다른 항목에는 이 보조 규칙을 쓰지 않는다.
+        if (!pool.length && textKey(record.text).length >= 40) {
+            const textMatches = descriptions.filter(d => textKey(d.text) === textKey(record.text)
+                && (!record.role || !d.role || d.role === record.role) && (!record.turn || !d.turn || record.turn === d.turn));
+            if (textMatches.length === 1) return { match: textMatches[0] };
+            if (textMatches.length > 1) return { ambiguous: true };
+        }
         return {};
     }
-    function descriptions() {
+    function descriptions(source = bodies) {
         const families = new Map();
-        const all = bodies.map(body => {
+        const all = source.map(body => {
             const group = body.closest('[data-message-group-id]'), message = body.closest('[data-message-id]');
             const family = message || group || body, parts = families.get(family) || [];
-            const roleNode = body.closest('[data-message-role], [data-role]');
             const data = { body, text: bodyText(body),
                 groupId: group?.getAttribute('data-message-group-id') || '', messageId: message?.getAttribute('data-message-id') || '',
                 bodyIndex: parts.length, turn: turnFor(body, group || message),
-                role: roleNode?.getAttribute('data-message-role') || roleNode?.getAttribute('data-role') || '', family };
+                role: roleFor(body), family };
             parts.push(data); families.set(family, parts); return data;
         });
         return all.map((data, index) => {
@@ -391,6 +507,19 @@
                 after: index < all.length - 1 ? normal(all[index + 1].text).slice(0, 160) : '' };
         });
     }
+    function looseSearchBodies(record, existing = []) {
+        const saved = textKey(record.text);
+        if (saved.length < 40) return [];
+        const root = document.querySelector('main') || document.body;
+        const selector = '[data-message-group-id] [class*="break-all"], [data-message-id] [class*="break-all"], '
+            + '[data-message-group-id] [class*="whitespace-pre-wrap"], [data-message-id] [class*="whitespace-pre-wrap"]';
+        const matches = [...root.querySelectorAll(selector)].filter(node => {
+            if (!isSearchBody(node) || existing.includes(node)) return false;
+            return wholeTextRelated(saved, textKey(bodyText(node)));
+        });
+        // 바깥 래퍼와 실제 본문이 함께 맞으면 더 안쪽의 실제 본문만 사용한다.
+        return matches.filter(node => !matches.some(other => other !== node && node.contains(other)));
+    }
     function refreshButtons() {
         const all = descriptions();
         const savedBodies = new Map();
@@ -399,16 +528,21 @@
             const btn = ribbons.get(body)?.button;
             if (!btn) return;
             const record = savedBodies.get(body);
+            // 가상 목록이 도착 직후 DOM을 교체해도 같은 원문에 남은 강조 시간을 이어준다.
+            if (record && lastLocation && record.id === lastLocation.id && lastLocation.room === currentRoom) markTarget(body, lastLocation.until);
             const data = all.find(d => d.body === body);
             btn.dataset.cbbGroup = data?.groupId || data?.messageId || '';
             btn.dataset.cbbIndex = String(data?.bodyIndex || 0);
             btn.setAttribute('aria-pressed', String(!!record));
+            if (record) btn.style.setProperty('--cbb-ribbon-color', validColor(record.color) ? record.color : appearance.color);
+            else btn.style.removeProperty('--cbb-ribbon-color');
             btn.setAttribute('aria-label', record ? '이 버블 북마크 해제' : '이 버블 북마크');
-            btn.title = (record ? '북마크 해제' : '이 버블 북마크') + ' · 드래그로 위치 이동';
+            btn.title = (record ? '북마크 해제' : '이 버블 북마크') + ' · 버블 우측 위 고정';
         });
     }
     function toggleBookmark(body) {
         if (roomPath() !== currentRoom || !currentRoom || !body.isConnected) return;
+        if (!appearance.showUser && roleFor(body) === 'user') return;
         bodies = collectBodies();
         const all = descriptions();
         const existing = records.find(record => resolve(record, all).match?.body === body);
@@ -416,7 +550,7 @@
         const description = all.find(d => d.body === body);
         if (!description || !normal(description.text)) { toast('저장할 대화 내용을 찾지 못했어요.'); return; }
         const { body: ignored, multipleParts, ...data } = description;
-        const record = { ...data, singleMessage: !!data.messageId && !multipleParts,
+        const record = { ...data, textVersion: 2, color: appearance.color, singleMessage: !!data.messageId && !multipleParts,
             id: crypto.randomUUID(), title: normal(data.text).slice(0, 40), createdAt: Date.now() };
         if (changeRecords(items => {
             if (items.some(item => resolve(item, all).match?.body === body)) return items;
@@ -436,14 +570,19 @@
         }
     }
     function startEdit(id) { editingId = id; renderList(); const input = list.querySelector('.cbb-edit-form input'); input?.focus(); input?.select(); }
+    function setRecordColor(id, color) {
+        if (!validColor(color)) return;
+        changeRecords(items => items.map(record => record.id === id ? { ...record, color } : record));
+    }
     function renderList() {
         if (panel.hidden) return;
         const scroll = list.scrollTop, query = normal(search.value).toLocaleLowerCase();
         list.replaceChildren();
         const filtered = records.filter(r => `${r.title} ${r.text} ${r.turn || ''}턴`.toLocaleLowerCase().includes(query)).sort((a, b) => b.createdAt - a.createdAt);
-        if (!filtered.length) list.append(el('div', 'cbb-empty', query ? '검색 결과가 없어요.' : '다시 읽고 싶은 대화를 모아보세요.\n버블 아래 책갈피를 누르면\n이곳에 3줄 미리보기로 쌓여요.'));
+        if (!filtered.length) list.append(el('div', 'cbb-empty', query ? '검색 결과가 없어요.' : '다시 읽고 싶은 대화를 모아보세요.\n버블 우측 위 책갈피를 누르면\n이곳에 3줄 미리보기로 쌓여요.'));
         filtered.forEach(record => {
             const item = el('article', 'cbb-item'); item.dataset.bookmarkId = record.id;
+            item.style.setProperty('--cbb-item-color', validColor(record.color) ? record.color : appearance.color);
             const jump = button(`${record.title}${record.turn ? `, ${record.turn}턴` : ''}, 원문으로 이동`, '', () => jumpTo(record));
             jump.className = 'cbb-jump'; jump.replaceChildren();
             const top = el('span', 'cbb-item-header'); top.append(el('span', 'cbb-title', record.title));
@@ -452,10 +591,22 @@
             const bottom = el('div', 'cbb-item-bottom'), actions = el('div');
             const edit = button('북마크 제목 수정', PEN, () => startEdit(record.id));
             const remove = button('북마크 삭제', TRASH, () => removeRecord(record.id)); remove.className = 'cbb-delete';
+            const colorButton = button('이 북마크 색상 변경', '', () => { colorEditingId = colorEditingId === record.id ? null : record.id; renderList(); });
+            colorButton.className = 'cbb-record-color-toggle'; colorButton.textContent = ''; colorButton.setAttribute('aria-expanded', String(colorEditingId === record.id));
             const openLink = button('원문으로 이동', '', () => jumpTo(record));
-            openLink.className = 'cbb-open-label'; openLink.textContent = '원문으로 이동 ↗';
-            actions.append(edit, remove); bottom.append(openLink, actions);
+            openLink.className = 'cbb-open-label'; openLink.textContent = '원문 이동 ↗';
+            actions.append(colorButton, edit, remove); bottom.append(openLink, actions);
             item.append(jump, bottom);
+            if (colorEditingId === record.id) {
+                const palette = el('div', 'cbb-record-palette'); palette.setAttribute('role', 'group'); palette.setAttribute('aria-label', '이 북마크 색상');
+                for (const [name, color] of PALETTE) {
+                    const swatch = button(name, '', () => setRecordColor(record.id, color)); swatch.textContent = ''; swatch.dataset.recordColor = color;
+                    swatch.style.setProperty('--swatch', color); swatch.setAttribute('aria-pressed', String(record.color === color)); palette.append(swatch);
+                }
+                const label = el('label', '', '직접 고르기'), picker = el('input'); picker.type = 'color'; picker.id = `cbb-record-color-${record.id}`; label.htmlFor = picker.id;
+                picker.value = validColor(record.color) ? record.color : appearance.color; picker.addEventListener('change', () => setRecordColor(record.id, picker.value));
+                palette.append(label, picker, button('색상 닫기', '', () => { colorEditingId = null; renderList(); })); item.append(palette);
+            }
             if (editingId === record.id) {
                 const form = el('form', 'cbb-edit-form'), label = el('label', '', '북마크 제목'), input = el('input');
                 input.id = 'cbb-edit-title'; input.value = record.title; input.maxLength = 100; label.htmlFor = input.id;
@@ -480,7 +631,7 @@
         if (open && (!currentRoom || roomPath() !== currentRoom)) return;
         panel.hidden = !open; toolbar.setAttribute('aria-expanded', String(open));
         if (open) { showSettings(false); loadRecords(); renderList(); position(); panel.focus({ preventScroll: true }); }
-        else { editingId = null; if (focusBack && toolbar.isConnected) toolbar.focus({ preventScroll: true }); }
+        else { editingId = null; colorEditingId = null; if (focusBack && toolbar.isConnected) toolbar.focus({ preventScroll: true }); }
     }
     search.addEventListener('input', () => { editingId = null; renderList(); });
     document.addEventListener('pointerdown', e => {
@@ -508,7 +659,7 @@
         const surface = body.closest('[data-sgb-bubble], [data-cmu-theme-bubble], div[class*="break-all"], div[class*="bg-surface_chat"], div[class*="rounded"][class*="px-"]');
         if (!surface || (group && !group.contains(surface))) return body;
         // 한 표면에 독립된 본문이 여러 개면 각 본문 모서리에 연결.
-        return [...surface.querySelectorAll(BODY)].filter(node => !node.parentElement?.closest(BODY)).length > 1 ? body : surface;
+        return [...surface.querySelectorAll(BODY)].filter(node => isMessageBody(node) && !node.parentElement?.closest(BODY)).length > 1 ? body : surface;
     }
     function bubbleKind(surface) {
         const explicit = surface.getAttribute('data-sgb-bubble') || surface.getAttribute('data-cmu-theme-bubble');
@@ -536,27 +687,37 @@
         return { left: v?.offsetLeft || 0, top: v?.offsetTop || 0, width: v?.width || innerWidth, height: v?.height || innerHeight };
     }
     function position() {
+        if (roomPath() !== currentRoom) { overlay.hidden = true; toolbar.hidden = true; panel.hidden = true; scheduleScan(); return; }
         if (!currentRoom) return;
         const view = viewport();
-        const blocked = [...document.querySelectorAll('[role="dialog"], [role="menu"], #sgb-bg-settings-modal, #chud-side-menu, #chud-settings-menu, #hlp-popup')].some(node => !node.closest(OWN) && visible(node));
+        const blocked = document.documentElement.matches('.cmu-panel-open, .cmu-user-note-open, .cmu-mobile-room-panel-open')
+            || [...document.querySelectorAll(BLOCKERS)].some(node => !node.closest(OWN) && visible(node));
         overlay.hidden = blocked;
+        if (blocked && !panel.hidden) setOpen(false);
+        if (blocked && navigationView) cancelNavigation();
+        if (navigationView) { overlay.hidden = true; return; }
         const inputRect = composerAnchor?.isConnected ? composerAnchor.getBoundingClientRect() : null;
         if (!blocked) {
-            const inputScope = composerAnchor?.closest('[data-sgb-input-host], form') || composerAnchor?.parentElement;
-            const obstacles = [...document.querySelectorAll('#chud-sidebar, #chud-infobar, #igx-live-popup'), ...inputScope?.querySelectorAll('button, [role="button"]') || []]
-                .filter(node => !node.closest(OWN) && visible(node)).map(node => node.getBoundingClientRect());
+            const inputScope = composerAnchor?.closest('[data-sgb-input-host], [data-cmu-theme-input-host], form') || composerAnchor?.parentElement;
+            // 정보바의 투명한 전체 폭은 장애물이 아니다. 실제 입력 테두리 안의 글자/버튼만 피한다.
+            const obstacles = [...inputScope?.querySelectorAll('button, [role="button"], #chud-sidebar span, #chud-infobar span, #cmu-input-counter-wrap') || []]
+                .filter(node => !node.closest('#igx-live-popup, #cdcg-root'))
+                .filter(node => !node.closest(OWN) && visible(node)).map(node => {
+                    const r = node.getBoundingClientRect(), clip = clipRect(node, view);
+                    return { left: Math.max(r.left, clip.left), right: Math.min(r.right, clip.right), top: Math.max(r.top, clip.top), bottom: Math.min(r.bottom, clip.bottom) };
+                }).filter(r => r.right > r.left && r.bottom > r.top && inputRect && r.bottom > inputRect.top && r.top < inputRect.bottom);
             if (composerAnchor?.isConnected) placeRibbon(toolbar, composerAnchor, 'composer', view, obstacles);
             else toolbar.hidden = true;
             ribbons.forEach((info, body) => {
-                if (!body.isConnected) { info.button.hidden = true; return; }
+                if (!body.isConnected || (!appearance.showUser && roleFor(body) === 'user')) { info.button.hidden = true; return; }
                 const surface = bubbleSurface(body), kind = bubbleKind(surface);
                 if (info.surface !== surface) { if (info.surface) resizeObserver.unobserve(info.surface); resizeObserver.observe(surface); info.surface = surface; }
                 info.kind = kind; info.button.dataset.cbbKind = kind;
                 const rect = surface.getBoundingClientRect();
                 if (rect.top < view.top - 50 || rect.top > view.top + view.height) { info.button.hidden = true; return; }
                 const group = body.closest(GROUP);
-                const metadata = [...group?.querySelectorAll('button, [role="button"], [data-turn-label], .turn-number, small, span') || []]
-                    .filter(node => !node.closest(`${OWN}, ${BODY}`) && visible(node) && (node.matches('button, [role="button"]') || parseTurn(node.textContent)))
+                const metadata = [...group?.querySelectorAll('button, [role="button"], [data-turn-label], .turn-number, .cmu-message-badge, .cac-answer-cost, .cmi-model-slot, small, span') || []]
+                    .filter(node => !node.closest(`${OWN}, ${BODY}`) && visible(node) && (node.matches('button, [role="button"], .cmu-message-badge, .cac-answer-cost, .cmi-model-slot') || parseTurn(node.textContent)))
                     .map(node => node.getBoundingClientRect());
                 placeRibbon(info.button, surface, kind, view, [...metadata, ...inputRect ? [inputRect] : []]);
             });
@@ -587,24 +748,21 @@
         if (rect.top < view.top - 50 || rect.top > view.top + view.height || !rect.width || !rect.height) { node.hidden = true; return; }
         const clip = clipRect(anchor, view);
         if (!rect.width || !rect.height || rect.top < clip.top - 2 || rect.top >= clip.bottom - 8 || rect.right <= clip.left || rect.left >= clip.right || !visible(anchor)) { node.hidden = true; return; }
-        const style = getComputedStyle(anchor), point = appearance[deviceKey()][kind];
-        const thinEdge = kind !== 'composer' && (kind === 'novel' || parseFloat(style.paddingRight) < 12);
-        const base = { left: rect.right - 18, top: rect.top - (kind === 'composer' ? 4 : thinEdge ? 46 : 10) };
-        // 책갈피의 접힌 면만 모서리에 걸치게 배치. 우측 여백이 없는 소설형은 본문 위쪽 사용.
-        let left = Math.max(view.left + 2, Math.min(base.left + point.x, view.left + view.width - 46));
-        let top = Math.max(view.top + 2, Math.min(base.top + point.y, view.top + view.height - 50));
+        const composer = kind === 'composer';
+        const inset = Math.max(64, Math.min(96, rect.width * .15));
+        const base = { left: rect.right - inset - 22, top: rect.top - (kind === 'novel' ? 46 : 10) };
+        // 우측 위 안쪽의 같은 앵커 사용. 모든 구버전 리본 드래그 좌표는 무시.
+        let left = Math.max(view.left + 2, Math.min(base.left, view.left + view.width - 46));
+        let top = Math.max(view.top + 2, Math.min(base.top, view.top + view.height - 50));
         const collides = (x, y) => obstacles.some(o => x + 44 > o.left && x < o.right && y + 48 > o.top && y < o.bottom);
         if (collides(left, top)) {
-            let found = false;
-            const adjustments = kind === 'chat'
-                ? [[0, 16], [0, 24], [0, -48], [-44, -48], [-88, -48]]
-                : [0, -48, -96, -144].flatMap(dy => [0, 44, -44, -88, -132].map(dx => [dx, dy]));
-            for (const [dx, dy] of adjustments) {
-                    const x = Math.max(view.left + 2, Math.min(left + dx, view.left + view.width - 46)), y = top + dy;
-                    if (kind !== 'composer' && (x + 24 > clip.right || x + 20 < clip.left)) continue;
-                    if (y >= view.top + 2 && y + 48 <= view.top + view.height && !collides(x, y)) { left = x; top = y; found = true; break; }
-            }
-            if (!found) { node.hidden = true; return; }
+            // 버블 리본은 주변 UI가 나타나도 다른 위치로 튀지 않음. 겹칠 때만 잠깐 숨김.
+            if (!composer) { node.hidden = true; return; }
+            // 높이는 입력 박스 테두리에 고정. 라디오존데/가드 위로 밀어 올리지 않는다.
+            const minLeft = Math.max(view.left + 2, rect.left + rect.width * .35), maxLeft = Math.min(rect.right - 44, view.left + view.width - 46);
+            const candidates = [left, maxLeft, ...obstacles.flatMap(o => [o.left - 48, o.right + 4])]
+                .filter(x => x >= minLeft && x <= maxLeft).sort((a, b) => Math.abs(a - base.left) - Math.abs(b - base.left));
+            left = candidates.find(x => !collides(x, top)) ?? left;
         }
         // 채팅 스크롤러 밖으로 떠다니거나 하단 입력창 위에 남는 리본은 숨김.
         if (kind !== 'composer' && (top + 24 < clip.top || top > clip.bottom - 24)) { node.hidden = true; return; }
@@ -618,7 +776,8 @@
     function schedulePosition() { if (!frame) frame = requestAnimationFrame(() => { frame = 0; position(); }); }
     function syncTheme() {
         const html = document.documentElement, body = document.body;
-        const explicit = html.getAttribute('data-sgb-theme') || body.getAttribute('data-theme') || html.getAttribute('data-theme');
+        const explicit = (html.classList.contains('cmu-theme-active') && html.getAttribute('data-cmu-theme'))
+            || html.getAttribute('data-sgb-theme') || body.getAttribute('data-theme') || html.getAttribute('data-theme');
         dark = explicit ? /dark/i.test(explicit) : html.classList.contains('light') || html.classList.contains('cmu-light') ? false
             : html.classList.contains('dark') || html.classList.contains('cmu-dark') || matchMedia('(prefers-color-scheme: dark)').matches;
         document.querySelectorAll(OWN).forEach(node => {
@@ -626,11 +785,32 @@
         });
     }
 
-    // 실제 버블을 감싸는 스크롤러 하나만 조작. 목록/사이드바 등 다른 스크롤 영역은 건드리지 않음.
-    function scrollParent(body) {
-        for (let node = body?.parentElement; node && node !== document.body; node = node.parentElement) {
+    // 실제 말풍선의 바깥 조상만 후보로 삼아 설정창/사이드바/말풍선 내부 스크롤을 건드리지 않는다.
+    // 크랙은 테마와 모바일 레이아웃에 따라 대화 스크롤 영역이 둘 이상 중첩될 수 있다.
+    function conversationScrollers(source) {
+        const nodes = Array.isArray(source) ? source : [source];
+        const found = [], seen = new Set();
+        const add = node => {
+            if (!(node instanceof HTMLElement) || seen.has(node) || node.closest(OWN) || !node.clientHeight) return;
             const style = getComputedStyle(node);
-            if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 2) return node;
+            if (!/(auto|scroll|overlay|hidden)/.test(style.overflowY) || node.scrollHeight <= node.clientHeight + 2) return;
+            seen.add(node); found.push(node);
+        };
+        nodes.forEach(body => {
+            const group = body?.closest(GROUP);
+            for (let node = (group || bubbleSurface(body) || body)?.parentElement; node && node !== document.body; node = node.parentElement) add(node);
+        });
+        const page = document.scrollingElement;
+        if (page && page.scrollHeight > page.clientHeight + 2 && !seen.has(page)) { seen.add(page); found.push(page); }
+        return found;
+    }
+    function scrollParent(body) {
+        const candidates = conversationScrollers(body);
+        if (candidates.length) return candidates[0];
+        // 아직 내용이 짧아 스크롤 범위가 생기지 않은 초기 화면의 대기용 후보.
+        const group = body?.closest(GROUP);
+        for (let node = (group || bubbleSurface(body) || body)?.parentElement; node && node !== document.body; node = node.parentElement) {
+            if (node.clientHeight && /(auto|scroll|overlay)/.test(getComputedStyle(node).overflowY)) return node;
         }
         return document.scrollingElement;
     }
@@ -643,62 +823,193 @@
         // 사이트의 smooth 지정으로 탐색이 지연되지 않도록 이 스크롤만 즉시 이동.
         scroller.scrollTo({ top, behavior: 'instant' });
     }
-    function waitForChange(signal, ms = 800) {
+    function waitForChange(signal, scroller, ms = 800) {
         return new Promise(resolve => {
+            let settle = 0;
+            const observer = new MutationObserver(changes => {
+                if (!changes.some(change => {
+                    const node = change.target.nodeType === 1 ? change.target : change.target.parentElement;
+                    return node && !node.closest(OWN);
+                })) return;
+                clearTimeout(settle); settle = setTimeout(done, 120);
+            });
             const timer = setTimeout(done, ms);
-            function done() { clearTimeout(timer); signal.removeEventListener('abort', done); resolve(); }
+            function done() { clearTimeout(timer); clearTimeout(settle); observer.disconnect(); signal.removeEventListener('abort', done); resolve(); }
+            if (scroller) observer.observe(scroller, { childList: true, subtree: true, characterData: true });
             signal.addEventListener('abort', done, { once: true });
             if (signal.aborted) done();
         });
     }
-    function cancelNavigation() { if (navigation) { navigation.abort(); navigation = null; } }
+    function closeNavigationView(controller, restore) {
+        if (navigationView?.controller === controller) { navigationView.end(restore); navigationView = null; }
+    }
+    function markTarget(body, until) {
+        const remaining = until - Date.now();
+        if (!(remaining > 0) || body.classList.contains('cbb-found')) return;
+        body.classList.add('cbb-found'); setTimeout(() => body.classList.remove('cbb-found'), remaining);
+    }
+    function cancelNavigation() {
+        if (navigation) { const previous = navigation; previous.abort(); closeNavigationView(previous, true); navigation = null; scheduleScan(); }
+    }
+    function turnDirection(record, all, scroller) {
+        const target = Number(record.turn); if (!record.turn || !Number.isFinite(target)) return null;
+        const bounds = scroller === document.scrollingElement ? { top: 0, bottom: innerHeight } : scroller.getBoundingClientRect();
+        const numbered = all.filter(d => d.turn && Number.isFinite(Number(d.turn))).map(d => ({ turn: Number(d.turn), rect: d.body.getBoundingClientRect() }));
+        const shown = numbered.filter(d => d.rect.bottom > bounds.top && d.rect.top < bounds.bottom).sort((a, b) => a.rect.top - b.rect.top);
+        let sign = 1;
+        const ordered = numbered.slice().sort((a, b) => a.rect.top - b.rect.top);
+        if (ordered.length > 1) {
+            const first = ordered[0], last = ordered.find(d => d.turn !== first.turn);
+            if (last) sign = Math.sign(last.turn - first.turn) || 1;
+        }
+        const nearest = numbered.reduce((best, item) => {
+            const distance = item.rect.bottom < bounds.top ? bounds.top - item.rect.bottom
+                : item.rect.top > bounds.bottom ? item.rect.top - bounds.bottom : 0;
+            return !best || distance < best.distance ? { turn: item.turn, distance } : best;
+        }, null);
+        // 현재 DOM에 실제 턴 정보가 있으면 이전에 방문한 다른 책갈피의 턴보다 우선한다.
+        const reference = shown.length ? shown.reduce((a, b) => Math.abs(a.rect.top - bounds.top) < Math.abs(b.rect.top - bounds.top) ? a : b).turn
+            : nearest?.turn ?? (lastLocation?.room === currentRoom && lastLocation.turn ? Number(lastLocation.turn) : undefined);
+        if (!Number.isFinite(reference) || reference === target) return null;
+        return { direction: Math.sign(target - reference) * sign, reference, target, sign };
+    }
+    function freezeNavigation(scroller, all, controller) {
+        const view = viewport(), raw = scroller === document.scrollingElement ? { left: view.left, right: view.left + view.width, top: view.top, bottom: view.top + view.height } : scroller.getBoundingClientRect();
+        const area = { left: Math.max(raw.left, view.left), right: Math.min(raw.right, view.left + view.width), top: Math.max(raw.top, view.top), bottom: Math.min(raw.bottom, view.top + view.height) };
+        if (area.right <= area.left || area.bottom <= area.top) return;
+        const shown = all.filter(d => { const r = d.body.getBoundingClientRect(); return r.bottom > area.top && r.top < area.bottom; });
+        const start = shown[0], startTop = start?.body.getBoundingClientRect().top, initialScroll = scroller.scrollTop, fromRoom = currentRoom;
+        const cover = own(el('div')); cover.id = 'cbb-navigation-preview'; cover.setAttribute('aria-label', '원문을 찾는 동안 유지되는 대화 화면. 누르면 탐색 중단');
+        let background = dark ? '#1d2220' : '#fafbf9';
+        for (let n = scroller; n; n = n.parentElement) { const bg = getComputedStyle(n).backgroundColor; if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') { background = bg; break; } }
+        cover.style.cssText = `left:${area.left}px;top:${area.top}px;width:${area.right - area.left}px;height:${area.bottom - area.top}px;background:${background};`;
+        const roots = [...new Set(shown.map(d => d.body.closest(GROUP) || bubbleSurface(d.body)))].slice(0, 12);
+        const copied = ['display', 'position', 'box-sizing', 'width', 'height', 'padding', 'margin', 'border', 'border-radius', 'background-color', 'color', 'font', 'line-height', 'letter-spacing', 'white-space', 'text-align', 'word-break', 'overflow-wrap', 'flex-direction', 'align-items', 'justify-content', 'gap', 'opacity', 'object-fit'];
+        roots.forEach(source => {
+            const clone = source.cloneNode(true), originals = [source, ...source.querySelectorAll('*')], clones = [clone, ...clone.querySelectorAll('*')];
+            originals.forEach((node, index) => {
+                const copy = clones[index], style = getComputedStyle(node);
+                copied.forEach(name => copy.style.setProperty(name, style.getPropertyValue(name), 'important'));
+                copy.removeAttribute('id'); copy.removeAttribute('data-message-group-id'); copy.removeAttribute('data-message-id');
+            });
+            clone.querySelectorAll('script, style, iframe, video, audio, object').forEach(n => n.remove());
+            const r = source.getBoundingClientRect();
+            clone.style.setProperty('position', 'absolute', 'important'); clone.style.setProperty('margin', '0', 'important'); clone.style.setProperty('transform', 'none', 'important');
+            clone.style.setProperty('left', `${r.left - area.left}px`, 'important'); clone.style.setProperty('top', `${r.top - area.top}px`, 'important');
+            clone.inert = true; clone.setAttribute('aria-hidden', 'true'); cover.append(clone);
+        });
+        cover.addEventListener('pointerdown', event => { event.preventDefault(); event.stopPropagation(); });
+        cover.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); cancelNavigation(); toast('원문 찾기를 중단했어요.'); });
+        cover.addEventListener('wheel', event => { event.preventDefault(); event.stopPropagation(); cancelNavigation(); toast('원문 찾기를 중단했어요.'); }, { passive: false });
+        document.body.append(cover);
+        navigationView = { controller, end(restore) {
+            if (restore && scroller.isConnected && roomPath() === fromRoom) {
+                if (start?.body.isConnected && textKey(bodyText(start.body)) === textKey(start.text)) setScroll(scroller, scroller.scrollTop + start.body.getBoundingClientRect().top - startTop);
+                else setScroll(scroller, initialScroll);
+            }
+            cover.remove();
+        } };
+        position();
+    }
     async function jumpTo(record) {
         cancelNavigation(); setOpen(false);
         const controller = new AbortController(), signal = controller.signal, fromRoom = currentRoom;
         navigation = controller;
         const active = () => !signal.aborted && fromRoom === roomPath() && fromRoom === currentRoom;
-        const started = Date.now(); let scroller = null, direction = -1, stagnant = 0, boundary = '', steps = 0;
+        const started = Date.now(); let scroller = null, scrollers = [], direction = -1, unchangedSince = 0, boundary = '', steps = 0, scan = false, reversed = false, directed = false, reached = false, extent = -1, lower = null, upper = null, emptySince = 0;
         toast('북마크한 대화를 찾고 있어요…', '중단', cancelNavigation, true);
         try {
             while (active() && steps < MAX_SEARCH_STEPS && Date.now() - started < MAX_SEARCH_MS) {
-                bodies = collectBodies();
-                const found = resolve(record, descriptions());
+                const searchBodies = collectBodies(true);
+                let all = descriptions(searchBodies), found = resolve(record, all);
+                if (!found.match && !found.ambiguous) {
+                    const loose = looseSearchBodies(record, searchBodies);
+                    if (loose.length) { all = descriptions([...searchBodies, ...loose]); found = resolve(record, all); }
+                }
                 if (found.ambiguous) { toast('같은 내용의 버블이 여러 개라 원문을 확정하지 못했어요.'); return; }
                 if (found.match) {
                     const target = found.match.body;
-                    const container = scrollParent(target);
-                    if (!container) { toast('대화의 스크롤 영역을 찾지 못했어요.'); return; }
-                    const rect = target.getBoundingClientRect();
-                    const viewportRect = container === document.scrollingElement ? { top: 0, height: innerHeight } : container.getBoundingClientRect();
-                    const delta = rect.top - viewportRect.top - Math.max(24, (viewportRect.height - Math.min(rect.height, viewportRect.height - 48)) / 2);
-                    setScroll(container, container.scrollTop + delta);
-                    target.classList.add('cbb-found');
+                    const containers = conversationScrollers(target), fallback = scrollParent(target);
+                    if (!containers.length && !fallback) { toast('대화의 스크롤 영역을 찾지 못했어요.'); return; }
+                    for (const container of containers.length ? containers : [fallback]) {
+                        const rect = target.getBoundingClientRect();
+                        const viewportRect = container === document.scrollingElement ? { top: 0, height: innerHeight } : container.getBoundingClientRect();
+                        const delta = rect.top - viewportRect.top - Math.max(24, (viewportRect.height - Math.min(rect.height, viewportRect.height - 48)) / 2);
+                        setScroll(container, container.scrollTop + delta);
+                    }
+                    reached = true; lastLocation = { room: currentRoom, id: record.id, turn: found.match.turn || record.turn, until: Date.now() + 2400 };
+                    closeNavigationView(controller, false);
                     // 긴 버블도 첫 부분이 보이도록 이동하고 2.4초 동안 표시.
-                    setTimeout(() => target.classList.remove('cbb-found'), 2400);
+                    markTarget(target, lastLocation.until);
                     position(); const focus = ribbons.get(target)?.button; if (focus && !focus.hidden) focus.focus({ preventScroll: true });
+                    if (record.textVersion !== 2 && record.text !== found.match.text) {
+                        const repaired = changeRecords(items => items.map(item => item.id === record.id && item.text === record.text
+                            ? { ...item, text: found.match.text, textVersion: 2 } : item));
+                        if (!repaired) return; // 이동은 완료. 저장 오류 안내를 성공 안내로 덮지 않음.
+                    }
                     toast('북마크한 대화로 이동했어요.'); return;
                 }
-                if (!bodies.length) { toast('채팅 버블을 찾지 못했어요. 대화가 표시된 뒤 다시 눌러 주세요.'); return; }
-                const nextScroller = scrollParent(bodies[0]);
+                if (!searchBodies.length) {
+                    emptySince ||= Date.now();
+                    if (Date.now() - emptySince > 15000) { toast('대화 본문이 아직 표시되지 않았어요. 로딩이 끝난 뒤 다시 눌러 주세요.'); return; }
+                    noticeText.textContent = '과거 대화가 표시되기를 기다리는 중…'; steps++;
+                    await waitForChange(signal, scroller?.isConnected ? scroller : document.querySelector('main') || document.body);
+                    continue;
+                }
+                emptySince = 0;
+                const nextScrollers = conversationScrollers(searchBodies);
+                const nextScroller = nextScrollers[0] || scrollParent(searchBodies.find(body => body.closest(GROUP)) || searchBodies[0]);
                 if (!nextScroller) { toast('대화의 스크롤 영역을 찾지 못했어요.'); return; }
-                if (scroller !== nextScroller) { scroller = nextScroller; stagnant = 0; boundary = ''; }
+                if (scroller !== nextScroller) {
+                    scroller = nextScroller; scrollers = nextScrollers.length ? nextScrollers : [nextScroller];
+                    unchangedSince = 0; boundary = ''; extent = -1; lower = upper = null; scan = false; reversed = false;
+                    const firstHint = turnDirection(record, all, scroller); directed = !!firstHint; direction = firstHint?.direction || -1;
+                    if (!navigationView) freezeNavigation(scroller, all, controller);
+                } else scrollers = nextScrollers.length ? nextScrollers : [nextScroller];
                 const range = scrollRange(scroller), before = scroller.scrollTop;
-                const destination = Math.max(range.min, Math.min(range.max, before + direction * Math.max(120, scroller.clientHeight * .8)));
-                setScroll(scroller, destination); steps++;
-                // 이미 경계에 있을 때도 스크롤 이벤트를 보내 지연 로딩 관찰기를 깨움.
-                if (Math.abs(before - destination) < 2) scroller.dispatchEvent(new Event('scroll', { bubbles: false }));
-                noticeText.textContent = `과거 대화를 불러오며 찾는 중… ${steps}회`;
-                await waitForChange(signal);
+                if (extent !== range.max - range.min) { lower = upper = null; extent = range.max - range.min; }
+                const hint = turnDirection(record, all, scroller);
+                if (hint) {
+                    directed = true;
+                    reversed = false;
+                    if (hint.direction > 0) lower = before; else upper = before;
+                    if (hint.direction !== direction) { scan = true; direction = hint.direction; unchangedSince = 0; boundary = ''; }
+                }
+                const destination = lower !== null && upper !== null && upper - lower > 8 ? (lower + upper) / 2
+                    : scan ? Math.max(range.min, Math.min(range.max, before + direction * Math.max(120, scroller.clientHeight * .8)))
+                    : direction < 0 ? range.min : range.max;
+                const pulseAt = Date.now();
+                const driven = scan ? [scroller] : scrollers;
+                driven.forEach(candidate => {
+                    if (!candidate?.isConnected) return;
+                    const candidateRange = scrollRange(candidate);
+                    const candidateDestination = candidate === scroller ? destination : direction < 0 ? candidateRange.min : candidateRange.max;
+                    setScroll(candidate, candidateDestination);
+                    // 브라우저가 programmatic scroll 이벤트를 생략·지연해도 사이트의 지연 로더를 매번 깨운다.
+                    candidate.dispatchEvent(new Event('scroll', { bubbles: false }));
+                });
+                steps++;
+                noticeText.textContent = record.turn ? `${record.turn}턴 책갈피를 찾는 중…` : '북마크한 대화를 찾는 중…';
+                await waitForChange(signal, document.querySelector('main') || scroller);
+                // 다른 확장프로그램의 잦은 DOM 갱신으로 100회 한도가 몇 초 만에 소진되지 않게 탐색 주기를 보장.
+                if (Date.now() - pulseAt < 600) await waitForChange(signal, null, 600 - (Date.now() - pulseAt));
                 if (!active()) return;
-                const currentBodies = collectBodies();
+                const currentBodies = collectBodies(true);
                 const edge = direction < 0 ? currentBodies[0] : currentBodies[currentBodies.length - 1];
-                const signature = `${scroller.scrollHeight}|${currentBodies.length}|${edge?.closest(GROUP)?.getAttribute('data-message-group-id') || ''}|${edge ? normal(bodyText(edge)).slice(0, 120) : ''}`;
-                const latestRange = scrollRange(scroller);
-                const atEdge = direction < 0 ? scroller.scrollTop <= latestRange.min + 2 : scroller.scrollTop >= latestRange.max - 2;
-                stagnant = atEdge && signature === boundary ? stagnant + 1 : 0; boundary = signature;
-                if (stagnant >= 5) {
+                const currentScrollers = conversationScrollers(currentBodies), edgeScrollers = scan ? [scroller] : currentScrollers.length ? currentScrollers : scrollers;
+                const signature = `${edgeScrollers.map(node => `${node.scrollHeight}:${Math.round(node.scrollTop)}`).join(',')}|${currentBodies.length}|${edge?.closest(GROUP)?.getAttribute('data-message-group-id') || ''}|${edge ? normal(bodyText(edge)).slice(0, 120) : ''}`;
+                const atEdge = edgeScrollers.every(node => {
+                    const latestRange = scrollRange(node);
+                    return direction < 0 ? node.scrollTop <= latestRange.min + 2 : node.scrollTop >= latestRange.max - 2;
+                });
+                if (!atEdge || signature !== boundary) unchangedSince = Date.now();
+                else if (!unchangedSince) unchangedSince = Date.now();
+                boundary = signature;
+                const loading = [...scroller.querySelectorAll('[aria-busy="true"], [role="progressbar"]')].some(node => !node.closest(OWN) && visible(node));
+                const staleLimit = loading || directed ? 30000 : 6000;
+                if (atEdge && Date.now() - unchangedSince >= staleLimit) {
                     // 가상 목록에서 북마크가 현재 위치보다 아래에 있을 수도 있어 반대 방향도 탐색.
-                    if (direction < 0) { direction = 1; stagnant = 0; boundary = ''; }
+                    if (!directed && !reversed) { direction *= -1; scan = true; reversed = true; lower = upper = null; unchangedSince = 0; boundary = ''; }
                     else break;
                 }
             }
@@ -706,7 +1017,9 @@
         } catch {
             if (active()) toast('원문을 찾는 중 문제가 생겼어요. 대화를 불러온 뒤 다시 시도해 주세요.');
         } finally {
+            closeNavigationView(controller, !reached);
             if (navigation === controller) navigation = null;
+            scheduleScan(); schedulePosition();
         }
     }
 
@@ -720,15 +1033,17 @@
             loadRecords(); dirty = true;
         }
         if (!currentRoom) { overlay.hidden = true; toolbar.hidden = true; panel.hidden = true; return; }
+        if (navigationView) return;
         if (dirty) {
             dirty = false; bodies = collectBodies();
-            const live = new Set(bodies);
+            const shown = bodies.filter(body => appearance.showUser || roleFor(body) !== 'user');
+            const live = new Set(shown);
             ribbons.forEach((info, body) => { if (!live.has(body)) { info.button.remove(); if (info.surface) resizeObserver.unobserve(info.surface); ribbons.delete(body); } });
-            bodies.forEach(body => {
+            shown.forEach(body => {
                 if (ribbons.has(body)) return;
                 const ribbon = button('이 버블 북마크', RIBBON, () => toggleBookmark(body)); ribbon.className = 'cbb-ribbon cbb-bubble-ribbon';
                 const info = { button: ribbon, kind: bubbleKind(bubbleSurface(body)), surface: null };
-                attachDrag(ribbon, () => info.kind); ribbons.set(body, info); overlay.append(ribbon);
+                attachFixedTap(ribbon); ribbons.set(body, info); overlay.append(ribbon);
             });
             refreshButtons();
         }
@@ -749,14 +1064,15 @@
         if (relevant) scheduleScan();
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true,
-        attributeFilter: ['data-message-group-id', 'data-message-id', 'data-turn', 'data-turn-number', 'data-theme', 'data-sgb-bubble', 'data-cmu-theme-bubble', 'data-sgb-input-box', 'class', 'style', 'hidden'] });
+        attributeFilter: ['data-message-group-id', 'data-message-id', 'data-message-role', 'data-role', 'data-turn', 'data-turn-number', 'data-theme', 'data-sgb-bubble', 'data-cmu-theme-bubble', 'data-sgb-input-box', 'data-cmu-theme-input-box', 'data-cmu-theme-input-host', 'class', 'style', 'hidden'] });
     const themeObserver = new MutationObserver(syncTheme);
-    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-sgb-theme'] });
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-sgb-theme', 'data-cmu-theme'] });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme'] });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncTheme);
     window.addEventListener('scroll', schedulePosition, { passive: true, capture: true });
-    window.addEventListener('resize', schedulePosition, { passive: true });
-    window.visualViewport?.addEventListener('resize', schedulePosition, { passive: true });
+    function resized() { if (navigationView) { cancelNavigation(); toast('화면 크기가 바뀌어 원문 찾기를 중단했어요. 다시 눌러 주세요.'); } schedulePosition(); }
+    window.addEventListener('resize', resized, { passive: true });
+    window.visualViewport?.addEventListener('resize', resized, { passive: true });
     window.visualViewport?.addEventListener('scroll', schedulePosition, { passive: true });
     window.addEventListener('popstate', scheduleScan);
     window.addEventListener('storage', event => {
