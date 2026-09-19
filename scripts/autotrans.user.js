@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.1.4
+// @version      4.1.5
 // @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -3342,10 +3342,27 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     }
   }
 
-  function injectSidebar() {
-    // 이미 주입된 뒤에는 전체 DOM 텍스트를 다시 훑지 않는다.
+  function getRefreshRoot(node) {
+    if (!node) return null;
+    if (node.nodeType === Node.ELEMENT_NODE) return node;
+    return node.parentElement || null;
+  }
+
+  function findElementsInRoot(root, selector) {
+    const elementRoot = getRefreshRoot(root);
+    if (!elementRoot) return [];
+    const matches = [];
+    if (elementRoot.matches?.(selector)) matches.push(elementRoot);
+    elementRoot.querySelectorAll?.(selector).forEach(element => matches.push(element));
+    return matches;
+  }
+
+  function injectSidebar(root = document.body) {
+    // 이미 주입된 뒤에는 텍스트 탐색 자체를 건너뛴다. 재마운트 때는 새로 생긴 영역만 훑는다.
     if (document.getElementById('trans-menu-btn')) return;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+    const scanRoot = getRefreshRoot(root) || document.body;
+    if (!scanRoot?.isConnected) return;
+    const walker = document.createTreeWalker(scanRoot, NodeFilter.SHOW_TEXT, null, false);
     let node;
     while ((node = walker.nextNode())) {
       if (!node.textContent.includes('키보드 단축키')) continue;
@@ -3367,6 +3384,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
           syncTranslatorTheme();
         };
         container.parentNode.insertBefore(btn, container.nextSibling);
+        return;
       }
     }
   }
@@ -3427,13 +3445,15 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     return true;
   }
 
-  function refreshCachedResultBubbleButtons() {
+  function refreshCachedResultBubbleButtons(root = document.body) {
     const currentChatId = parsePath();
-    document.querySelectorAll('.trans-bubble-btn').forEach(btn => {
+    findElementsInRoot(root, '.trans-bubble-btn').forEach(btn => {
       const messageBlock = btn.closest('.w-full[data-message-group-id]');
       const bubbleMsgId = messageBlock?.getAttribute('data-message-group-id') || '';
-      const bubbleText = getBubbleVisibleText(messageBlock);
-      const hasCachedResult = Boolean(currentChatId)
+      const bubbleText = bubbleResultCache.size > 0 && currentChatId && messageBlock
+        ? getBubbleVisibleText(messageBlock)
+        : '';
+      const hasCachedResult = Boolean(bubbleResultCache.size > 0 && currentChatId && messageBlock)
         && hasCachedResultForBubble(currentChatId, bubbleMsgId, bubbleText);
 
       btn.classList.toggle('trans-has-result', hasCachedResult);
@@ -3540,10 +3560,11 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     }
   }
 
-  function injectBubbleButtons() {
-    const groups = document.querySelectorAll('.flex.flex-row.gap-2.items-center:not(.trans-injected)');
+  function injectBubbleButtons(root = document.body) {
+    const groups = findElementsInRoot(root, '.flex.flex-row.gap-2.items-center');
     groups.forEach(group => {
       if (!group.querySelector('button[aria-label="메시지 옵션"]')) return;
+      if (group.querySelector('.trans-bubble-btn')) return;
 
       const btn = document.createElement('button');
       btn.className = 'trans-bubble-btn relative inline-flex items-center justify-center overflow-hidden rounded-full transition-colors size-7 bg-transparent hover:bg-accent';
@@ -3572,7 +3593,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       group.insertBefore(btn, group.firstChild);
       group.classList.add('trans-injected');
     });
-    refreshCachedResultBubbleButtons();
+    refreshCachedResultBubbleButtons(root);
   }
 
   function detectSiteTheme() {
@@ -3612,16 +3633,165 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     });
   }
 
+  const TRANSLATOR_OWNED_SELECTOR = [
+    '#trans-setting-panel',
+    '#trans-result-modal',
+    '#trans-result-overlay',
+    '#trans-nudge',
+    '#trans-menu-btn',
+    '.trans-bubble-btn',
+    '.trans-live-content',
+    '.trans-live-applied-label',
+  ].join(',');
+  const MESSAGE_BLOCK_SELECTOR = '[data-message-group-id]';
+  const BUBBLE_ACTION_SELECTOR = '.flex.flex-row.gap-2.items-center';
+
   let uiRefreshTimer = null;
-  function scheduleUiRefresh() {
-    // 스트리밍/React 렌더 중 MutationObserver가 연속 호출돼도 한 번으로 합친다.
+  let fullUiRefreshPending = false;
+  let livePatchRefreshPending = false;
+  const uiRefreshRoots = new Set();
+
+  function isTranslatorOwnedNode(node) {
+    const element = getRefreshRoot(node);
+    return Boolean(element?.closest?.(TRANSLATOR_OWNED_SELECTOR));
+  }
+
+  function queueUiRefreshRoot(node) {
+    const root = getRefreshRoot(node);
+    if (!root || !root.isConnected || isTranslatorOwnedNode(root)) return;
+
+    for (const existing of uiRefreshRoots) {
+      if (!existing.isConnected) {
+        uiRefreshRoots.delete(existing);
+        continue;
+      }
+      if (existing === root || existing.contains(root)) return;
+      if (root.contains(existing)) uiRefreshRoots.delete(existing);
+    }
+    uiRefreshRoots.add(root);
+  }
+
+  function needsUiInjection(root) {
+    if (!root) return false;
+    if (root.matches?.(BUBBLE_ACTION_SELECTOR) || root.querySelector?.(BUBBLE_ACTION_SELECTOR)) return true;
+    return !document.getElementById('trans-menu-btn')
+      && String(root.textContent || '').includes('키보드 단축키');
+  }
+
+  function flushUiRefresh() {
+    uiRefreshTimer = null;
+    if (!document?.documentElement) {
+      uiRefreshRoots.clear();
+      fullUiRefreshPending = false;
+      livePatchRefreshPending = false;
+      return;
+    }
+    const roots = [...uiRefreshRoots];
+    uiRefreshRoots.clear();
+
+    if (fullUiRefreshPending) {
+      fullUiRefreshPending = false;
+      livePatchRefreshPending = false;
+      if (liveMessagePatches.size || liveMessageViews.size) syncLiveMessagePatches();
+      injectSidebar(document.body);
+      injectBubbleButtons(document.body);
+      return;
+    }
+
+    if (livePatchRefreshPending) {
+      livePatchRefreshPending = false;
+      if (liveMessagePatches.size || liveMessageViews.size) syncLiveMessagePatches();
+    }
+
+    roots.forEach(root => {
+      if (!root.isConnected) return;
+      injectSidebar(root);
+      injectBubbleButtons(root);
+    });
+  }
+
+  function armUiRefresh() {
     if (uiRefreshTimer) return;
-    uiRefreshTimer = setTimeout(() => {
-      uiRefreshTimer = null;
-      syncLiveMessagePatches();
-      injectSidebar();
-      injectBubbleButtons();
-    }, 90);
+    uiRefreshTimer = setTimeout(flushUiRefresh, 90);
+  }
+
+  function scheduleFullUiRefresh() {
+    fullUiRefreshPending = true;
+    armUiRefresh();
+  }
+
+  function scheduleMutationRefresh(mutations) {
+    if (!document?.documentElement) return;
+    for (const mutation of mutations) {
+      const targetElement = getRefreshRoot(mutation.target);
+
+      if (mutation.type === 'characterData') {
+        if ((liveMessagePatches.size || liveMessageViews.size)
+          && targetElement?.closest?.(MESSAGE_BLOCK_SELECTOR)
+          && !isTranslatorOwnedNode(targetElement)) {
+          livePatchRefreshPending = true;
+        }
+        continue;
+      }
+
+      if (mutation.type === 'attributes') {
+        const messageBlock = targetElement?.closest?.(MESSAGE_BLOCK_SELECTOR);
+        if ((liveMessagePatches.size || liveMessageViews.size) && messageBlock
+          && (mutation.attributeName === 'data-message-group-id'
+            || targetElement.matches?.('.wrtn-markdown, .trans-live-source'))) {
+          livePatchRefreshPending = true;
+        }
+        if (targetElement?.matches?.(BUBBLE_ACTION_SELECTOR)
+          && !targetElement.querySelector('.trans-bubble-btn')) {
+          queueUiRefreshRoot(targetElement);
+        }
+        continue;
+      }
+
+      if (mutation.type !== 'childList') continue;
+
+      const targetBlock = targetElement?.closest?.(MESSAGE_BLOCK_SELECTOR);
+      if ((liveMessagePatches.size || liveMessageViews.size) && targetBlock
+        && !isTranslatorOwnedNode(targetElement)) {
+        livePatchRefreshPending = true;
+      }
+      if (targetElement?.matches?.(BUBBLE_ACTION_SELECTOR)
+        && !targetElement.querySelector('.trans-bubble-btn')) {
+        queueUiRefreshRoot(targetElement);
+      }
+
+      mutation.addedNodes.forEach(node => {
+        if (isTranslatorOwnedNode(node)) return;
+        const addedRoot = getRefreshRoot(node);
+        if ((liveMessagePatches.size || liveMessageViews.size)
+          && (addedRoot?.matches?.(MESSAGE_BLOCK_SELECTOR)
+            || addedRoot?.querySelector?.(MESSAGE_BLOCK_SELECTOR))) {
+          livePatchRefreshPending = true;
+        }
+        if (needsUiInjection(addedRoot)) queueUiRefreshRoot(addedRoot);
+      });
+
+      if (!document.getElementById('trans-menu-btn') && mutation.removedNodes.length) {
+        queueUiRefreshRoot(targetElement);
+      }
+    }
+
+    if (livePatchRefreshPending || uiRefreshRoots.size) armUiRefresh();
+  }
+
+  function installRouteRefreshHooks() {
+    ['pushState', 'replaceState'].forEach(methodName => {
+      const original = history[methodName];
+      if (typeof original !== 'function' || original.__transRouteRefreshHook) return;
+      const wrapped = function (...args) {
+        const previousUrl = location.href;
+        const result = Reflect.apply(original, this, args);
+        if (location.href !== previousUrl) scheduleFullUiRefresh();
+        return result;
+      };
+      Object.defineProperty(wrapped, '__transRouteRefreshHook', { value: true });
+      history[methodName] = wrapped;
+    });
   }
 
   let translatorInitialized = false;
@@ -3631,7 +3801,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     addStyles();
     createUI();
 
-    const observer = new MutationObserver(() => scheduleUiRefresh());
+    const observer = new MutationObserver(scheduleMutationRefresh);
     const themeObserver = new MutationObserver(() => syncTranslatorTheme());
     observer.observe(document.body, {
       childList: true,
@@ -3643,8 +3813,9 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme'] });
 
-    window.addEventListener('popstate', scheduleUiRefresh);
-    window.addEventListener('hashchange', scheduleUiRefresh);
+    installRouteRefreshHooks();
+    window.addEventListener('popstate', scheduleFullUiRefresh);
+    window.addEventListener('hashchange', scheduleFullUiRefresh);
     injectSidebar();
     injectBubbleButtons();
     syncLiveMessagePatches();
