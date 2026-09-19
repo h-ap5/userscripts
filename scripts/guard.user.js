@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛑 Crack 일일 크래커 가드
 // @namespace    crack-daily-cracker-guard
-// @version      1.2.6
+// @version      1.2.7
 // @description  오늘 사용한 크래커를 내역 API로 합산하고, 설정한 일일 목표의 허용 구간 안에서 메시지 전송과 재생성을 막습니다.
 // @match        https://crack.wrtn.ai/*
 // @match        http://crack.wrtn.ai/*
@@ -14,13 +14,15 @@
     'use strict';
 
     const SCRIPT_NAME = 'Crack 일일 크래커 가드';
-    const VERSION = '1.2.9';
+    const VERSION = '1.3.0';
     const API_HISTORY = 'https://crack-api.wrtn.ai/crack-cash/crackers/history';
     const CONFIG_KEY = 'cdc_guard_config_v1';
     // 첨부된 대시보드가 실제로 사용 중인 API 페이지 크기에 맞춘다.
     const PAGE_SIZE = 20;
     const MAX_HISTORY_PAGES = 50;
     const REFRESH_INTERVAL_MS = 20_000;
+    const RESUME_DEBOUNCE_MS = 180;
+    const UI_WATCHDOG_INTERVAL_MS = 3_000;
     const MAX_STALE_MS = 2 * 60_000;
     const REQUEST_TIMEOUT_MS = 12_000;
     const BLOCKED_TITLE = '일일 크래커 가드가 전송을 차단했습니다';
@@ -35,6 +37,10 @@
     const nativeFetch = window.fetch.bind(window);
     let config = loadConfig();
     let refreshTimer = null;
+    let resumeTimer = null;
+    let refreshQueued = false;
+    let refreshQueuedAnnounce = false;
+    let refreshQueuedActiveOnly = true;
     let composerObserver = null;
     let themeObserver = null;
     let uiResizeObserver = null;
@@ -45,6 +51,20 @@
     let toastTimer = null;
     let currentUiInlineHost = null;
     let currentUiMountParent = null;
+    let observedPathname = window.location.pathname;
+
+    const seoulDayFormatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Seoul',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    });
+    const timeFormatter = new Intl.DateTimeFormat('ko-KR', {
+        timeZone: 'Asia/Seoul',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+    });
 
     const state = {
         used: 0,
@@ -191,12 +211,7 @@
 
     function formatTime(timestamp) {
         if (!timestamp) return '아직 확인 전';
-        return new Intl.DateTimeFormat('ko-KR', {
-            timeZone: 'Asia/Seoul',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-        }).format(new Date(timestamp));
+        return timeFormatter.format(new Date(timestamp));
     }
 
     function extractAccessToken() {
@@ -333,12 +348,7 @@
     }
 
     function getSeoulDayRange(now = Date.now()) {
-        const parts = new Intl.DateTimeFormat('en-CA', {
-            timeZone: 'Asia/Seoul',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-        }).formatToParts(new Date(now));
+        const parts = seoulDayFormatter.formatToParts(new Date(now));
         const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
         const start = Date.UTC(
             Number(values.year),
@@ -401,7 +411,28 @@
     }
 
     async function refreshUsage(options = {}) {
-        if (state.loading) return;
+        const force = options.force === true;
+        const activeOnly = options.activeOnly !== false;
+
+        if (activeOnly && (!isChatPage() || document.visibilityState !== 'visible')) return false;
+
+        const age = Date.now() - state.lastUpdatedAt;
+        if (!force && state.lastUpdatedAt && age < REFRESH_INTERVAL_MS) {
+            scheduleNextRefresh(REFRESH_INTERVAL_MS - age);
+            return false;
+        }
+
+        if (state.loading) {
+            // 수동 갱신과 전송 후 검사는 로딩 중이어도 버리지 않고 한 번만 뒤따라 실행한다.
+            if (force) {
+                refreshQueued = true;
+                refreshQueuedAnnounce ||= options.announce === true;
+                refreshQueuedActiveOnly &&= activeOnly;
+            }
+            return false;
+        }
+
+        stopRefreshTimer();
         state.loading = true;
         state.error = '';
         render();
@@ -427,7 +458,28 @@
             state.loading = false;
             render();
             syncComposerButton();
+
+            const runQueued = refreshQueued;
+            const announceQueued = refreshQueuedAnnounce;
+            const queuedActiveOnly = refreshQueuedActiveOnly;
+            refreshQueued = false;
+            refreshQueuedAnnounce = false;
+            refreshQueuedActiveOnly = true;
+
+            if (runQueued && (
+                !queuedActiveOnly
+                || (isChatPage() && document.visibilityState === 'visible')
+            )) {
+                window.queueMicrotask(() => refreshUsage({
+                    force: true,
+                    announce: announceQueued,
+                    activeOnly: queuedActiveOnly,
+                }));
+            } else {
+                scheduleNextRefresh();
+            }
         }
+        return true;
     }
 
     function clearPostSendTimers() {
@@ -438,7 +490,10 @@
     function schedulePostSendRefreshes() {
         clearPostSendTimers();
         for (const delay of [4_000, 10_000, 22_000]) {
-            postSendTimers.push(window.setTimeout(() => refreshUsage(), delay));
+            postSendTimers.push(window.setTimeout(
+                () => refreshUsage({ force: true }),
+                delay,
+            ));
         }
     }
 
@@ -469,6 +524,43 @@
         '[contenteditable="true"][data-placeholder*="메시지"]',
         '[contenteditable="true"][aria-label*="메시지"]',
     ];
+    const COMPOSER_WATCH_SELECTOR = [
+        ...CHAT_EDITOR_SELECTORS,
+        '[data-sgb-input-host]',
+        '[data-sgb-input-box]',
+        '.igx-inline-overlay-host',
+        '#igx-live-popup',
+    ].join(', ');
+
+    function elementTouchesComposer(element) {
+        if (!(element instanceof Element)) return false;
+        if (element.matches('#cdcg-root') || element.closest('#cdcg-root')) return false;
+        if (element.matches(COMPOSER_WATCH_SELECTOR) || element.querySelector(COMPOSER_WATCH_SELECTOR)) {
+            return true;
+        }
+        if (
+            currentUiInlineHost instanceof HTMLElement
+            && (element === currentUiInlineHost || element.contains(currentUiInlineHost))
+        ) return true;
+        if (
+            currentUiMountParent instanceof HTMLElement
+            && (element === currentUiMountParent || element.contains(currentUiMountParent))
+        ) return true;
+        return Boolean(
+            currentUiInlineHost instanceof HTMLElement
+            && currentUiInlineHost.contains(element)
+            && element.closest('button, form, textarea, [contenteditable="true"]'),
+        );
+    }
+
+    function mutationTouchesComposer(mutation) {
+        const target = mutation.target instanceof Element
+            ? mutation.target
+            : mutation.target?.parentElement;
+        if (target?.closest('#cdcg-root')) return false;
+        return [...mutation.addedNodes, ...mutation.removedNodes]
+            .some((node) => elementTouchesComposer(node));
+    }
 
     function isVisibleElement(element) {
         if (!(element instanceof HTMLElement)) return false;
@@ -604,7 +696,6 @@
     function isRegenerationTarget(target) {
         if (
             !isChatPage()
-            || !getVisibleChatEditor()
             || !config.blockRegeneration
             || !(target instanceof Element)
         ) return false;
@@ -617,7 +708,8 @@
             button.getAttribute('title'),
             button.textContent,
         ].filter(Boolean).join(' ').trim();
-        return /다시\s*생성|재생성|리롤|reroll|regenerate/i.test(label);
+        if (!/다시\s*생성|재생성|리롤|reroll|regenerate/i.test(label)) return false;
+        return Boolean(getVisibleChatEditor());
     }
 
     function blockEvent(event) {
@@ -634,7 +726,7 @@
 
     function handlePointerOrClick(event) {
         const sendAttempt = isSendButtonTarget(event.target);
-        const regenerationAttempt = isRegenerationTarget(event.target);
+        const regenerationAttempt = !sendAttempt && isRegenerationTarget(event.target);
         if (!sendAttempt && !regenerationAttempt) return;
 
         if (isBlocked()) {
@@ -1369,7 +1461,11 @@
 
         ui.pill.addEventListener('click', () => setPanelOpen(!state.panelOpen));
         ui.closeButton.addEventListener('click', () => setPanelOpen(false));
-        ui.refreshButton.addEventListener('click', () => refreshUsage({ announce: true }));
+        ui.refreshButton.addEventListener('click', () => refreshUsage({
+            announce: true,
+            force: true,
+            activeOnly: false,
+        }));
         ui.saveButton.addEventListener('click', handleSave);
         ui.limitInput.addEventListener('input', validateForm);
         ui.marginInput.addEventListener('input', validateForm);
@@ -1399,7 +1495,7 @@
         if (themeObserver) return;
         themeObserver = new MutationObserver(() => {
             syncTheme();
-            attachUiAboveComposer();
+            scheduleUiAttachment();
         });
         themeObserver.observe(document.documentElement, {
             attributes: true,
@@ -1565,16 +1661,18 @@
             : null;
     }
 
+    function scheduleUiAttachment() {
+        if (uiGeometryFrame !== null) return;
+        uiGeometryFrame = window.requestAnimationFrame(() => {
+            uiGeometryFrame = null;
+            attachUiAboveComposer();
+        });
+    }
+
     function bindUiGeometryObserver(anchorHost, mountParent) {
         if (typeof ResizeObserver !== 'function') return;
         if (!uiResizeObserver) {
-            uiResizeObserver = new ResizeObserver(() => {
-                if (uiGeometryFrame !== null) return;
-                uiGeometryFrame = window.requestAnimationFrame(() => {
-                    uiGeometryFrame = null;
-                    attachUiAboveComposer();
-                });
-            });
+            uiResizeObserver = new ResizeObserver(scheduleUiAttachment);
         }
         uiResizeObserver.disconnect();
         uiResizeObserver.observe(anchorHost);
@@ -1772,7 +1870,7 @@
             syncFormFromConfig();
             render();
         }
-        window.requestAnimationFrame(attachUiAboveComposer);
+        scheduleUiAttachment();
     }
 
     function syncFormFromConfig() {
@@ -1894,18 +1992,19 @@
         ui.toast.textContent = message;
         ui.toast.dataset.kind = kind;
         ui.toast.dataset.visible = 'true';
-        window.requestAnimationFrame(attachUiAboveComposer);
+        scheduleUiAttachment();
         toastTimer = window.setTimeout(() => {
             if (ui.toast) {
                 ui.toast.dataset.visible = 'false';
-                window.requestAnimationFrame(attachUiAboveComposer);
+                scheduleUiAttachment();
             }
         }, kind === 'blocked' ? 5_000 : 3_500);
     }
 
     function startComposerObserver() {
         if (composerObserver || !document.body) return;
-        composerObserver = new MutationObserver(() => {
+        composerObserver = new MutationObserver((mutations) => {
+            if (!mutations.some(mutationTouchesComposer)) return;
             window.clearTimeout(composerUpdateTimer);
             composerUpdateTimer = window.setTimeout(() => {
                 attachUiAboveComposer();
@@ -1924,16 +2023,55 @@
         syncComposerButton();
     }
 
+    function stopRefreshTimer() {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = null;
+    }
+
+    function scheduleNextRefresh(delay = REFRESH_INTERVAL_MS) {
+        stopRefreshTimer();
+        if (!isChatPage() || document.visibilityState !== 'visible') return;
+        refreshTimer = window.setTimeout(() => {
+            refreshTimer = null;
+            refreshUsage();
+        }, Math.max(250, delay));
+    }
+
     function startRefreshLoop() {
-        window.clearInterval(refreshTimer);
-        refreshTimer = window.setInterval(() => refreshUsage(), REFRESH_INTERVAL_MS);
+        scheduleNextRefresh();
+    }
+
+    function scheduleResumeRefresh() {
+        window.clearTimeout(resumeTimer);
+        resumeTimer = window.setTimeout(() => {
+            resumeTimer = null;
+            observedPathname = window.location.pathname;
+            scheduleUiAttachment();
+            if (isChatPage() && document.visibilityState === 'visible') refreshUsage();
+            else stopRefreshTimer();
+        }, RESUME_DEBOUNCE_MS);
     }
 
     function startUiPositionLoop() {
         window.clearInterval(uiPositionTimer);
         uiPositionTimer = window.setInterval(() => {
-            if (document.visibilityState !== 'hidden') attachUiAboveComposer();
-        }, 900);
+            const pathChanged = observedPathname !== window.location.pathname;
+            if (pathChanged) {
+                observedPathname = window.location.pathname;
+                if (isChatPage() && document.visibilityState === 'visible') refreshUsage();
+                else stopRefreshTimer();
+            }
+
+            const mountBroken = !ui.host?.isConnected
+                || (isChatPage() && (
+                    !(currentUiInlineHost instanceof HTMLElement)
+                    || !currentUiInlineHost.isConnected
+                    || !(currentUiMountParent instanceof HTMLElement)
+                    || !currentUiMountParent.isConnected
+                    || ui.host.hidden
+                ));
+            if (pathChanged || mountBroken) scheduleUiAttachment();
+        }, UI_WATCHDOG_INTERVAL_MS);
     }
 
     function initializeAfterDomReady() {
@@ -1942,7 +2080,7 @@
         startThemeObserver();
         attachUiAboveComposer();
         syncComposerButton();
-        refreshUsage();
+        refreshUsage({ force: true });
         startRefreshLoop();
         startUiPositionLoop();
     }
@@ -1952,15 +2090,14 @@
     window.addEventListener('keydown', handleKeydown, true);
     window.addEventListener('submit', handleSubmit, true);
     window.addEventListener('storage', handleStorage);
-    window.addEventListener('focus', () => refreshUsage());
-    window.addEventListener('resize', attachUiAboveComposer, { passive: true });
-    window.visualViewport?.addEventListener('resize', attachUiAboveComposer, { passive: true });
-    window.visualViewport?.addEventListener('scroll', attachUiAboveComposer, { passive: true });
+    window.addEventListener('focus', scheduleResumeRefresh);
+    window.addEventListener('resize', scheduleUiAttachment, { passive: true });
+    window.visualViewport?.addEventListener('resize', scheduleUiAttachment, { passive: true });
+    window.visualViewport?.addEventListener('scroll', scheduleUiAttachment, { passive: true });
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
-            attachUiAboveComposer();
-            refreshUsage();
-        }
+            scheduleResumeRefresh();
+        } else stopRefreshTimer();
     });
 
     if (typeof GM_registerMenuCommand === 'function') {
@@ -1968,7 +2105,11 @@
             mountUi();
             setPanelOpen(true);
         });
-        GM_registerMenuCommand('↻ 오늘 사용량 새로고침', () => refreshUsage({ announce: true }));
+        GM_registerMenuCommand('↻ 오늘 사용량 새로고침', () => refreshUsage({
+            announce: true,
+            force: true,
+            activeOnly: false,
+        }));
         GM_registerMenuCommand('⏯️ 감시 켜기/끄기', () => {
             saveConfig({ ...config, enabled: !config.enabled });
             syncFormFromConfig();
