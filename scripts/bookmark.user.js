@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 버블 북마크 🔖
 // @namespace    https://crack.wrtn.ai/
-// @version      1.0.0
+// @version      1.0.1
 // @description  버블별 색상, 턴 방향 탐색, 입력창 테두리 고정, 유저 버블 ON/OFF, 좌우반전, 3줄 미리보기
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
@@ -30,8 +30,6 @@
     const PLAIN_SEARCH_SURFACE = '[data-sgb-bubble], [data-cmu-theme-bubble], div[class*="bg-surface_chat"]';
     const PREFIX = 'CrackBubbleBookmarks_v1:';
     const APPEARANCE_KEY = 'CrackBubbleBookmarks_Appearance_v1';
-    const MAX_SEARCH_MS = 90000;
-    const MAX_SEARCH_STEPS = 100;
     const HIGHLIGHT = 'mark.custom-hlp, mark[data-hlp-id]';
     const PALETTE = [['차콜', '#374047'], ['민트', '#367c68'], ['로즈', '#b65371'], ['머스터드', '#987029'], ['블루', '#4a72a6'], ['라일락', '#856496']];
     const validColor = color => /^#[\da-f]{6}$/i.test(color || '');
@@ -165,7 +163,8 @@
     }
     const key = () => PREFIX + currentRoom;
     let currentRoom = roomPath(), records = [], bodies = [], editingId = null, dirty = true;
-    let scanTimer = 0, frame = 0, noticeTimer = 0, navigation = null, dark = false;
+    let scanTimer = 0, contentScanTimer = 0, contentScanStartedAt = 0;
+    let frame = 0, noticeTimer = 0, navigation = null, dark = false;
     let undo = null, colorEditingId = null, lastLocation = null, navigationView = null;
     const ribbons = new Map(), suppressClicks = new WeakMap();
     let appearance = readAppearance(), composerInput = null, composerAnchor = null;
@@ -449,7 +448,8 @@
         // 보기 전환 후 개별 ID 속성이 사라져도 같은 그룹의 전체 본문으로 재확인.
         if (!pool.length && record.messageId && record.groupId) pool = descriptions.filter(d => d.groupId === record.groupId);
         if (record.role) pool = pool.filter(d => !d.role || d.role === record.role);
-        let exact = pool.filter(d => textKey(d.text) === textKey(record.text));
+        const savedText = textKey(record.text);
+        let exact = pool.filter(d => textKey(d.text) === savedText);
         // 1.2.0까지 형광펜 부분이 빠져 저장된 항목: 같은 식별자 안에서 당시 추출 결과를 재현.
         // 같은 그룹의 다른 리롤을 고르지 않도록 임의 부분 일치/슬롯 번호만으로 연결하지 않는다.
         if (!exact.length && record.textVersion !== 2 && (record.messageId || record.groupId) && textKey(record.text)) {
@@ -466,12 +466,24 @@
                 || (record.before && d.before === record.before) || (record.after && d.after === record.after));
             return contextual.length === 1 ? { match: contextual[0] } : { ambiguous: true };
         }
+        // 재로딩 과정에서 그룹/메시지 ID가 모두 바뀌어도 같은 턴·역할의 정확한 본문은 길이와 무관하게 확인한다.
+        // 짧은 반복 문장도 턴을 모를 때는 이 규칙을 쓰지 않으며, 후보가 여럿이면 임의로 고르지 않는다.
+        if (!pool.length && record.turn && savedText) {
+            const turnExact = descriptions.filter(d => d.turn === record.turn && textKey(d.text) === savedText
+                && (!record.role || !d.role || d.role === record.role));
+            if (turnExact.length === 1) return { match: turnExact[0] };
+            if (turnExact.length > 1) {
+                const indexed = turnExact.filter(d => d.bodyIndex === record.bodyIndex);
+                if (indexed.length === 1) return { match: indexed[0] };
+                const contextual = turnExact.filter(d => (record.before && d.before === record.before) || (record.after && d.after === record.after));
+                return contextual.length === 1 ? { match: contextual[0] } : { ambiguous: true };
+            }
+        }
         // 개별 메시지 ID가 유일한 경우에는 본문 수정 후에도 같은 버블로 이동 가능.
         // 그룹 ID만 같고 내용이 바뀐 리롤 답변은 다른 로그로 취급.
         if (record.messageId && pool.length === 1 && pool[0].messageId === record.messageId && !pool[0].multipleParts && record.singleMessage) return { match: pool[0] };
         // 저장한 전체 문장이 그대로 있고 앞뒤에 표시 정보만 늘어난 경우도 같은 그룹에서 확인.
         // 짧은 일부 대사나 단어 유사도로 다른 답변을 추측하지 않는다.
-        const savedText = textKey(record.text);
         if (savedText.length >= 40) {
             const compatible = d => (!record.role || !d.role || d.role === record.role) && (!record.turn || !d.turn || record.turn === d.turn);
             const related = (pool.length ? pool : descriptions).filter(compatible);
@@ -522,6 +534,7 @@
     }
     function refreshButtons() {
         const all = descriptions();
+        const byBody = new Map(all.map(description => [description.body, description]));
         const savedBodies = new Map();
         records.forEach(record => { const result = resolve(record, all); if (result.match) savedBodies.set(result.match.body, record); });
         bodies.forEach(body => {
@@ -530,7 +543,7 @@
             const record = savedBodies.get(body);
             // 가상 목록이 도착 직후 DOM을 교체해도 같은 원문에 남은 강조 시간을 이어준다.
             if (record && lastLocation && record.id === lastLocation.id && lastLocation.room === currentRoom) markTarget(body, lastLocation.until);
-            const data = all.find(d => d.body === body);
+            const data = byBody.get(body);
             btn.dataset.cbbGroup = data?.groupId || data?.messageId || '';
             btn.dataset.cbbIndex = String(data?.bodyIndex || 0);
             btn.setAttribute('aria-pressed', String(!!record));
@@ -916,10 +929,11 @@
         const controller = new AbortController(), signal = controller.signal, fromRoom = currentRoom;
         navigation = controller;
         const active = () => !signal.aborted && fromRoom === roomPath() && fromRoom === currentRoom;
-        const started = Date.now(); let scroller = null, scrollers = [], direction = -1, unchangedSince = 0, boundary = '', steps = 0, scan = false, reversed = false, directed = false, reached = false, extent = -1, lower = null, upper = null, emptySince = 0;
+        let scroller = null, scrollers = [], direction = -1, unchangedSince = 0, boundary = '', scan = false, directed = false, reached = false, extent = -1, lower = null, upper = null;
         toast('북마크한 대화를 찾고 있어요…', '중단', cancelNavigation, true);
         try {
-            while (active() && steps < MAX_SEARCH_STEPS && Date.now() - started < MAX_SEARCH_MS) {
+            // 대화 깊이·시간·반복 횟수로 종료하지 않는다. 찾기, 사용자 중단, 방 이동 또는 구조 오류만 종료 조건이다.
+            while (active()) {
                 const searchBodies = collectBodies(true);
                 let all = descriptions(searchBodies), found = resolve(record, all);
                 if (!found.match && !found.ambiguous) {
@@ -950,19 +964,16 @@
                     toast('북마크한 대화로 이동했어요.'); return;
                 }
                 if (!searchBodies.length) {
-                    emptySince ||= Date.now();
-                    if (Date.now() - emptySince > 15000) { toast('대화 본문이 아직 표시되지 않았어요. 로딩이 끝난 뒤 다시 눌러 주세요.'); return; }
-                    noticeText.textContent = '과거 대화가 표시되기를 기다리는 중…'; steps++;
+                    noticeText.textContent = '과거 대화가 표시되기를 기다리는 중…';
                     await waitForChange(signal, scroller?.isConnected ? scroller : document.querySelector('main') || document.body);
                     continue;
                 }
-                emptySince = 0;
                 const nextScrollers = conversationScrollers(searchBodies);
                 const nextScroller = nextScrollers[0] || scrollParent(searchBodies.find(body => body.closest(GROUP)) || searchBodies[0]);
                 if (!nextScroller) { toast('대화의 스크롤 영역을 찾지 못했어요.'); return; }
                 if (scroller !== nextScroller) {
                     scroller = nextScroller; scrollers = nextScrollers.length ? nextScrollers : [nextScroller];
-                    unchangedSince = 0; boundary = ''; extent = -1; lower = upper = null; scan = false; reversed = false;
+                    unchangedSince = 0; boundary = ''; extent = -1; lower = upper = null; scan = false;
                     const firstHint = turnDirection(record, all, scroller); directed = !!firstHint; direction = firstHint?.direction || -1;
                     if (!navigationView) freezeNavigation(scroller, all, controller);
                 } else scrollers = nextScrollers.length ? nextScrollers : [nextScroller];
@@ -971,7 +982,6 @@
                 const hint = turnDirection(record, all, scroller);
                 if (hint) {
                     directed = true;
-                    reversed = false;
                     if (hint.direction > 0) lower = before; else upper = before;
                     if (hint.direction !== direction) { scan = true; direction = hint.direction; unchangedSince = 0; boundary = ''; }
                 }
@@ -988,10 +998,11 @@
                     // 브라우저가 programmatic scroll 이벤트를 생략·지연해도 사이트의 지연 로더를 매번 깨운다.
                     candidate.dispatchEvent(new Event('scroll', { bubbles: false }));
                 });
-                steps++;
-                noticeText.textContent = record.turn ? `${record.turn}턴 책갈피를 찾는 중…` : '북마크한 대화를 찾는 중…';
+                const loadedTurns = all.map(item => Number(item.turn)).filter(Number.isFinite);
+                const rangeText = loadedTurns.length ? ` · 현재 ${Math.min(...loadedTurns)}~${Math.max(...loadedTurns)}턴` : '';
+                noticeText.textContent = record.turn ? `${record.turn}턴 책갈피를 찾는 중${rangeText}…` : '북마크한 대화를 찾는 중…';
                 await waitForChange(signal, document.querySelector('main') || scroller);
-                // 다른 확장프로그램의 잦은 DOM 갱신으로 100회 한도가 몇 초 만에 소진되지 않게 탐색 주기를 보장.
+                // 다른 확장프로그램의 잦은 DOM 갱신이 탐색을 과도하게 반복하지 않게 최소 주기를 보장.
                 if (Date.now() - pulseAt < 600) await waitForChange(signal, null, 600 - (Date.now() - pulseAt));
                 if (!active()) return;
                 const currentBodies = collectBodies(true);
@@ -1005,15 +1016,22 @@
                 if (!atEdge || signature !== boundary) unchangedSince = Date.now();
                 else if (!unchangedSince) unchangedSince = Date.now();
                 boundary = signature;
-                const loading = [...scroller.querySelectorAll('[aria-busy="true"], [role="progressbar"]')].some(node => !node.closest(OWN) && visible(node));
-                const staleLimit = loading || directed ? 30000 : 6000;
-                if (atEdge && Date.now() - unchangedSince >= staleLimit) {
-                    // 가상 목록에서 북마크가 현재 위치보다 아래에 있을 수도 있어 반대 방향도 탐색.
-                    if (!directed && !reversed) { direction *= -1; scan = true; reversed = true; lower = upper = null; unchangedSince = 0; boundary = ''; }
-                    else break;
+                if (atEdge && Date.now() - unchangedSince >= 30000) {
+                    if (!directed) {
+                        // 턴을 모르는 항목은 양쪽 경계를 번갈아 확인하되 자동으로 포기하지 않는다.
+                        direction *= -1; scan = true; lower = upper = null;
+                    } else {
+                        // 같은 경계에서 오래 멈추면 살짝 벗어났다 다음 주기에 다시 진입해 지연 로더를 재작동시킨다.
+                        edgeScrollers.forEach(node => {
+                            const latestRange = scrollRange(node);
+                            const inward = direction < 0 ? Math.min(latestRange.max, latestRange.min + 48) : Math.max(latestRange.min, latestRange.max - 48);
+                            setScroll(node, inward); node.dispatchEvent(new Event('scroll', { bubbles: false }));
+                        });
+                    }
+                    noticeText.textContent = record.turn ? `${record.turn}턴 대화를 계속 불러오는 중…` : '북마크한 대화를 계속 찾는 중…';
+                    unchangedSince = 0; boundary = '';
                 }
             }
-            if (active()) toast('원문을 찾지 못했어요. 더 오래된 대화를 직접 불러온 뒤 다시 눌러 주세요. 삭제되거나 다른 답변으로 바뀐 로그일 수도 있어요.', '목록 열기', () => setOpen(true), true);
         } catch {
             if (active()) toast('원문을 찾는 중 문제가 생겼어요. 대화를 불러온 뒤 다시 시도해 주세요.');
         } finally {
@@ -1049,19 +1067,125 @@
         }
         mountToolbar(); syncTheme();
     }
-    function scheduleScan() { dirty = true; if (!scanTimer) scanTimer = setTimeout(reconcile, 180); }
+    function clearContentScanTimer() {
+        clearTimeout(contentScanTimer);
+        contentScanTimer = 0;
+        contentScanStartedAt = 0;
+    }
+    function scheduleScan() {
+        dirty = true;
+        clearContentScanTimer();
+        if (!scanTimer) scanTimer = setTimeout(reconcile, 180);
+    }
+    function scheduleContentScan() {
+        dirty = true;
+        if (scanTimer) return;
+        const now = performance.now();
+        if (!contentScanStartedAt) contentScanStartedAt = now;
+        clearTimeout(contentScanTimer);
+        // 스트리밍 중에는 조용해진 뒤 합치되, 길게 이어져도 1.2초마다 최종 상태를 확인한다.
+        const delay = now - contentScanStartedAt >= 1_200 ? 0 : 500;
+        contentScanTimer = setTimeout(() => {
+            contentScanTimer = 0;
+            contentScanStartedAt = 0;
+            reconcile();
+        }, delay);
+    }
+    function changedElement(node) {
+        if (node instanceof Element) return node;
+        return node?.parentElement || null;
+    }
+    function matchesOrContains(node, selector) {
+        if (!(node instanceof Element)) return false;
+        return node.matches(selector) || Boolean(node.querySelector(selector));
+    }
+    function isOwnMutationNode(node) {
+        const element = changedElement(node);
+        return Boolean(element?.matches(OWN) || element?.closest(OWN));
+    }
+    function affectsTrackedLayout(node) {
+        const element = changedElement(node);
+        if (!element) return false;
+        const tracked = `${BLOCKERS}, ${GROUP}, ${INPUT}, [data-sgb-input-host], [data-sgb-input-box], #igx-live-popup`;
+        if (element.matches(tracked) || element.closest(tracked)) return true;
+        if (
+            element !== document.body
+            && element !== document.documentElement
+            && !element.matches('main')
+            && element.querySelector(tracked)
+        ) return true;
+        return Boolean(composerAnchor && (
+            element === composerAnchor
+            || element.contains(composerAnchor)
+            || composerAnchor.contains(element)
+        ));
+    }
     const resizeObserver = new ResizeObserver(schedulePosition);
     resizeObserver.observe(document.documentElement);
     resizeObserver.observe(panel);
     const observer = new MutationObserver(mutations => {
-        const relevant = mutations.some(mutation => {
-            const node = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement;
-            if (node?.closest(OWN)) return false;
-            if (mutation.type === 'childList' && !mutation.removedNodes.length && mutation.addedNodes.length
-                && [...mutation.addedNodes, ...mutation.removedNodes].every(n => n.nodeType === Node.ELEMENT_NODE && n.matches(OWN))) return false;
-            return true;
-        });
-        if (relevant) scheduleScan();
+        let needsScan = false, needsContentScan = false, needsPosition = false;
+        const structuralSelector = `${GROUP}, ${BODY}, ${INPUT}, [data-sgb-input-host], [data-sgb-input-box]`;
+
+        for (const mutation of mutations) {
+            const target = changedElement(mutation.target);
+            if (!target || target.closest(OWN)) continue;
+
+            if (mutation.type === 'characterData') {
+                if (target.closest(`${GROUP}, ${BODY}`)) needsContentScan = true;
+                continue;
+            }
+
+            if (mutation.type === 'attributes') {
+                const attribute = mutation.attributeName || '';
+                if ([
+                    'data-message-group-id',
+                    'data-message-id',
+                    'data-message-role',
+                    'data-role',
+                    'data-turn',
+                    'data-turn-number',
+                    'data-sgb-bubble',
+                    'data-cmu-theme-bubble',
+                    'data-sgb-input-box',
+                    'data-cmu-theme-input-box',
+                    'data-cmu-theme-input-host',
+                ].includes(attribute)) {
+                    needsScan = true;
+                } else if (['class', 'style', 'hidden', 'data-theme'].includes(attribute)) {
+                    needsPosition ||= affectsTrackedLayout(target);
+                    const wrapsInput = target !== document.body
+                        && target !== document.documentElement
+                        && !target.matches('main')
+                        && Boolean(target.querySelector(INPUT));
+                    const wrapsMessageBody = Boolean(target.closest(GROUP) && target.querySelector(BODY));
+                    if (
+                        target.matches(structuralSelector)
+                        || wrapsMessageBody
+                        || wrapsInput
+                        || target.closest(GROUP)
+                    ) needsScan = true;
+                } else if (target.matches(structuralSelector) || target.closest(`${GROUP}, ${INPUT}`)) {
+                    needsScan = true;
+                }
+                continue;
+            }
+
+            const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
+            if (changedNodes.length && changedNodes.every(isOwnMutationNode)) continue;
+
+            needsPosition ||= affectsTrackedLayout(target)
+                || changedNodes.some(affectsTrackedLayout);
+            if (changedNodes.some(node => matchesOrContains(node, structuralSelector))) {
+                needsScan = true;
+            } else if (target.closest(`${GROUP}, ${BODY}`)) {
+                needsContentScan = true;
+            }
+        }
+
+        if (needsScan) scheduleScan();
+        else if (needsContentScan) scheduleContentScan();
+        if (needsPosition) schedulePosition();
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true,
         attributeFilter: ['data-message-group-id', 'data-message-id', 'data-message-role', 'data-role', 'data-turn', 'data-turn-number', 'data-theme', 'data-sgb-bubble', 'data-cmu-theme-bubble', 'data-sgb-input-box', 'data-cmu-theme-input-box', 'data-cmu-theme-input-host', 'class', 'style', 'hidden'] });
@@ -1069,12 +1193,20 @@
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-sgb-theme', 'data-cmu-theme'] });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme'] });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncTheme);
-    window.addEventListener('scroll', schedulePosition, { passive: true, capture: true });
+    window.addEventListener('scroll', event => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target?.closest(OWN)) schedulePosition();
+    }, { passive: true, capture: true });
     function resized() { if (navigationView) { cancelNavigation(); toast('화면 크기가 바뀌어 원문 찾기를 중단했어요. 다시 눌러 주세요.'); } schedulePosition(); }
     window.addEventListener('resize', resized, { passive: true });
     window.visualViewport?.addEventListener('resize', resized, { passive: true });
     window.visualViewport?.addEventListener('scroll', schedulePosition, { passive: true });
     window.addEventListener('popstate', scheduleScan);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible') return;
+        if (roomPath() !== currentRoom || !toolbar.isConnected) scheduleScan();
+        schedulePosition();
+    });
     window.addEventListener('storage', event => {
         if (event.key === APPEARANCE_KEY) { appearance = readAppearance(); applyAppearance(); return; }
         if (event.key === key() || event.key === null) {
@@ -1083,9 +1215,10 @@
     });
     // SPA 이동, 입력창 교체, 가상 목록 재사용에도 계속 동작. history/fetch를 덮어쓰지 않음.
     setInterval(() => {
-        if (roomPath() !== currentRoom || (currentRoom && (!toolbar.isConnected || !bodies.length))) scheduleScan();
-    }, 700);
+        if (roomPath() !== currentRoom || (currentRoom && !toolbar.isConnected)) scheduleScan();
+    }, 1_000);
     // CSS 레이아웃/테마 전환으로 크기 변화 없이 이동하는 경우에도 위치를 따라감.
-    setInterval(() => { if (currentRoom && document.visibilityState === 'visible') schedulePosition(); }, 250);
+    // scroll/resize/DOM/ResizeObserver는 즉시 반영하고, 이 타이머는 조용한 CSS 이동만 복구한다.
+    setInterval(() => { if (currentRoom && document.visibilityState === 'visible') schedulePosition(); }, 1_000);
     loadRecords(); reconcile();
 })();
