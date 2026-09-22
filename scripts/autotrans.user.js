@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.1.5
+// @version      4.1.6
 // @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -72,6 +72,92 @@ ${TRANSLATION_ONLY_RULE}`;
 
 ${TRANSLATION_ONLY_RULE}`;
 
+  // --- 모바일 브라우저/저장소에서 UTF-8 한글이 Latin-1/Windows-1252로 잘못 해석된 경우 자동 복구 ---
+  // 상태 초기화(let replacementSlots 등)가 아래 헬퍼를 바로 호출하므로 반드시 그보다 위에 있어야 한다.
+  const MOJIBAKE_CP1252_REVERSE = new Map([
+    [0x20AC, 0x80], [0x201A, 0x82], [0x0192, 0x83], [0x201E, 0x84],
+    [0x2026, 0x85], [0x2020, 0x86], [0x2021, 0x87], [0x02C6, 0x88],
+    [0x2030, 0x89], [0x0160, 0x8A], [0x2039, 0x8B], [0x0152, 0x8C],
+    [0x017D, 0x8E], [0x2018, 0x91], [0x2019, 0x92], [0x201C, 0x93],
+    [0x201D, 0x94], [0x2022, 0x95], [0x2013, 0x96], [0x2014, 0x97],
+    [0x02DC, 0x98], [0x2122, 0x99], [0x0161, 0x9A], [0x203A, 0x9B],
+    [0x0153, 0x9C], [0x017E, 0x9E], [0x0178, 0x9F],
+  ]);
+  const UTF8_STRICT = new TextDecoder('utf-8', { fatal: true });
+  // 한글(UTF-8 선두 바이트 EA~ED)이 깨졌을 때만 나오는 패턴. 프랑스어·스페인어 지침은 걸리지 않는다.
+  const KO_MOJIBAKE_RE = /[\u00EA-\u00ED][\u0080-\u00BF\u0152\u0153\u0160\u0161\u0178\u017D\u017E\u0192\u02C6\u02DC\u2013\u2014\u2018-\u201E\u2020-\u2022\u2026\u2030\u2039\u203A\u20AC\u2122]/g;
+
+  function getMojibakeByte(char) {
+    const code = char.codePointAt(0);
+    if (code <= 0xFF) return code;
+    return MOJIBAKE_CP1252_REVERSE.get(code) ?? null;
+  }
+
+  function countHangul(text) {
+    return (String(text || '').match(/[가-힣ㄱ-ㅎㅏ-ㅣ]/g) || []).length;
+  }
+
+  function countMojibakeMarkers(text) {
+    return (String(text || '').match(/[\u0080-\u009F\uFFFDÃÂÀÁÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ]/g) || []).length;
+  }
+
+  function looksBrokenKorean(text) {
+    return (String(text || '').match(KO_MOJIBAKE_RE) || []).length >= 5;
+  }
+
+  // 올바른 UTF-8 시퀀스만 골라 복원하고 나머지 문자는 그대로 둔다.
+  // 한 군데가 망가져 있어도 나머지는 복원되므로 전체가 실패하지 않는다.
+  function decodeMojibakePass(text) {
+    const chars = Array.from(String(text || ''));
+    const bytes = chars.map(getMojibakeByte);
+    let out = '';
+    for (let i = 0; i < chars.length;) {
+      const b = bytes[i];
+      const len = b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 0;
+      if (len && i + len <= chars.length) {
+        const seq = bytes.slice(i, i + len);
+        if (seq.every((x, k) => k === 0 || (x !== null && x >= 0x80 && x <= 0xBF))) {
+          try {
+            out += UTF8_STRICT.decode(new Uint8Array(seq));
+            i += len;
+            continue;
+          } catch (_) {}
+        }
+      }
+      out += chars[i];
+      i += 1;
+    }
+    return out;
+  }
+
+  function repairUtf8Mojibake(value) {
+    const input = String(value ?? '');
+    if (!input || countMojibakeMarkers(input) === 0) return input;
+
+    let current = input;
+    for (let pass = 0; pass < 3; pass++) { // 두 번 깨진 경우(이중 인코딩)까지 대응
+      const next = decodeMojibakePass(current);
+      if (next === current) break;
+      current = next;
+    }
+
+    // 실제 한글이 늘어나고 깨짐 표식이 줄어드는 경우에만 채택해 정상 영문/라틴 문자를 건드리지 않는다.
+    return countHangul(current) > countHangul(input)
+      && countMojibakeMarkers(current) < countMojibakeMarkers(input)
+      ? current
+      : input;
+  }
+
+  function getRepairedTextSetting(key, fallback = '') {
+    const raw = String(GM_getValue(key, fallback) ?? '');
+    const repaired = repairUtf8Mojibake(raw);
+    if (repaired !== raw) {
+      GM_setValue(key, repaired);
+      console.info(`[Crack Translator] Repaired broken UTF-8 text setting: ${key}`);
+    }
+    return repaired;
+  }
+
   let transHistory = [];
   let transUsageHistory = [];
   let transIndex = -1;
@@ -91,6 +177,7 @@ ${TRANSLATION_ONLY_RULE}`;
   let thinkingBudgets = GM_getValue('thinkingBudgets', {});
   let replacementSlots = sanitizeReplacementSlots(GM_getValue('replacementSlots', []));
   let translationPromptSlots = sanitizeTranslationPromptSlots(GM_getValue('translationPromptSlots', []));
+  GM_setValue('replacementSlots', replacementSlots);
   GM_setValue('translationPromptSlots', translationPromptSlots);
   let lastDeletedPromptSlot = null;
   const liveMessagePatches = new Map();
@@ -98,7 +185,7 @@ ${TRANSLATION_ONLY_RULE}`;
   const pendingMessageSaves = new Set();
   let oocRuntime = {
     enabled: GM_getValue('oocApply', false),
-    text: GM_getValue('oocText', ''),
+    text: getRepairedTextSetting('oocText', ''),
     turns: Math.max(1, parseInt(GM_getValue('oocTurns', 10), 10) || 10),
   };
   let nudgeTimer = null;
@@ -224,8 +311,8 @@ ${TRANSLATION_ONLY_RULE}`;
     if (!Array.isArray(rawSlots)) return [];
     return rawSlots
       .map(slot => ({
-        find: String(slot?.find || ''),
-        replace: String(slot?.replace || ''),
+        find: repairUtf8Mojibake(String(slot?.find || '')),
+        replace: repairUtf8Mojibake(String(slot?.replace || '')),
       }))
       .filter(slot => slot.find);
   }
@@ -238,10 +325,10 @@ ${TRANSLATION_ONLY_RULE}`;
     for (const rawSlot of rawSlots) {
       if (!rawSlot || typeof rawSlot !== 'object') continue;
       const id = String(rawSlot.id || '').trim();
-      const title = String(rawSlot.title || '').trim();
+      const title = repairUtf8Mojibake(String(rawSlot.title || '')).trim();
       if (!/^custom-[A-Za-z0-9_-]+$/.test(id) || usedIds.has(id) || !title) continue;
       usedIds.add(id);
-      clean.push({ id, title, prompt: String(rawSlot.prompt || '') });
+      clean.push({ id, title, prompt: repairUtf8Mojibake(String(rawSlot.prompt || '')) });
     }
     return clean;
   }
@@ -1465,16 +1552,27 @@ ${TRANSLATION_ONLY_RULE}`;
     oocTextInput.value = oocRuntime.text || 'Please reply in English OOC.';
     oocTurnsInput.value = oocRuntime.turns;
 
-    let currentPrompts = {
-      ko: GM_getValue('customPromptKo', promptKo),
-      en: GM_getValue('customPromptEn', promptEn)
+    const loadBuiltInPrompt = (key, fallback) => {
+      const value = getRepairedTextSetting(key, fallback);
+      if (!looksBrokenKorean(value)) return value;
+      GM_setValue(key, fallback);
+      console.warn(`[Crack Translator] Unrecoverable broken prompt reset to default: ${key}`);
+      showNudge('손상된 번역 지침서를 기본값으로 복구했습니다.', 'info');
+      return fallback;
     };
 
-    const legacyPrompt = GM_getValue('customPrompt', '');
-    if (legacyPrompt) {
+    let currentPrompts = {
+      ko: loadBuiltInPrompt('customPromptKo', promptKo),
+      en: loadBuiltInPrompt('customPromptEn', promptEn),
+    };
+
+    const legacyPrompt = getRepairedTextSetting('customPrompt', '');
+    if (legacyPrompt && !looksBrokenKorean(legacyPrompt)) {
       const legacyMode = GM_getValue('transMode', 'ko') === 'en' ? 'en' : 'ko';
       currentPrompts[legacyMode] = legacyPrompt;
       GM_setValue(legacyMode === 'en' ? 'customPromptEn' : 'customPromptKo', legacyPrompt);
+      GM_setValue('customPrompt', '');
+    } else if (legacyPrompt) {
       GM_setValue('customPrompt', '');
     }
 
@@ -2711,6 +2809,20 @@ ${TRANSLATION_ONLY_RULE}`;
         chunkKeys.add(key);
       }
     });
+
+    // 모바일 Edge 등에서 .wrtn-markdown 구조가 달라지는 경우 말풍선 자체에서 텍스트를 안전하게 추출한다.
+    if (!chunks.length) {
+      const clone = messageBlock.cloneNode(true);
+      clone.querySelectorAll([
+        'button', '[role="button"]', '[aria-hidden="true"]',
+        'svg', 'script', 'style', 'input', 'textarea',
+        '.trans-bubble-btn', '.trans-live-content', '.trans-live-applied-label'
+      ].join(',')).forEach(control => control.remove());
+      const fallbackText = (clone.innerText || clone.textContent || '').trim();
+      const fallbackKey = normalizeForMessageMatch(fallbackText);
+      if (fallbackText && fallbackKey) chunks.push(fallbackText);
+    }
+
     return chunks.join('\n\n');
   }
 
@@ -2736,6 +2848,9 @@ ${TRANSLATION_ONLY_RULE}`;
     if (!best) return null;
     if (best.identityMatch) {
       if (!best.contained && best.score < 60) return null;
+      // 같은 ID(예: 리롤 버전들)를 공유하는 후보가 비슷한 점수로 경쟁하면 어느 쪽인지 확신할 수 없다.
+      const nextIdentity = scored.slice(1).find(candidate => candidate.identityMatch);
+      if (nextIdentity && best.score - nextIdentity.score < 8 && nextIdentity.contained) return null;
     } else if (best.score < 82 || !best.edgesMatch) {
       return null;
     }
@@ -2810,12 +2925,27 @@ ${TRANSLATION_ONLY_RULE}`;
         visibleText: lastVisibleText,
       };
     }
-    console.warn('[Crack Translator] Failed to resolve the selected message.', {
-      assistantCount: lastMessages.filter(isAssistantMessage).length,
-      bubbleIds: lastBubbleIds,
-      visibleTextLength: String(lastVisibleText || '').length,
-    });
-    throw lastError || new Error('선택한 답변을 정확히 찾을 수 없습니다.');
+    const assistants = lastMessages.filter(isAssistantMessage);
+    const hangulPct = text => {
+      const norm = normalizeForMessageMatch(text);
+      return norm ? Math.round((countHangul(text) / norm.length) * 100) : 0;
+    };
+    const ranked = assistants.map(message => ({
+      id: String(getPrimaryMessageId(message)).slice(-6),
+      idHit: getMessageIdentityValues(message).some(id => lastBubbleIds.includes(id)),
+      score: getMessageMatchStrength(getMessageContent(message), lastVisibleText),
+      ko: hangulPct(getMessageContent(message)),
+    })).sort((a, b) => b.score - a.score).slice(0, 3);
+    const diag = [
+      `봇 메시지 ${assistants.length}개`,
+      `말풍선 ID ${lastBubbleIds.map(id => id.slice(-6)).join(', ') || '없음'}`,
+      `화면 텍스트 ${String(lastVisibleText || '').length}자(한글 ${hangulPct(lastVisibleText)}%)`,
+      `후보 ${ranked.map(c => `${c.id}${c.idHit ? '·ID일치' : ''} ${c.score}점(한글 ${c.ko}%)`).join(' / ') || '없음'}`,
+    ].join('\n');
+    console.warn(`[Crack Translator] Failed to resolve the selected message.\n${diag}`);
+    const error = lastError || new Error('선택한 답변을 정확히 찾을 수 없습니다.');
+    error.message += `\n\n[진단]\n${diag}`;
+    throw error;
   }
 
   // Bundled locally to avoid delaying document-start network hooks with @require.
@@ -3564,6 +3694,9 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     const groups = findElementsInRoot(root, '.flex.flex-row.gap-2.items-center');
     groups.forEach(group => {
       if (!group.querySelector('button[aria-label="메시지 옵션"]')) return;
+      // 엣지 등 브라우저 자체 번역이 말풍선을 바꿔버리면 서버 원문과 매칭할 수 없으므로 번역 제외로 표시한다.
+      const messageBlock = group.closest('[data-message-group-id]');
+      if (messageBlock && messageBlock.getAttribute('translate') !== 'no') messageBlock.setAttribute('translate', 'no');
       if (group.querySelector('.trans-bubble-btn')) return;
 
       const btn = document.createElement('button');
