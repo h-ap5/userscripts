@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.1.6
+// @version      4.1.7
 // @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -17,6 +17,9 @@
   'use strict';
 
   const API_BASE = 'https://crack-api.wrtn.ai/crack-gen';
+  const MESSAGE_PAGE_LIMIT = 50;
+  const MESSAGE_SEARCH_MAX_PAGES = 32;
+  const MAX_DIRECT_ID_PROBES = 6;
   const CODE_BLOCK_RE = /```([\s\S]*?)```/g;
   const FENCE_OPEN_SUB = '===BLOCK_OPEN===';
   const FENCE_CLOSE_SUB = '===BLOCK_CLOSE===';
@@ -73,7 +76,7 @@ ${TRANSLATION_ONLY_RULE}`;
 ${TRANSLATION_ONLY_RULE}`;
 
   // --- 모바일 브라우저/저장소에서 UTF-8 한글이 Latin-1/Windows-1252로 잘못 해석된 경우 자동 복구 ---
-  // 상태 초기화(let replacementSlots 등)가 아래 헬퍼를 바로 호출하므로 반드시 그보다 위에 있어야 한다.
+  // 상태 초기화(replacementSlots 등)가 아래 헬퍼를 바로 호출하므로 반드시 그보다 위에 있어야 한다.
   const MOJIBAKE_CP1252_REVERSE = new Map([
     [0x20AC, 0x80], [0x201A, 0x82], [0x0192, 0x83], [0x201E, 0x84],
     [0x2026, 0x85], [0x2020, 0x86], [0x2021, 0x87], [0x02C6, 0x88],
@@ -84,7 +87,7 @@ ${TRANSLATION_ONLY_RULE}`;
     [0x0153, 0x9C], [0x017E, 0x9E], [0x0178, 0x9F],
   ]);
   const UTF8_STRICT = new TextDecoder('utf-8', { fatal: true });
-  // 한글(UTF-8 선두 바이트 EA~ED)이 깨졌을 때만 나오는 패턴. 프랑스어·스페인어 지침은 걸리지 않는다.
+  // 한글 UTF-8 선두 바이트(EA~ED)가 깨졌을 때 주로 생기는 패턴. 정상 라틴어 지침 오탐 방지용.
   const KO_MOJIBAKE_RE = /[\u00EA-\u00ED][\u0080-\u00BF\u0152\u0153\u0160\u0161\u0178\u017D\u017E\u0192\u02C6\u02DC\u2013\u2014\u2018-\u201E\u2020-\u2022\u2026\u2030\u2039\u203A\u20AC\u2122]/g;
 
   function getMojibakeByte(char) {
@@ -105,15 +108,19 @@ ${TRANSLATION_ONLY_RULE}`;
     return (String(text || '').match(KO_MOJIBAKE_RE) || []).length >= 5;
   }
 
-  // 올바른 UTF-8 시퀀스만 골라 복원하고 나머지 문자는 그대로 둔다.
-  // 한 군데가 망가져 있어도 나머지는 복원되므로 전체가 실패하지 않는다.
+  // 올바른 UTF-8 시퀀스만 골라 복원. 바이트 유실/정상 문자 혼합 구간은 그대로 보존한다.
   function decodeMojibakePass(text) {
     const chars = Array.from(String(text || ''));
     const bytes = chars.map(getMojibakeByte);
     let out = '';
+
     for (let i = 0; i < chars.length;) {
       const b = bytes[i];
-      const len = b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 0;
+      const len = b >= 0xC2 && b <= 0xDF ? 2
+        : b >= 0xE0 && b <= 0xEF ? 3
+        : b >= 0xF0 && b <= 0xF4 ? 4
+        : 0;
+
       if (len && i + len <= chars.length) {
         const seq = bytes.slice(i, i + len);
         if (seq.every((x, k) => k === 0 || (x !== null && x >= 0x80 && x <= 0xBF))) {
@@ -124,6 +131,7 @@ ${TRANSLATION_ONLY_RULE}`;
           } catch (_) {}
         }
       }
+
       out += chars[i];
       i += 1;
     }
@@ -135,13 +143,12 @@ ${TRANSLATION_ONLY_RULE}`;
     if (!input || countMojibakeMarkers(input) === 0) return input;
 
     let current = input;
-    for (let pass = 0; pass < 3; pass++) { // 두 번 깨진 경우(이중 인코딩)까지 대응
+    for (let pass = 0; pass < 3; pass++) { // 이중 인코딩까지 대응
       const next = decodeMojibakePass(current);
       if (next === current) break;
       current = next;
     }
 
-    // 실제 한글이 늘어나고 깨짐 표식이 줄어드는 경우에만 채택해 정상 영문/라틴 문자를 건드리지 않는다.
     return countHangul(current) > countHangul(input)
       && countMojibakeMarkers(current) < countMojibakeMarkers(input)
       ? current
@@ -164,6 +171,7 @@ ${TRANSLATION_ONLY_RULE}`;
   let transSessionId = 0;
   let activeOriginalText = '';
   let activeSourceContent = '';
+  let activeServerContent = '';
   let activeChatId = '';
   let activeMsgId = '';
   let activeBubbleMsgId = '';
@@ -182,6 +190,8 @@ ${TRANSLATION_ONLY_RULE}`;
   let lastDeletedPromptSlot = null;
   const liveMessagePatches = new Map();
   const liveMessageViews = new Map();
+  // 서버가 번역문으로 갱신된 뒤에도 같은 세션에서 최초 원문을 잃지 않도록 보존한다.
+  const originalMessageSources = new Map();
   const pendingMessageSaves = new Set();
   let oocRuntime = {
     enabled: GM_getValue('oocApply', false),
@@ -1935,6 +1945,7 @@ ${TRANSLATION_ONLY_RULE}`;
         bubbleId: activeBubbleMsgId,
         bubbleElement: activeBubbleElement,
         sourceContent: activeSourceContent || activeOriginalText,
+        serverContent: activeServerContent || activeSourceContent || activeOriginalText,
         originalText: activeOriginalText,
         isFullMode: activeIsFullMode,
         translatedText: transHistory[transIndex],
@@ -1963,7 +1974,8 @@ ${TRANSLATION_ONLY_RULE}`;
           bubbleId: saveContext.bubbleId,
           bubbleElement: saveContext.bubbleElement,
           content: newContent,
-          expectedContent: saveContext.sourceContent,
+          expectedContent: saveContext.serverContent,
+          sourceContent: saveContext.sourceContent,
         });
         const stillSameResult = saveContext.sessionId === transSessionId
           && saveContext.chatId === activeChatId
@@ -2555,21 +2567,90 @@ ${TRANSLATION_ONLY_RULE}`;
     ];
   }
 
-  async function fetchChatMessages(chatId) {
-    const res = await fetch(`${API_BASE}/v3/chats/${chatId}/messages?limit=50`, {
+  function parseMessagePagePayload(json) {
+    const payload = json?.data ?? json?.result?.data ?? json?.result ?? json;
+    const messages = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.messages)
+        ? payload.messages
+        : Array.isArray(payload?.items)
+          ? payload.items
+          : Array.isArray(json?.messages)
+            ? json.messages
+            : [];
+    const hasNext = Boolean(
+      payload?.hasNext
+      ?? payload?.has_next
+      ?? json?.hasNext
+      ?? json?.has_next
+      ?? false
+    );
+    const nextCursor = String(
+      payload?.nextCursor
+      ?? payload?.next_cursor
+      ?? json?.nextCursor
+      ?? json?.next_cursor
+      ?? ''
+    );
+    return { messages, hasNext, nextCursor };
+  }
+
+  async function fetchChatMessagePage(chatId, cursor = '') {
+    let url = `${API_BASE}/v3/chats/${chatId}/messages?limit=${MESSAGE_PAGE_LIMIT}`;
+    if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`;
+    const res = await fetch(url, {
       headers: buildHeaders(),
       credentials: 'include',
       cache: 'no-store',
     });
     if (!res.ok) throw new Error(`메시지 조회 실패 (${res.status})`);
+    return parseMessagePagePayload(await res.json());
+  }
 
-    const json = await res.json();
-    const payload = json?.data ?? json;
-    if (Array.isArray(payload)) return payload;
-    if (Array.isArray(payload?.messages)) return payload.messages;
-    if (Array.isArray(payload?.items)) return payload.items;
-    if (Array.isArray(json?.messages)) return json.messages;
-    return [];
+  async function fetchChatMessages(chatId) {
+    const page = await fetchChatMessagePage(chatId);
+    return page.messages;
+  }
+
+  function extractSingleMessagePayload(json) {
+    const candidates = [
+      json?.data?.message,
+      json?.data?.result?.message,
+      json?.data?.result,
+      json?.data,
+      json?.result?.data?.message,
+      json?.result?.data,
+      json?.result?.message,
+      json?.result,
+      json?.message,
+      json,
+    ];
+    return candidates.find(candidate => candidate
+      && typeof candidate === 'object'
+      && !Array.isArray(candidate)
+      && getPrimaryMessageId(candidate)) || null;
+  }
+
+  async function fetchMessageDirectById(chatId, messageId) {
+    const id = String(messageId || '').trim();
+    if (!id) return null;
+    const res = await fetch(`${API_BASE}/v3/chats/${chatId}/messages/${encodeURIComponent(id)}`, {
+      headers: buildHeaders(),
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    if ([400, 404, 405].includes(res.status)) return null;
+    if (!res.ok) throw new Error(`메시지 단건 조회 실패 (${res.status})`);
+    let json;
+    try {
+      json = await res.json();
+    } catch (_) {
+      return null;
+    }
+    const message = extractSingleMessagePayload(json);
+    if (!message) return null;
+    // groupId를 단건 엔드포인트가 임의 해석하는 경우를 막고, 실제 primary id 일치만 신뢰한다.
+    return String(getPrimaryMessageId(message)) === id ? message : null;
   }
 
   async function fetchLatestBotMessage(chatId) {
@@ -2734,6 +2815,34 @@ ${TRANSLATION_ONLY_RULE}`;
     return messageNorm.includes(visibleNorm) || visibleNorm.includes(messageNorm);
   }
 
+  function chooseMessageCandidate(candidates, visibleText) {
+    const unique = [];
+    const seen = new Set();
+    for (const message of candidates || []) {
+      const id = String(getPrimaryMessageId(message));
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      unique.push(message);
+    }
+    if (unique.length === 0) return null;
+    if (unique.length === 1) return unique[0];
+
+    const exact = unique.filter(message => getMessageMatchStrength(getMessageContent(message), visibleText) === 100);
+    if (exact.length === 1) return exact[0];
+
+    const scored = unique.map(message => ({
+      message,
+      score: getMessageMatchStrength(getMessageContent(message), visibleText),
+      contained: isStrongContainedMatch(getMessageContent(message), visibleText),
+    })).sort((a, b) => b.score - a.score);
+    const best = scored[0];
+    const next = scored[1];
+    if (!best) return null;
+    if (!(best.contained || best.score >= 60)) return null;
+    if (next && best.score - next.score < 8 && next.contained) return null;
+    return best.message;
+  }
+
   function resolveTargetBotMessage(messages, fallbackMsgId, visibleText) {
     const assistants = (Array.isArray(messages) ? messages : []).filter(isAssistantMessage);
     const fallbackIds = normalizeIdentityCandidates(fallbackMsgId);
@@ -2822,7 +2931,6 @@ ${TRANSLATION_ONLY_RULE}`;
       const fallbackKey = normalizeForMessageMatch(fallbackText);
       if (fallbackText && fallbackKey) chunks.push(fallbackText);
     }
-
     return chunks.join('\n\n');
   }
 
@@ -2848,7 +2956,6 @@ ${TRANSLATION_ONLY_RULE}`;
     if (!best) return null;
     if (best.identityMatch) {
       if (!best.contained && best.score < 60) return null;
-      // 같은 ID(예: 리롤 버전들)를 공유하는 후보가 비슷한 점수로 경쟁하면 어느 쪽인지 확신할 수 없다.
       const nextIdentity = scored.slice(1).find(candidate => candidate.identityMatch);
       if (nextIdentity && best.score - nextIdentity.score < 8 && nextIdentity.contained) return null;
     } else if (best.score < 82 || !best.edgesMatch) {
@@ -2858,94 +2965,293 @@ ${TRANSLATION_ONLY_RULE}`;
     return best.message;
   }
 
-  async function fetchStableBubbleTarget(chatId, fallbackMsgId, visibleText, bubbleElement = null) {
-    let lastSignature = '';
-    let stableCount = 0;
-    let lastError = null;
-    let lastExact = null;
-    let lastMessages = [];
-    let lastVisibleText = visibleText;
-    let lastBubbleIds = normalizeIdentityCandidates(fallbackMsgId);
-    let lastBubbleId = lastBubbleIds[0] || '';
-
-    for (let attempt = 0; attempt < 12; attempt++) {
-      const allMsgs = await fetchChatMessages(chatId);
-      const currentVisibleText = getBubbleVisibleText(bubbleElement) || visibleText;
-      const currentBubbleIds = getBubbleIdentityValues(bubbleElement, fallbackMsgId);
-      const currentBubbleId = bubbleElement?.getAttribute('data-message-group-id') || currentBubbleIds[0] || '';
-      lastMessages = allMsgs;
-      lastVisibleText = currentVisibleText;
-      lastBubbleIds = currentBubbleIds;
-      lastBubbleId = currentBubbleId;
+  async function fetchDirectMessageCandidates(chatId, identityIds) {
+    const found = [];
+    const seen = new Set();
+    for (const id of normalizeIdentityCandidates(identityIds).slice(0, MAX_DIRECT_ID_PROBES)) {
+      let message = null;
       try {
-        const targetMsg = resolveTargetBotMessage(allMsgs, currentBubbleIds, currentVisibleText);
-        const targetContent = getMessageContent(targetMsg);
-        const targetMsgId = getPrimaryMessageId(targetMsg);
-        const signature = `${targetMsgId}::${normalizeForMessageMatch(targetContent)}::${normalizeForMessageMatch(currentVisibleText)}`;
-        lastExact = {
-          allMsgs,
-          targetMsg,
-          targetMsgId,
-          targetContent,
-          bubbleId: currentBubbleId,
-          bubbleElement,
-          visibleText: currentVisibleText,
-        };
-        stableCount = signature === lastSignature ? stableCount + 1 : 1;
-        lastSignature = signature;
-        if (stableCount >= 2) {
+        message = await fetchMessageDirectById(chatId, id);
+      } catch (error) {
+        // 인증/서버 오류는 숨기지 않고 상위에서 기존 목록 조회로 한 번 더 확인한다.
+        console.warn('[Crack Translator] Direct message lookup failed.', id, error);
+      }
+      if (!message || !isAssistantMessage(message)) continue;
+      const primaryId = String(getPrimaryMessageId(message));
+      if (!primaryId || seen.has(primaryId)) continue;
+      seen.add(primaryId);
+      found.push(message);
+    }
+    return found;
+  }
+
+  async function searchMessagePagesByIdentity(chatId, identityIds, visibleText, {
+    primaryOnly = false,
+    maxPages = MESSAGE_SEARCH_MAX_PAGES,
+  } = {}) {
+    const ids = normalizeIdentityCandidates(identityIds);
+    let cursor = '';
+    const seenCursors = new Set();
+    const allAssistants = [];
+    let firstPageMessages = [];
+
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+      const pageCursor = cursor;
+      const page = await fetchChatMessagePage(chatId, pageCursor);
+      if (pageIndex === 0) firstPageMessages = page.messages;
+      const assistants = page.messages.filter(isAssistantMessage);
+      allAssistants.push(...assistants);
+
+      const primaryMatches = assistants.filter(message => ids.includes(String(getPrimaryMessageId(message))));
+      const secondaryMatches = primaryOnly
+        ? []
+        : assistants.filter(message => !primaryMatches.includes(message)
+          && getMessageIdentityValues(message).some(id => ids.includes(id)));
+      const matches = [...primaryMatches, ...secondaryMatches];
+
+      if (matches.length) {
+        const chosen = chooseMessageCandidate(matches, visibleText);
+        if (chosen) {
           return {
-            allMsgs,
-            targetMsg,
-            targetMsgId,
-            targetContent,
-            bubbleId: currentBubbleId,
-            bubbleElement,
-            visibleText: currentVisibleText,
+            message: chosen,
+            pageCursor,
+            pageIndex,
+            allAssistants,
+            firstPageMessages,
+            ambiguous: false,
           };
         }
-      } catch (error) {
-        lastError = error;
-        lastSignature = '';
-        stableCount = 0;
+        return {
+          message: null,
+          pageCursor,
+          pageIndex,
+          allAssistants,
+          firstPageMessages,
+          ambiguous: true,
+        };
       }
-      await new Promise(resolve => setTimeout(resolve, Math.min(180, 35 + attempt * 18)));
+
+      if (!page.hasNext || !page.nextCursor) break;
+      if (seenCursors.has(page.nextCursor) || page.nextCursor === cursor) break;
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
     }
 
-    if (lastExact) return lastExact;
-    const approximateTarget = resolveApproximateBotMessage(lastMessages, lastBubbleIds, lastVisibleText);
-    if (approximateTarget) {
+    return { message: null, pageCursor: '', pageIndex: -1, allAssistants, firstPageMessages, ambiguous: false };
+  }
+
+  async function fetchExactMessageByPrimaryId(chatId, messageId, maxPages = MESSAGE_SEARCH_MAX_PAGES) {
+    const id = String(messageId || '').trim();
+    if (!id) return null;
+    try {
+      const direct = await fetchMessageDirectById(chatId, id);
+      if (direct && isAssistantMessage(direct)) return direct;
+    } catch (error) {
+      console.warn('[Crack Translator] Exact direct preflight failed; falling back to cursor search.', error);
+    }
+    const paged = await searchMessagePagesByIdentity(chatId, [id], '', { primaryOnly: true, maxPages });
+    return paged.message && String(getPrimaryMessageId(paged.message)) === id ? paged.message : null;
+  }
+
+  function findStoredSourceRecordForBubble(chatId, bubbleIds, bubbleElement, visibleText) {
+    const ids = new Set(normalizeIdentityCandidates(bubbleIds));
+    const visibleNorm = normalizeForMessageMatch(visibleText);
+    const records = new Map();
+    for (const [key, record] of liveMessagePatches) records.set(key, record);
+    for (const [key, record] of originalMessageSources) records.set(key, record);
+
+    const matches = [];
+    for (const record of records.values()) {
+      if (String(record.chatId) !== String(chatId)) continue;
+      const sameElement = Boolean(bubbleElement && record.bubbleElement === bubbleElement);
+      const primaryIdMatch = ids.has(String(record.messageId || ''));
+      const groupIdMatch = ids.has(String(record.bubbleId || ''));
+
+      // 같은 DOM 노드 또는 정확한 messageId면 화면 텍스트가 숨겨진 원문으로 잡혀도 신뢰한다.
+      if (sameElement || primaryIdMatch) {
+        matches.push(record);
+        continue;
+      }
+      if (!groupIdMatch) continue;
+
+      // groupId만 같은 경우(리롤 가능)는 현재 화면이 번역문/원문 어느 쪽과 가까운지도 확인한다.
+      const translatedNorm = normalizeForMessageMatch(record.lastContent ?? record.content);
+      const sourceNorm = normalizeForMessageMatch(record.sourceContent);
+      if (!visibleNorm || visibleNorm === translatedNorm || visibleNorm === sourceNorm
+        || isStrongContainedMatch(record.lastContent ?? record.content, visibleText)
+        || isStrongContainedMatch(record.sourceContent, visibleText)) {
+        matches.push(record);
+      }
+    }
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  async function resolveBubbleTargetOnce(chatId, fallbackMsgId, visibleText, bubbleElement = null) {
+    const bubbleIds = getBubbleIdentityValues(bubbleElement, fallbackMsgId);
+    const bubbleId = bubbleElement?.getAttribute('data-message-group-id') || bubbleIds[0] || '';
+
+    // 즉시 교체 후 같은 말풍선을 다시 누르면 서버에는 번역문이 있어도 최초 원문을 다시 번역한다.
+    const liveRecord = findStoredSourceRecordForBubble(chatId, bubbleIds, bubbleElement, visibleText);
+    if (liveRecord?.sourceContent) {
+      const serverMessage = await fetchExactMessageByPrimaryId(chatId, liveRecord.messageId, MESSAGE_SEARCH_MAX_PAGES);
+      if (serverMessage && String(getMessageContent(serverMessage)) === String(liveRecord.lastContent ?? liveRecord.content)) {
+        return {
+          targetMsg: serverMessage,
+          targetMsgId: getPrimaryMessageId(serverMessage),
+          targetContent: String(liveRecord.sourceContent),
+          serverContent: getMessageContent(serverMessage),
+          bubbleId,
+          bubbleElement,
+          visibleText,
+          resolution: 'live-original',
+          pageCursor: '',
+        };
+      }
+    }
+
+    // 1순위: DOM에서 얻은 후보 ID를 /messages/{id} 단건 조회. primary id가 정확히 같은 응답만 신뢰한다.
+    const directCandidates = await fetchDirectMessageCandidates(chatId, bubbleIds);
+    if (directCandidates.length) {
+      const chosen = chooseMessageCandidate(directCandidates, visibleText);
+      if (chosen) {
+        return {
+          targetMsg: chosen,
+          targetMsgId: getPrimaryMessageId(chosen),
+          targetContent: getMessageContent(chosen),
+          serverContent: getMessageContent(chosen),
+          bubbleId,
+          bubbleElement,
+          visibleText,
+          resolution: 'direct',
+          pageCursor: '',
+        };
+      }
+    }
+
+    // 2순위: 최근 50개부터 nextCursor를 따라가며 ID를 찾는다. 반복 cursor 및 상한으로 무한 탐색 방지.
+    const paged = await searchMessagePagesByIdentity(chatId, bubbleIds, visibleText);
+    if (paged.message) {
       return {
-        allMsgs: lastMessages,
-        targetMsg: approximateTarget,
-        targetMsgId: getPrimaryMessageId(approximateTarget),
-        targetContent: getMessageContent(approximateTarget),
-        bubbleId: lastBubbleId,
+        targetMsg: paged.message,
+        targetMsgId: getPrimaryMessageId(paged.message),
+        targetContent: getMessageContent(paged.message),
+        serverContent: getMessageContent(paged.message),
+        bubbleId,
         bubbleElement,
-        visibleText: lastVisibleText,
+        visibleText,
+        resolution: 'page',
+        pageCursor: paged.pageCursor,
       };
     }
-    const assistants = lastMessages.filter(isAssistantMessage);
-    const hangulPct = text => {
-      const norm = normalizeForMessageMatch(text);
-      return norm ? Math.round((countHangul(text) / norm.length) * 100) : 0;
-    };
-    const ranked = assistants.map(message => ({
-      id: String(getPrimaryMessageId(message)).slice(-6),
-      idHit: getMessageIdentityValues(message).some(id => lastBubbleIds.includes(id)),
-      score: getMessageMatchStrength(getMessageContent(message), lastVisibleText),
-      ko: hangulPct(getMessageContent(message)),
-    })).sort((a, b) => b.score - a.score).slice(0, 3);
-    const diag = [
-      `봇 메시지 ${assistants.length}개`,
-      `말풍선 ID ${lastBubbleIds.map(id => id.slice(-6)).join(', ') || '없음'}`,
-      `화면 텍스트 ${String(lastVisibleText || '').length}자(한글 ${hangulPct(lastVisibleText)}%)`,
-      `후보 ${ranked.map(c => `${c.id}${c.idHit ? '·ID일치' : ''} ${c.score}점(한글 ${c.ko}%)`).join(' / ') || '없음'}`,
-    ].join('\n');
-    console.warn(`[Crack Translator] Failed to resolve the selected message.\n${diag}`);
-    const error = lastError || new Error('선택한 답변을 정확히 찾을 수 없습니다.');
-    error.message += `\n\n[진단]\n${diag}`;
-    throw error;
+
+    // 3순위: ID가 없는 특이 DOM에서만 기존 최근 목록 텍스트 매칭을 최후 fallback으로 사용한다.
+    const recent = paged.firstPageMessages?.length ? paged.firstPageMessages : await fetchChatMessages(chatId);
+    try {
+      const target = resolveTargetBotMessage(recent, bubbleIds, visibleText);
+      return {
+        targetMsg: target,
+        targetMsgId: getPrimaryMessageId(target),
+        targetContent: getMessageContent(target),
+        serverContent: getMessageContent(target),
+        bubbleId,
+        bubbleElement,
+        visibleText,
+        resolution: 'fuzzy',
+        pageCursor: '',
+      };
+    } catch (error) {
+      const approximate = resolveApproximateBotMessage(recent, bubbleIds, visibleText);
+      if (approximate) {
+        return {
+          targetMsg: approximate,
+          targetMsgId: getPrimaryMessageId(approximate),
+          targetContent: getMessageContent(approximate),
+          serverContent: getMessageContent(approximate),
+          bubbleId,
+          bubbleElement,
+          visibleText,
+          resolution: 'approximate',
+          pageCursor: '',
+        };
+      }
+
+      const assistants = (paged.allAssistants?.length ? paged.allAssistants : recent.filter(isAssistantMessage));
+      const hangulPct = text => {
+        const norm = normalizeForMessageMatch(text);
+        return norm ? Math.round((countHangul(text) / norm.length) * 100) : 0;
+      };
+      const ranked = assistants.map(message => ({
+        id: String(getPrimaryMessageId(message)).slice(-6),
+        idHit: getMessageIdentityValues(message).some(id => bubbleIds.includes(id)),
+        score: getMessageMatchStrength(getMessageContent(message), visibleText),
+        ko: hangulPct(getMessageContent(message)),
+      })).sort((a, b) => b.score - a.score).slice(0, 3);
+      const diag = [
+        `봇 메시지 ${assistants.length}개`,
+        `말풍선 ID ${bubbleIds.map(id => id.slice(-6)).join(', ') || '없음'}`,
+        `화면 텍스트 ${String(visibleText || '').length}자(한글 ${hangulPct(visibleText)}%)`,
+        `후보 ${ranked.map(c => `${c.id}${c.idHit ? '·ID일치' : ''} ${c.score}점(한글 ${c.ko}%)`).join(' / ') || '없음'}`,
+      ].join('\n');
+      console.warn(`[Crack Translator] Failed to resolve the selected message.\n${diag}`);
+      const finalError = error || new Error('선택한 답변을 정확히 찾을 수 없습니다.');
+      finalError.message += `\n\n[진단]\n${diag}`;
+      throw finalError;
+    }
+  }
+
+  async function refetchResolvedPrimary(chatId, resolved) {
+    const id = String(resolved?.targetMsgId || '');
+    if (!id) return null;
+
+    if (resolved.resolution === 'direct' || resolved.resolution === 'live-original') {
+      try {
+        const direct = await fetchMessageDirectById(chatId, id);
+        if (direct && isAssistantMessage(direct)) return direct;
+      } catch (_) {}
+    }
+
+    if (resolved.resolution === 'page' && resolved.pageCursor !== undefined) {
+      try {
+        const page = await fetchChatMessagePage(chatId, resolved.pageCursor || '');
+        return page.messages.find(message => isAssistantMessage(message)
+          && String(getPrimaryMessageId(message)) === id) || null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    try {
+      const recent = await fetchChatMessages(chatId);
+      return recent.find(message => isAssistantMessage(message)
+        && String(getPrimaryMessageId(message)) === id) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function fetchStableBubbleTarget(chatId, fallbackMsgId, visibleText, bubbleElement = null) {
+    let resolved = await resolveBubbleTargetOnce(chatId, fallbackMsgId, getBubbleVisibleText(bubbleElement) || visibleText, bubbleElement);
+    let lastServerContent = String(resolved.serverContent ?? resolved.targetContent ?? '');
+
+    // 생성 직후 덜 완성된 답변을 잡지 않도록 동일 message id + 서버 content가 두 번 연속 같은지 확인.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, Math.min(180, 55 + attempt * 35)));
+      const confirmed = await refetchResolvedPrimary(chatId, resolved);
+      if (!confirmed) return resolved; // 오래된 페이지/단건 미지원 등은 최초 확정값을 유지
+      const confirmedContent = getMessageContent(confirmed);
+      if (String(getPrimaryMessageId(confirmed)) === String(resolved.targetMsgId)
+        && String(confirmedContent) === lastServerContent) {
+        resolved.targetMsg = confirmed;
+        resolved.serverContent = confirmedContent;
+        if (resolved.resolution !== 'live-original') resolved.targetContent = confirmedContent;
+        return resolved;
+      }
+      lastServerContent = String(confirmedContent);
+      resolved.targetMsg = confirmed;
+      resolved.serverContent = confirmedContent;
+      if (resolved.resolution !== 'live-original') resolved.targetContent = confirmedContent;
+    }
+    return resolved;
   }
 
   // Bundled locally to avoid delaying document-start network hooks with @require.
@@ -3439,6 +3745,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     bubbleId = '',
     content,
     expectedContent,
+    sourceContent = expectedContent,
     bubbleElement = null,
   }) {
     const patchKey = getLivePatchKey(chatId, messageId);
@@ -3446,9 +3753,9 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     pendingMessageSaves.add(patchKey);
 
     try {
-      const messages = await fetchChatMessages(chatId);
-      const target = findMessageById(messages, messageId);
-      if (!target || target.role !== 'assistant') throw new Error('교체할 AI 답변을 찾을 수 없습니다.');
+      // 교체 직전 검증은 fuzzy/content 검색 금지. 정확한 primary message id만 재조회한다.
+      const target = await fetchExactMessageByPrimaryId(chatId, messageId);
+      if (!target || !isAssistantMessage(target)) throw new Error('교체할 AI 답변을 정확한 ID로 찾을 수 없습니다.');
       const currentContent = getMessageContent(target);
       if (String(currentContent) !== String(expectedContent)) {
         throw new Error('서버의 원문이 변경되었습니다. 새 답변을 다시 열어주세요.');
@@ -3456,15 +3763,25 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
       await patchMessage(chatId, messageId, content);
       const previousPatch = liveMessagePatches.get(patchKey);
+      const previousSource = originalMessageSources.get(patchKey);
+      const preservedSource = previousSource?.sourceContent
+        ?? previousPatch?.sourceContent
+        ?? String(sourceContent ?? expectedContent ?? '');
       const record = {
         chatId: String(chatId),
         messageId: String(messageId),
         bubbleId: String(bubbleElement?.getAttribute('data-message-group-id') || bubbleId || ''),
         bubbleElement,
         content: String(content || ''),
-        sourceContent: previousPatch?.sourceContent ?? String(expectedContent || ''),
+        lastContent: String(content || ''),
+        sourceContent: preservedSource,
       };
       liveMessagePatches.set(patchKey, record);
+      originalMessageSources.set(patchKey, { ...record });
+      if (originalMessageSources.size > 500) {
+        const oldestKey = originalMessageSources.keys().next().value;
+        if (oldestKey) originalMessageSources.delete(oldestKey);
+      }
       const displayResult = applyLiveMessagePatch(record);
       return displayResult === 'hidden' ? 'hidden' : displayResult === 'visible' ? 'visible' : 'offscreen';
     } finally {
@@ -3544,6 +3861,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       index: transIndex,
       originalText: activeOriginalText,
       sourceContent: activeSourceContent,
+      serverContent: activeServerContent,
       chatId: activeChatId,
       msgId: activeMsgId,
       bubbleMsgId: activeBubbleMsgId,
@@ -3562,6 +3880,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     activeBubbleCacheKey = cacheKey;
     activeOriginalText = cached.originalText;
     activeSourceContent = cached.sourceContent || cached.originalText;
+    activeServerContent = cached.serverContent || cached.sourceContent || cached.originalText;
     activeChatId = cached.chatId;
     activeMsgId = cached.msgId;
     activeBubbleMsgId = cached.bubbleMsgId;
@@ -3641,6 +3960,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       activeBubbleCacheKey = getBubbleResultCacheKey(chatId, fallbackMsgId, textToTranslate);
       activeOriginalText = nextOriginalText;
       activeSourceContent = nextOriginalText;
+      activeServerContent = stableTarget.serverContent ?? nextOriginalText;
       activeBubbleElement = stableTarget.bubbleElement;
       activeIsFullMode = true;
       transHistory = [resultObj.text];
@@ -3678,7 +3998,8 @@ if(__exports != exports)module.exports = exports;return module.exports}));
         bubbleId: stableTarget.bubbleId,
         bubbleElement: stableTarget.bubbleElement,
         content: newContent,
-        expectedContent: originalContent,
+        expectedContent: stableTarget.serverContent ?? originalContent,
+        sourceContent: originalContent,
       });
       const displayText = displayResult === 'visible'
         ? '번역 교체 완료! 화면에 바로 반영했습니다.'
@@ -3694,7 +4015,6 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     const groups = findElementsInRoot(root, '.flex.flex-row.gap-2.items-center');
     groups.forEach(group => {
       if (!group.querySelector('button[aria-label="메시지 옵션"]')) return;
-      // 엣지 등 브라우저 자체 번역이 말풍선을 바꿔버리면 서버 원문과 매칭할 수 없으므로 번역 제외로 표시한다.
       const messageBlock = group.closest('[data-message-group-id]');
       if (messageBlock && messageBlock.getAttribute('translate') !== 'no') messageBlock.setAttribute('translate', 'no');
       if (group.querySelector('.trans-bubble-btn')) return;
