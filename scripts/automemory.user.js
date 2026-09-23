@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.3.7
+// @version      2.3.8
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -6340,625 +6340,448 @@ if (btnTurnInfo && turnInfoPopover) {
         }
     }
 
+    // AutoMemory 2.3.8: structural header anchor + stable extension-owned slot.
+    // Reference review: team-igx/crystallized-chasm, preview-unexpired-sourdough,
+    // component-util / side-panel-util / prompt-input-decoration-util / observe-util.
+    // This is an independent implementation; no SDK dependency or API migration.
     var TOP_HEADER_BUTTON_STORAGE_KEY = 'crack_ext_top_header_button_enabled';
-    var topHeaderContainerCache = null;
-    var topHeaderContainerRoute = '';
-    var topHeaderLayoutMode = '';
+    var CE_HEADER_SLOT_ID = 'crack-ext-top-header-slot';
+    var CE_HEADER_STYLE_ID = 'crack-ext-header-stability-css';
     var topHeaderAiBtn = null;
-    var topHeaderSearchRetryAt = 0;
-    var topHeaderRetryTimer = 0;
-    var topHeaderRetryDelay = 1200;
+    var ceHeaderSlot = null;
+    var ceHeaderRecord = null;
+    var ceHeaderPending = null;
+    var ceSidebarMenu = null;
+    var ceSidebarHost = null;
+    var ceSidebarAnchor = null;
+    var ceLayoutTimer = 0;
+    var ceLayoutDueAt = 0;
+    var ceRetryTimer = 0;
+    var ceRetryDelay = 1000;
+    var ceLayoutObserver = null;
+    var ceObservedAncestors = [];
+    var ceUiRoute = '';
+    var ceUiStarted = false;
+    var CE_HEADER_CONFIRM_MS = 140;
+    var CE_EXCLUDED_HEADER = '[data-message-group-id],[data-message-id],.wrtn-markdown,' +
+        '[data-role="assistant"],[data-message-author-role="assistant"],[role="log"],' +
+        '.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"],[data-radix-popper-content-wrapper]';
+    var CE_LEGACY_ABSOLUTE_HEADER = '.absolute.z-\\[5\\]';
+    var CE_HEADER_ROOT_SELECTORS = [
+        '[data-crack-ui-room-top-bar="1"]',
+        '[data-testid*="chat-header"],[data-testid*="room-header"],.chat-header',
+        'main [class~="h-12"][class~="justify-between"][class*="bg-bg_screen"],' +
+            'main [class~="h-12"][class~="justify-between"][class*="border-b"]',
+        'main header',
+        CE_LEGACY_ABSOLUTE_HEADER,
+        '.css-1c5w7et,.css-l8r172'
+    ];
+    var CE_HEADER_ROOT_SELECTOR = CE_HEADER_ROOT_SELECTORS.join(',');
+    var CE_MODEL_SELECTOR = '[role="combobox"],button[aria-haspopup="listbox"],' +
+        'button[aria-label*="모델"],button[title*="모델"]';
+    var CE_LORE_SELECTOR = '#lore-inj-entry-button,[data-lore-inj-entry="true"]';
 
     function isTopHeaderButtonEnabled() {
         try {
             var saved = localStorage.getItem(TOP_HEADER_BUTTON_STORAGE_KEY);
             return saved !== '0' && saved !== 'false';
-        } catch (e) {
-            return true;
-        }
+        } catch (e) { return true; }
     }
-
     function setTopHeaderButtonEnabled(enabled) {
         try { localStorage.setItem(TOP_HEADER_BUTTON_STORAGE_KEY, enabled ? '1' : '0'); } catch (e) {}
     }
-
-    function removeAllTopHeaderButtons() {
-        document.querySelectorAll('.crack-ext-header-ai-btn').forEach(function(button) { button.remove(); });
+    function ceAsElement(node) {
+        return node && node.nodeType === 1 ? node : node && node.parentElement;
     }
-
-    function isVisibleAiSummarySidebarAnchor(element) {
-        if (!element || !element.parentNode || element.isConnected === false) return false;
-        if (!element.getClientRects || !element.getBoundingClientRect) return true;
-        if (!element.getClientRects().length) return false;
-        var rect = element.getBoundingClientRect();
-        if (rect.width < 1 || rect.height < 1 || rect.right <= 0 || rect.bottom <= 0 ||
-            rect.left >= Math.max(window.innerWidth || 0, 1) || rect.top >= Math.max(window.innerHeight || 0, 1)) return false;
-        var style = window.getComputedStyle(element);
-        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
+    function ceIsExcludedHeader(el) {
+        return !el || !el.closest || !!el.closest(CE_EXCLUDED_HEADER);
     }
-
-    function findAiSummarySidebarAnchor() {
-        var translatorMenu = document.getElementById('trans-menu-btn');
-        if (isVisibleAiSummarySidebarAnchor(translatorMenu)) return translatorMenu;
-        if (!document.body) return null;
-
-        var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-        var node;
-        while ((node = walker.nextNode())) {
-            if (!String(node.textContent || '').includes('키보드 단축키')) continue;
-            var parent = node.parentElement;
-            var container = parent && parent.closest ? parent.closest('.px-2\\.5') : null;
-            if (container && container.id !== AI_SUMMARY_SIDEBAR_MENU_ID && isVisibleAiSummarySidebarAnchor(container)) return container;
+    function ceHasDisplay(el) {
+        // Deliberately ignore viewport coordinates, opacity, aria-hidden, and transforms.
+        // Scrolling/collapsing the header or opening a modal is not a new anchor.
+        if (!el || !el.isConnected) return false;
+        for (var node = el; node && node.nodeType === 1; node = node.parentElement) {
+            if (node.hidden || window.getComputedStyle(node).display === 'none') return false;
+        }
+        return !!el.getClientRects().length;
+    }
+    function ceIsRendered(el) {
+        if (!ceHasDisplay(el)) return false;
+        var rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).visibility !== 'hidden';
+    }
+    function ceNativeControls(host) {
+        return Array.prototype.filter.call(host.querySelectorAll('button,[role="button"],[role="combobox"]'), function(el) {
+            return !el.closest('#' + CE_HEADER_SLOT_ID + ',.crack-ext-header-ai-btn') &&
+                !ceIsExcludedHeader(el) && ceIsRendered(el);
+        });
+    }
+    function ceIsActionRow(el, root) {
+        if (!el || !root.contains(el) || ceIsExcludedHeader(el) || !ceIsRendered(el)) return false;
+        if (el.closest('button,[role="button"],[role="combobox"],a')) return false;
+        if (el.closest('#' + CE_HEADER_SLOT_ID)) return false;
+        if (el.querySelector('textarea,[contenteditable="true"],h1,h2,h3,[data-testid*="title"]')) return false;
+        var style = window.getComputedStyle(el);
+        var isRow = (style.display === 'flex' || style.display === 'inline-flex') &&
+            style.flexDirection.indexOf('column') !== 0;
+        if (!isRow && style.display !== 'grid' && style.display !== 'inline-grid') return false;
+        var rect = el.getBoundingClientRect();
+        // Size is only an initial sanity check, never a viewport-position score.
+        return rect.height <= 100 && ceNativeControls(el).length > 0;
+    }
+    function getDirectHeaderChild(host, descendant) {
+        if (!host || !descendant || descendant === host || !host.contains(descendant)) return null;
+        var node = descendant;
+        while (node && node.parentElement !== host) node = node.parentElement;
+        return node && node.parentElement === host ? node : null;
+    }
+    function ceFindActionRow(root) {
+        // Prefer the actual action row inside a positively identified header.
+        var explicit = root.querySelectorAll('[data-testid="chat-header-actions"],[data-testid="room-header-actions"],.flex.gap-3.items-center');
+        for (var i = explicit.length - 1; i >= 0; i--) {
+            if (ceIsActionRow(explicit[i], root)) return explicit[i];
+        }
+        // A native model control is more stable than a wrapper supplied by another addon.
+        var anchors = Array.prototype.slice.call(root.querySelectorAll(CE_MODEL_SELECTOR));
+        anchors = anchors.concat(Array.prototype.slice.call(root.querySelectorAll(CE_LORE_SELECTOR)));
+        for (var j = 0; j < anchors.length; j++) {
+            if (ceIsExcludedHeader(anchors[j]) || !ceIsRendered(anchors[j])) continue;
+            for (var parent = anchors[j].parentElement; parent && root.contains(parent); parent = parent.parentElement) {
+                if (ceIsActionRow(parent, root) && (ceNativeControls(parent).length >= 2 || parent === root)) return parent;
+                if (parent === root) break;
+            }
+        }
+        // A native header may contain only one settings/menu button on small screens.
+        // Prefer its right-hand direct branch; never scan arbitrary page toolbars.
+        var children = Array.prototype.slice.call(root.children);
+        for (var k = children.length - 1; k >= 0; k--) {
+            if (ceIsActionRow(children[k], root)) return children[k];
+        }
+        return ceIsActionRow(root, root) ? root : null;
+    }
+    function ceFindHeaderRecord() {
+        for (var s = 0; s < CE_HEADER_ROOT_SELECTORS.length; s++) {
+            var roots = document.querySelectorAll(CE_HEADER_ROOT_SELECTORS[s]);
+            for (var i = 0; i < roots.length; i++) {
+                var root = roots[i];
+                if (ceIsExcludedHeader(root) || !ceIsRendered(root)) continue;
+                if (root.querySelector('textarea,[contenteditable="true"]')) continue;
+                // This legacy selector is valid only for a compact native header with a known action row.
+                if (CE_HEADER_ROOT_SELECTORS[s] === CE_LEGACY_ABSOLUTE_HEADER &&
+                    (!root.querySelector('.flex.gap-3.items-center') || root.getBoundingClientRect().height > 130)) continue;
+                var host = ceFindActionRow(root);
+                if (host) return { root:root, host:host };
+            }
         }
         return null;
     }
-
+    function ceRecordConnected(record) {
+        return !!(record && record.root.isConnected && record.host.isConnected &&
+            record.root.contains(record.host) && !ceIsExcludedHeader(record.host));
+    }
+    function findTopHeaderContainer() {
+        if (ceRecordConnected(ceHeaderRecord) && ceHasDisplay(ceHeaderRecord.host)) {
+            ceHeaderPending = null;
+            return ceHeaderRecord.host;
+        }
+        var found = ceFindHeaderRecord();
+        if (!found) {
+            ceHeaderPending = null;
+            // A temporarily hidden header is retained, rather than relocated.
+            return ceRecordConnected(ceHeaderRecord) ? ceHeaderRecord.host : null;
+        }
+        if (ceHeaderRecord && found.root === ceHeaderRecord.root && found.host === ceHeaderRecord.host) return found.host;
+        if (!ceRecordConnected(ceHeaderRecord)) {
+            // Nothing is on screen to protect from a jump, so adopt the structural match now.
+            ceHeaderRecord = found;
+            ceHeaderPending = null;
+            ceWatchLayoutAncestors();
+            return found.host;
+        }
+        var now = Date.now();
+        if (!ceHeaderPending || ceHeaderPending.root !== found.root || ceHeaderPending.host !== found.host) {
+            ceHeaderPending = { root:found.root, host:found.host, since:now };
+            ceScheduleLayout(CE_HEADER_CONFIRM_MS);
+            return ceRecordConnected(ceHeaderRecord) ? ceHeaderRecord.host : null;
+        }
+        if (now - ceHeaderPending.since < CE_HEADER_CONFIRM_MS) {
+            ceScheduleLayout(CE_HEADER_CONFIRM_MS - (now - ceHeaderPending.since));
+            return ceRecordConnected(ceHeaderRecord) ? ceHeaderRecord.host : null;
+        }
+        ceHeaderRecord = found;
+        ceHeaderPending = null;
+        ceWatchLayoutAncestors();
+        return found.host;
+    }
+    function findTopHeaderInsertBefore(host) {
+        var preferred = host.querySelector(CE_LORE_SELECTOR) || host.querySelector(CE_MODEL_SELECTOR);
+        var direct = getDirectHeaderChild(host, preferred);
+        if (direct && direct !== ceHeaderSlot) return direct;
+        var controls = ceNativeControls(host);
+        return controls.length ? getDirectHeaderChild(host, controls[0]) : null;
+    }
+    function ceInjectStabilityStyles() {
+        if (document.getElementById(CE_HEADER_STYLE_ID)) return;
+        var style = document.createElement('style');
+        style.id = CE_HEADER_STYLE_ID;
+        style.textContent =
+            '#' + CE_HEADER_SLOT_ID + '{display:inline-flex!important;position:static!important;flex:0 0 auto!important;align-items:center!important;justify-content:center!important;align-self:center!important;width:auto!important;height:auto!important;margin:0!important;padding:0!important;transform:none!important;transition:none!important;}' +
+            '#' + CE_HEADER_SLOT_ID + '>.crack-ext-header-ai-btn{position:static!important;flex:0 0 auto!important;margin:0!important;transform:none!important;}' +
+            '@media(max-width:767px){#' + CE_HEADER_SLOT_ID + '>.crack-ext-header-ai-btn{width:44px!important;min-width:44px!important;height:44px!important;padding:0!important;border-radius:9px!important;touch-action:manipulation;}#' + CE_HEADER_SLOT_ID + '>.crack-ext-header-ai-btn span{display:none!important;}#' + CE_HEADER_SLOT_ID + ' .crack-ext-header-ai-icon{width:18px!important;height:18px!important;}}';
+        (document.head || document.documentElement).appendChild(style);
+    }
+    function createTopHeaderBtn() {
+        var button = document.createElement('button');
+        button.className = 'crack-ext-header-ai-btn';
+        button.type = 'button';
+        button.setAttribute('data-ce-ai-summary', 'true');
+        button.innerHTML = '<svg class="crack-ext-header-ai-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z"/><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4.5"/></svg><span>요약</span>';
+        button.title = '요약 및 장기기억 도구';
+        button.setAttribute('aria-label', '요약 및 장기기억 도구');
+        button.setAttribute('aria-haspopup', 'dialog');
+        button.addEventListener('click', function(event) {
+            event.stopPropagation();
+            event.preventDefault();
+            if (!document.querySelector('.crack-ext-ai-overlay')) showMainModal();
+        });
+        return button;
+    }
+    function removeAllTopHeaderButtons() {
+        document.querySelectorAll('.crack-ext-header-ai-btn,#' + CE_HEADER_SLOT_ID).forEach(function(node) { node.remove(); });
+        if (topHeaderAiBtn && topHeaderAiBtn.parentNode) topHeaderAiBtn.remove();
+    }
+    function ceClearHeaderRetry() {
+        if (ceRetryTimer) clearTimeout(ceRetryTimer);
+        ceRetryTimer = 0;
+        ceRetryDelay = 1000;
+    }
+    function ceScheduleHeaderRetry() {
+        if (ceRetryTimer || !getChatId() || !isTopHeaderButtonEnabled()) return;
+        ceRetryTimer = setTimeout(function() {
+            ceRetryTimer = 0;
+            ceScheduleLayout(0);
+        }, ceRetryDelay);
+        ceRetryDelay = Math.min(5000, ceRetryDelay * 2);
+    }
+    function injectTopHeaderBtn() {
+        if (!getChatId() || !isTopHeaderButtonEnabled()) {
+            ceClearHeaderRetry();
+            removeAllTopHeaderButtons();
+            ceHeaderRecord = null;
+            ceHeaderPending = null;
+            ceWatchLayoutAncestors();
+            return;
+        }
+        var host = findTopHeaderContainer();
+        if (!host) {
+            // Do not guess another toolbar, and never fall back to an input-area FAB.
+            if (ceHeaderSlot && ceHeaderSlot.isConnected) ceHeaderSlot.remove();
+            ceScheduleHeaderRetry();
+            return;
+        }
+        ceClearHeaderRetry();
+        ceInjectStabilityStyles();
+        if (!ceHeaderSlot) {
+            ceHeaderSlot = document.createElement('span');
+            ceHeaderSlot.id = CE_HEADER_SLOT_ID;
+            ceHeaderSlot.setAttribute('data-ce-header-slot', 'true');
+        }
+        if (!topHeaderAiBtn) topHeaderAiBtn = createTopHeaderBtn();
+        document.querySelectorAll('.crack-ext-header-ai-btn').forEach(function(button) {
+            if (button !== topHeaderAiBtn) button.remove();
+        });
+        document.querySelectorAll('#' + CE_HEADER_SLOT_ID).forEach(function(slot) {
+            if (slot !== ceHeaderSlot) slot.remove();
+        });
+        if (topHeaderAiBtn.classList.contains('crack-ext-floating')) topHeaderAiBtn.classList.remove('crack-ext-floating');
+        if (topHeaderAiBtn.parentElement !== ceHeaderSlot) ceHeaderSlot.appendChild(topHeaderAiBtn);
+        // Insert exactly once per host. Another addon's neighbouring position is not an error.
+        if (ceHeaderSlot.parentElement !== host) {
+            var before = findTopHeaderInsertBefore(host);
+            if (before) host.insertBefore(ceHeaderSlot, before);
+            else host.appendChild(ceHeaderSlot);
+        }
+    }
+    function isVisibleAiSummarySidebarAnchor(element) {
+        if (!element || !element.parentElement || !ceIsRendered(element)) return false;
+        if (element.closest('.wrtn-markdown,[data-message-group-id],.crack-ext-ai-overlay')) return false;
+        var rect = element.getBoundingClientRect();
+        return rect.right > 0 && rect.bottom > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
+    }
+    function findAiSummarySidebarAnchor() {
+        // Retain a valid native anchor even when another addon is installed later.
+        if (isVisibleAiSummarySidebarAnchor(ceSidebarAnchor)) return ceSidebarAnchor;
+        var translator = document.getElementById('trans-menu-btn');
+        if (isVisibleAiSummarySidebarAnchor(translator)) return translator;
+        var candidates = document.querySelectorAll('.px-2\\.5');
+        for (var i = 0; i < candidates.length; i++) {
+            var element = candidates[i];
+            if (element.id === AI_SUMMARY_SIDEBAR_MENU_ID) continue;
+            if (String(element.textContent || '').indexOf('키보드 단축키') === -1) continue;
+            // Use the innermost .px-2.5 that owns the label, never an outer wrapper.
+            var inner = element.querySelectorAll('.px-2\\.5');
+            var hasInner = false;
+            for (var j = 0; j < inner.length && !hasInner; j++) {
+                hasInner = inner[j].id !== AI_SUMMARY_SIDEBAR_MENU_ID && String(inner[j].textContent || '').indexOf('키보드 단축키') !== -1;
+            }
+            if (!hasInner && isVisibleAiSummarySidebarAnchor(element)) return element;
+        }
+        return null;
+    }
     function createAiSummarySidebarMenu() {
         var item = document.createElement('div');
         item.id = AI_SUMMARY_SIDEBAR_MENU_ID;
         item.className = 'px-2.5 h-4 box-content py-[18px]';
         item.innerHTML =
             '<div role="button" tabindex="0" aria-label="AI 요약·메모리" aria-haspopup="dialog" class="w-full flex h-4 items-center justify-between typo-text-base_leading-none_medium space-x-2 [&_svg]:fill-icon_tertiary ring-offset-4 ring-offset-sidebar cursor-pointer">' +
-                '<span class="flex space-x-2 items-center min-w-0">' +
-                    AI_SUMMARY_SIDEBAR_ICON_SVG +
-                    '<span class="whitespace-nowrap overflow-hidden text-ellipsis typo-text-sm_leading-none_medium">AI 요약·메모리</span>' +
-                '</span>' +
-            '</div>';
-
+                '<span class="flex space-x-2 items-center min-w-0">' + AI_SUMMARY_SIDEBAR_ICON_SVG +
+                '<span class="whitespace-nowrap overflow-hidden text-ellipsis typo-text-sm_leading-none_medium">AI 요약·메모리</span></span></div>';
         function activate(event) {
-            if (event) {
-                event.stopPropagation();
-                event.preventDefault();
-            }
+            event.stopPropagation();
+            event.preventDefault();
             if (!document.querySelector('.crack-ext-ai-overlay')) showMainModal();
         }
-
         item.addEventListener('click', activate);
         item.addEventListener('keydown', function(event) {
-            if (event.repeat || (event.key !== 'Enter' && event.key !== ' ')) return;
-            activate(event);
+            if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) activate(event);
         });
         return item;
     }
-
     function injectAiSummarySidebarMenu() {
-        var menus = Array.prototype.slice.call(document.querySelectorAll('#' + AI_SUMMARY_SIDEBAR_MENU_ID));
+        var menus = document.querySelectorAll('#' + AI_SUMMARY_SIDEBAR_MENU_ID);
         if (!getChatId()) {
             menus.forEach(function(menu) { menu.remove(); });
+            ceSidebarAnchor = null;
+            ceSidebarHost = null;
+            ceWatchLayoutAncestors();
             return;
         }
-
-        var menu = menus[0] || null;
-        for (var i = 1; i < menus.length; i++) menus[i].remove();
-
         var anchor = findAiSummarySidebarAnchor();
-        if (!anchor || !anchor.parentNode) return;
-        if (!menu) menu = createAiSummarySidebarMenu();
-
-        if (menu.parentNode !== anchor.parentNode || menu.previousElementSibling !== anchor) {
-            anchor.parentNode.insertBefore(menu, anchor.nextSibling);
+        if (!ceSidebarMenu && menus.length) ceSidebarMenu = menus[0];
+        menus.forEach(function(menu) { if (menu !== ceSidebarMenu) menu.remove(); });
+        if (!anchor) return;
+        ceSidebarAnchor = anchor;
+        var host = anchor.parentElement;
+        if (!ceSidebarMenu) ceSidebarMenu = createAiSummarySidebarMenu();
+        // Do not continuously reclaim the position immediately after the anchor.
+        if (ceSidebarMenu.parentElement !== host) host.insertBefore(ceSidebarMenu, anchor.nextSibling);
+        if (ceSidebarHost !== host) {
+            ceSidebarHost = host;
+            ceWatchLayoutAncestors();
         }
     }
-
-    function aiSummarySidebarMenuNeedsInjection() {
-        var menus = document.querySelectorAll('#' + AI_SUMMARY_SIDEBAR_MENU_ID);
-        if (!getChatId()) return menus.length > 0;
-        var anchor = findAiSummarySidebarAnchor();
-        if (!anchor) return menus.length > 1;
-        return menus.length !== 1 || menus[0].parentNode !== anchor.parentNode || menus[0].previousElementSibling !== anchor;
-    }
-
-    function mutationTouchesAiSummarySidebar(mutation) {
+    function ceWatchLayoutAncestors() {
+        if (!ceLayoutObserver) return;
         var nodes = [];
-        if (mutation && mutation.addedNodes) nodes = nodes.concat(Array.prototype.slice.call(mutation.addedNodes));
-        if (mutation && mutation.removedNodes) nodes = nodes.concat(Array.prototype.slice.call(mutation.removedNodes));
+        [ceHeaderRecord && ceHeaderRecord.host, ceSidebarHost].forEach(function(startNode) {
+            for (var node = startNode; node && node.nodeType === 1; node = node.parentElement) {
+                if (nodes.indexOf(node) === -1) nodes.push(node);
+            }
+        });
+        if (nodes.length === ceObservedAncestors.length && nodes.every(function(node, i) { return node === ceObservedAncestors[i]; })) return;
+        ceObservedAncestors = nodes;
+        ceLayoutObserver.disconnect();
+        nodes.forEach(function(node) {
+            ceLayoutObserver.observe(node, { attributes:true, attributeFilter:['class', 'style', 'hidden'] });
+        });
+    }
+    function ceScheduleLayout(delay) {
+        var wait = Math.max(0, Number(delay) || 0);
+        var due = Date.now() + wait;
+        if (ceLayoutTimer && ceLayoutDueAt <= due) return;
+        if (ceLayoutTimer) clearTimeout(ceLayoutTimer);
+        ceLayoutDueAt = due;
+        ceLayoutTimer = setTimeout(function() {
+            ceLayoutTimer = 0;
+            ceLayoutDueAt = 0;
+            if (document.visibilityState === 'hidden') return;
+            inject();
+        }, wait);
+    }
+    function ceCheckRoute() {
+        var route = getChatId() || location.pathname || 'current';
+        if (route === ceUiRoute) return false;
+        var previous = ceUiRoute;
+        ceUiRoute = route;
+        ceClearHeaderRetry();
+        ceHeaderRecord = null;
+        ceHeaderPending = null;
+        if (ceHeaderSlot && ceHeaderSlot.isConnected) ceHeaderSlot.remove();
+        ceWatchLayoutAncestors();
+        if (previous) {
+            cancelAutoMemorySchedule();
+            AUTO_MEMORY_LAST_WAKE_AT = 0;
+            notifyAutoMemoryStatus(getChatId());
+            scheduleAutoMemoryResponseCheck(500);
+        }
+        ceScheduleLayout(0);
+        return true;
+    }
+    function ceTouchesLayout(mutation) {
+        if (!mutation || mutation.type !== 'childList') return false;
+        var target = ceAsElement(mutation.target);
+        if (target && target.closest && target.closest('.wrtn-markdown,[data-message-group-id],.crack-ext-ai-overlay')) return false;
+        if (ceHeaderRecord && target && ceHeaderRecord.root.contains(target)) return true;
+        if (ceSidebarHost && target && ceSidebarHost.contains(target)) return true;
+        var nodes = Array.prototype.slice.call(mutation.addedNodes).concat(Array.prototype.slice.call(mutation.removedNodes));
+        var selector = CE_HEADER_ROOT_SELECTOR + ',#' + CE_HEADER_SLOT_ID + ',#' + AI_SUMMARY_SIDEBAR_MENU_ID + ',#trans-menu-btn,.px-2\\.5';
         for (var i = 0; i < nodes.length; i++) {
-            var current = nodes[i];
-            if (!current) continue;
-            if (String(current.textContent || '').includes('키보드 단축키')) return true;
-            if (current.nodeType !== 1) continue;
-            if (current.id === AI_SUMMARY_SIDEBAR_MENU_ID || current.id === 'trans-menu-btn') return true;
-            if (current.querySelector && current.querySelector('#' + AI_SUMMARY_SIDEBAR_MENU_ID + ',#trans-menu-btn')) return true;
+            var node = nodes[i];
+            if (!node || node.nodeType !== 1) continue;
+            if (ceHeaderRecord && (node === ceHeaderRecord.root || node.contains(ceHeaderRecord.root))) return true;
+            if (ceSidebarHost && (node === ceSidebarHost || node.contains(ceSidebarHost))) return true;
+            if (node.matches(selector) || node.querySelector(selector)) return true;
         }
         return false;
     }
-
-    function isMobileHeaderLayout() {
-        var coarsePointer = false;
-        try { coarsePointer = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (e) {}
-        return window.innerWidth < 760 || (coarsePointer && Math.min(window.innerWidth || 0, window.innerHeight || 0) < 600);
-    }
-
-    function getTopHeaderBandStart() {
-        return isMobileHeaderLayout() ? 8 : 40;
-    }
-
-    function getTopHeaderBandLimit() {
-        return Math.min(150, Math.max(112, window.innerHeight * 0.16));
-    }
-
-    function findStructuralRoomTopBar(el) {
-        var node = el;
-        var depth = 0;
-        while (node && node !== document.body && depth < 7) {
-            if (node.matches && node.matches('[data-crack-ui-room-top-bar="1"]')) return node;
-            var className = String(node.className || '');
-            if (className.includes('h-12') && className.includes('justify-between') &&
-                (className.includes('bg-bg_screen') || className.includes('border-b')) &&
-                !(node.closest && node.closest('[data-message-group-id]'))) return node;
-            node = node.parentElement;
-            depth++;
-        }
-        return null;
-    }
-
-    function isTrustedTopHeaderContext(el) {
-        if (!el || !el.closest) return false;
-        if (el.closest('[data-message-group-id]')) return false;
-        if (el.closest('[data-crack-ui-room-top-bar="1"],main header,[data-testid*="chat-header"],[class*="chat-header"]')) return true;
-        return !!findStructuralRoomTopBar(el);
-    }
-
-    function isExcludedHeaderArea(el) {
-        if (!el || !el.closest) return true;
-        // 답변 하단 툴바도 flex/button 구조와 화면 좌표가 상단바와 비슷하다.
-        // 특히 UI 확장의 답변별 모델 버튼(title/aria-label에 "모델" 포함)이
-        // 스크롤 중 상단 탐색 대역을 지나면 헤더 앵커로 오인되므로 메시지 그룹은 절대 허용하지 않는다.
-        return !!el.closest('[data-message-group-id],.crack-ext-ai-overlay,[role="dialog"],[aria-modal="true"],[data-radix-popper-content-wrapper]');
-    }
-
-    function isRetainableTopHeaderContainer(el) {
-        if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
-        return !el.querySelector('textarea,[contenteditable="true"]');
-    }
-
-    function isUsableTopHeaderContainer(el) {
-        if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
-        if (el.querySelector('textarea,[contenteditable="true"]')) return false;
-
-        var rect = el.getBoundingClientRect();
-        var viewportWidth = Math.max(window.innerWidth || 0, 1);
-        var bandStart = isTrustedTopHeaderContext(el) ? -8 : getTopHeaderBandStart();
-        if (rect.width < 48 || rect.height < 16 || rect.height > 80) return false;
-        if (rect.top < bandStart || rect.top > getTopHeaderBandLimit()) return false;
-        if (viewportWidth >= 760 && (rect.width > Math.min(680, viewportWidth * 0.65) || rect.right < viewportWidth * 0.5)) return false;
-
-        var style = window.getComputedStyle(el);
-        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
-    }
-
-    function isVisibleTopHeaderControl(el) {
-        if (!el || !el.isConnected || isExcludedHeaderArea(el)) return false;
-        if (el.classList && el.classList.contains('crack-ext-header-ai-btn')) return false;
-        var rect = el.getBoundingClientRect();
-        var bandStart = isTrustedTopHeaderContext(el) ? -16 : getTopHeaderBandStart() - 8;
-        if (rect.width < 8 || rect.height < 8 || rect.bottom < 0) return false;
-        if (rect.top < bandStart || rect.top > getTopHeaderBandLimit() || rect.bottom > getTopHeaderBandLimit() + 28) return false;
-        var style = window.getComputedStyle(el);
-        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
-    }
-
-    function countVisibleTopHeaderControls(el) {
-        var controls = el.querySelectorAll('button,[role="button"]');
-        var count = 0;
-        for (var i = 0; i < controls.length; i++) {
-            if (isVisibleTopHeaderControl(controls[i])) count++;
-        }
-        return count;
-    }
-
-    function scoreTopHeaderCandidate(el) {
-        if (!isUsableTopHeaderContainer(el)) return -Infinity;
-        var rect = el.getBoundingClientRect();
-        var controls = countVisibleTopHeaderControls(el);
-        if (!controls) return -Infinity;
-        var viewportWidth = Math.max(window.innerWidth || 0, 1);
-        var score = Math.min(controls, 6) * 22 - Math.abs(rect.top - 76) * 1.4 - Math.max(0, rect.width - 360) * 0.22;
-        score += Math.max(0, Math.min(36, (rect.left / viewportWidth) * 36));
-        if (rect.right >= viewportWidth * 0.72) score += 48;
-        if (isTrustedTopHeaderContext(el)) score += 260;
-        var modelLike = el.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
-        if (modelLike && isVisibleTopHeaderControl(modelLike)) score += 90;
-        var loreEntry = el.querySelector('#lore-inj-entry-button,[data-lore-inj-entry="true"]');
-        if (loreEntry && isVisibleTopHeaderControl(loreEntry)) score += 180;
-        return score;
-    }
-
-    function findKnownTopActionGroup() {
-        var anchors = Array.prototype.slice.call(document.querySelectorAll(
-            '#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]'
-        ));
-        var best = null;
-        var bestScore = -Infinity;
-        for (var i = 0; i < anchors.length; i++) {
-            if (!isVisibleTopHeaderControl(anchors[i])) continue;
-            var parent = anchors[i].parentElement;
-            var depth = 0;
-            while (parent && parent !== document.body && depth < 5) {
-                if (isUsableTopHeaderContainer(parent)) {
-                    var display = window.getComputedStyle(parent).display;
-                    var controls = countVisibleTopHeaderControls(parent);
-                    if ((display === 'flex' || display === 'inline-flex' || display === 'grid') && controls >= 1 && controls <= 10) {
-                        var score = scoreTopHeaderCandidate(parent);
-                        if (score > bestScore) {
-                            best = parent;
-                            bestScore = score;
-                        }
-                    }
-                }
-                parent = parent.parentElement;
-                depth++;
-            }
-        }
-        return best;
-    }
-
-    function findBestSelectorCandidate(selector) {
-        var found = [];
-        try { found = document.querySelectorAll(selector); } catch (e) { return null; }
-        var best = null;
-        var bestScore = -Infinity;
-        for (var i = 0; i < found.length; i++) {
-            if (isMobileHeaderLayout()) {
-                var rect = found[i].getBoundingClientRect();
-                var viewportWidth = Math.max(window.innerWidth || 0, 1);
-                if ((!isTrustedTopHeaderContext(found[i]) && rect.top < 36) || rect.right < viewportWidth * 0.55) continue;
-            }
-            var score = scoreTopHeaderCandidate(found[i]);
-            if (score > bestScore) {
-                best = found[i];
-                bestScore = score;
-            }
-        }
-        return best;
-    }
-
-    function findLegacyTopActionGroup() {
-        if (!getChatId()) return null;
-        var isStory = /\/stories\/[a-f0-9-]+\/episodes\/[a-f0-9-]+/i.test(location.pathname) || /\/u\/[a-f0-9-]+\/c\/[a-f0-9-]+/i.test(location.pathname);
-        var classNames = isStory ? ['css-1c5w7et'] : ['css-l8r172'];
-        var best = null;
-        var bestScore = -Infinity;
-        classNames.forEach(function(className) {
-            var panels = document.getElementsByClassName(className);
-            for (var i = 0; i < panels.length; i++) {
-                var candidates = [panels[i]].concat(Array.prototype.slice.call(panels[i].querySelectorAll('div')));
-                for (var j = 0; j < candidates.length; j++) {
-                    var score = scoreTopHeaderCandidate(candidates[j]);
-                    if (score > bestScore) {
-                        best = candidates[j];
-                        bestScore = score;
-                    }
-                }
-            }
-        });
-        return best;
-    }
-
-    function findGeometricTopActionGroup() {
-        // 제목·모델 선택 줄과 같은 세로 대역만 검사한다. 페이지 전역 최상단 바는 제외한다.
-        // 화면 폭과 무관하게 제한된 기하 탐색을 쓰며, 모바일도 입력창 FAB로 내리지 않는다.
-        if (!getChatId()) return null;
-
-        var controls = document.querySelectorAll('button,[role="button"]');
-        var candidates = [];
-        var seen = new Set();
-        var viewportWidth = Math.max(window.innerWidth || 0, 1);
-        var mobileLayout = isMobileHeaderLayout();
-        var minLeft = mobileLayout ? 0 : Math.max(260, Math.floor(viewportWidth * 0.28));
-        for (var i = 0; i < controls.length; i++) {
-            if (!isVisibleTopHeaderControl(controls[i])) continue;
-            var controlRect = controls[i].getBoundingClientRect();
-            if (mobileLayout && controlRect.top < 36) continue;
-            if (controlRect.left < minLeft || controlRect.right > viewportWidth + 8) continue;
-            var parent = controls[i].parentElement;
-            var depth = 0;
-            while (parent && parent !== document.body && depth < 6) {
-                if (!seen.has(parent) && isUsableTopHeaderContainer(parent)) {
-                    var display = window.getComputedStyle(parent).display;
-                    var controlCount = countVisibleTopHeaderControls(parent);
-                    var modelLike = parent.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
-                    var parentRect = parent.getBoundingClientRect();
-                    var mobileScopeOk = !mobileLayout || (!!parent.closest('main') && parentRect.top >= 36 && parentRect.right >= viewportWidth * 0.55);
-                    if (mobileScopeOk && (display === 'flex' || display === 'inline-flex' || display === 'grid') && controlCount >= 1 && controlCount <= (mobileLayout ? 8 : 10)) {
-                        seen.add(parent);
-                        candidates.push(parent);
-                    }
-                }
-                parent = parent.parentElement;
-                depth++;
-            }
-        }
-
-        var best = null;
-        var bestScore = -Infinity;
-        for (var j = 0; j < candidates.length; j++) {
-            var score = scoreTopHeaderCandidate(candidates[j]);
-            if (score > bestScore) {
-                best = candidates[j];
-                bestScore = score;
-            }
-        }
-        return best;
-    }
-
-    function findTopHeaderContainer() {
-        var currentRoute = getChatId() || location.pathname || 'current';
-        var currentLayoutMode = isMobileHeaderLayout() ? 'mobile' : 'desktop';
-        if (topHeaderLayoutMode && topHeaderLayoutMode !== currentLayoutMode && topHeaderContainerCache) {
-            var cachedStyle = window.getComputedStyle(topHeaderContainerCache);
-            if (cachedStyle.display === 'none' || !topHeaderContainerCache.getClientRects().length) topHeaderContainerCache = null;
-        }
-        topHeaderLayoutMode = currentLayoutMode;
-
-        // iPhone Safari는 주소창 접기/펼치기와 스크롤 중 viewport 좌표를 자주 바꾼다.
-        // 이미 검증한 상단바가 같은 방의 DOM에 남아 있으면 좌표·가시성 점수를 다시 비교하지 않는다.
-        // 부모가 실제로 교체되거나 방/모바일·데스크톱 레이아웃이 바뀐 경우에만 새로 찾는다.
-        if (topHeaderContainerRoute === currentRoute && isRetainableTopHeaderContainer(topHeaderContainerCache)) {
-            return topHeaderContainerCache;
-        }
-        topHeaderContainerCache = null;
-        topHeaderContainerRoute = currentRoute;
-
-        var legacy = findLegacyTopActionGroup();
-        if (legacy) {
-            topHeaderContainerCache = legacy;
-            return legacy;
-        }
-
-        var known = findKnownTopActionGroup();
-        if (known) {
-            topHeaderContainerCache = known;
-            return known;
-        }
-
-        // 구체적인 제목창 액션 영역만 찾고, 실패하면 제한된 기하 탐색을 사용한다.
-        var selectors = [
-            '[data-crack-ui-room-top-bar="1"] [class*="items-center"]',
-            '[data-crack-ui-room-top-bar="1"]',
-            'main [class~="h-12"][class~="justify-between"][class*="bg-bg_screen"] [class*="items-center"]',
-            'main [class~="h-12"][class~="justify-between"][class*="border-b"] [class*="items-center"]',
-            '.absolute.z-\\[5\\] .flex.gap-3.items-center',
-            '.absolute.z-\\[5\\] [class*="items-center"]',
-            '[data-testid*="chat-header"] [class*="items-center"]',
-            '[class*="chat-header"] [class*="items-center"]'
-        ];
-        selectors = selectors.concat([
-            'main header [class*="items-center"]',
-            'main [class*="sticky"] [class*="items-center"]',
-            'main [class*="absolute"] [class*="items-center"]',
-            'main [role="toolbar"]'
-        ]);
-
-        for (var i = 0; i < selectors.length; i++) {
-            var candidate = findBestSelectorCandidate(selectors[i]);
-            if (candidate) {
-                topHeaderContainerCache = candidate;
-                return candidate;
-            }
-        }
-
-        var geometric = findGeometricTopActionGroup();
-        if (geometric) {
-            topHeaderContainerCache = geometric;
-            return geometric;
-        }
-        return null;
-    }
-
-    function getDirectHeaderChild(host, descendant) {
-        if (!host || !descendant || !host.contains(descendant)) return null;
-        var node = descendant;
-        while (node && node.parentElement !== host) node = node.parentElement;
-        return node && node.parentElement === host ? node : null;
-    }
-
-    function findTopHeaderInsertBefore(host) {
-        if (!host) return null;
-        var preferred = host.querySelector('#lore-inj-entry-button,[data-lore-inj-entry="true"]');
-        if (!preferred) preferred = host.querySelector('[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]');
-        var directPreferred = getDirectHeaderChild(host, preferred);
-        if (directPreferred) return directPreferred;
-        var controls = Array.prototype.slice.call(host.querySelectorAll('button,[role="button"]')).filter(isVisibleTopHeaderControl);
-        controls.sort(function(a, b) { return a.getBoundingClientRect().left - b.getBoundingClientRect().left; });
-        return controls.length ? getDirectHeaderChild(host, controls[0]) : null;
-    }
-
-    function createTopHeaderBtn() {
-        var aiBtn = document.createElement('button');
-        aiBtn.className = 'crack-ext-header-ai-btn';
-        aiBtn.type = 'button';
-        aiBtn.setAttribute('data-ce-ai-summary', 'true');
-        aiBtn.innerHTML = '<svg class="crack-ext-header-ai-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h10a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z"/><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4.5"/></svg><span>요약</span>';
-        aiBtn.title = '요약 및 장기기억 도구';
-        aiBtn.setAttribute('aria-label', '요약 및 장기기억 도구');
-        aiBtn.setAttribute('aria-haspopup', 'dialog');
-        aiBtn.addEventListener('click', function(e) {
-            e.stopPropagation();
-            e.preventDefault();
-            showMainModal();
-        });
-        return aiBtn;
-    }
-
-    function getOrCreateTopHeaderBtn(headerContainer) {
-        var buttons = Array.prototype.slice.call(document.querySelectorAll('.crack-ext-header-ai-btn'));
-        var aiBtn = topHeaderAiBtn;
-
-        if (!aiBtn && headerContainer) {
-            for (var i = 0; i < buttons.length; i++) {
-                if (buttons[i].parentElement === headerContainer) { aiBtn = buttons[i]; break; }
-            }
-        }
-        if (!aiBtn && buttons.length) aiBtn = buttons[0];
-        if (!aiBtn) aiBtn = createTopHeaderBtn();
-        topHeaderAiBtn = aiBtn;
-
-        for (var k = 0; k < buttons.length; k++) {
-            if (buttons[k] !== aiBtn) buttons[k].remove();
-        }
-        return aiBtn;
-    }
-
-    function clearTopHeaderRetry() {
-        if (topHeaderRetryTimer) clearTimeout(topHeaderRetryTimer);
-        topHeaderRetryTimer = 0;
-        topHeaderSearchRetryAt = 0;
-        topHeaderRetryDelay = 1200;
-    }
-
-    function scheduleTopHeaderRetry() {
-        if (topHeaderRetryTimer || !getChatId()) return;
-        var delay = topHeaderRetryDelay;
-        topHeaderSearchRetryAt = Date.now() + delay;
-        topHeaderRetryTimer = setTimeout(function() {
-            topHeaderRetryTimer = 0;
-            injectTopHeaderBtn();
-        }, delay);
-        topHeaderRetryDelay = Math.min(5000, Math.round(delay * 1.8));
-    }
-
-    function mutationContainsKnownHeaderAnchor(mutation) {
-        var selector = '#lore-inj-entry-button,[data-lore-inj-entry="true"],[role="combobox"],button[aria-haspopup="listbox"],button[aria-label*="모델"],button[title*="모델"]';
-        var nodes = mutation && mutation.addedNodes ? Array.prototype.slice.call(mutation.addedNodes) : [];
-        if (mutation && mutation.type === 'attributes') nodes.push(mutation.target);
-        for (var i = 0; i < nodes.length; i++) {
-            var element = nodes[i] && nodes[i].nodeType === 1 ? nodes[i] : null;
-            if (!element) continue;
-            if ((element.matches && element.matches(selector)) || (element.querySelector && element.querySelector(selector))) return true;
-        }
-        return false;
-    }
-
-    function injectTopHeaderBtn() {
-        if (!isTopHeaderButtonEnabled()) {
-            clearTopHeaderRetry();
-            removeAllTopHeaderButtons();
-            topHeaderContainerCache = null;
-            topHeaderContainerRoute = getChatId() || location.pathname || 'current';
-            topHeaderLayoutMode = isMobileHeaderLayout() ? 'mobile' : 'desktop';
-            return;
-        }
-        if (!getChatId()) {
-            clearTopHeaderRetry();
-            topHeaderContainerCache = null;
-            topHeaderContainerRoute = location.pathname || 'current';
-            topHeaderLayoutMode = isMobileHeaderLayout() ? 'mobile' : 'desktop';
-            if (topHeaderAiBtn && topHeaderAiBtn.isConnected) topHeaderAiBtn.remove();
-            return;
-        }
-        var headerContainer = findTopHeaderContainer();
-        var aiBtn = getOrCreateTopHeaderBtn(headerContainer);
-
-        if (headerContainer) {
-            clearTopHeaderRetry();
-            aiBtn.classList.remove('crack-ext-floating');
-            var before = findTopHeaderInsertBefore(headerContainer);
-            if (aiBtn.parentElement !== headerContainer || (before && aiBtn.nextSibling !== before)) {
-                if (before) headerContainer.insertBefore(aiBtn, before);
-                else headerContainer.appendChild(aiBtn);
-            }
-            return;
-        }
-        scheduleTopHeaderRetry();
-        aiBtn.classList.remove('crack-ext-floating');
-        if (aiBtn.isConnected) aiBtn.remove();
-    }
-
     function inject() {
+        ceCheckRoute();
         injectAiStyles();
         injectTopHeaderBtn();
         injectAiSummarySidebarMenu();
     }
-
     function start() {
+        if (ceUiStarted) return;
+        ceUiStarted = true;
         refreshUsdKrwRate(false);
-        var injectScheduled = false;
-
-        function needsInjection() {
-            if (!document.getElementById('crack-ext-ai-css')) return true;
-            if (aiSummarySidebarMenuNeedsInjection()) return true;
-
-            var buttons = document.querySelectorAll('.crack-ext-header-ai-btn');
-            if (!isTopHeaderButtonEnabled()) return buttons.length > 0;
-            if (!getChatId()) return buttons.length > 0;
-            if (buttons.length !== 1) return true;
-
-            var aiBtn = buttons[0];
-            var headerContainer = findTopHeaderContainer();
-            if (headerContainer) {
-                return aiBtn.parentElement !== headerContainer || aiBtn.classList.contains('crack-ext-floating');
-            }
-            return aiBtn.isConnected;
-        }
-
-        function scheduleInject(force) {
-            if (injectScheduled) return;
-            if (!force && !needsInjection()) return;
-            injectScheduled = true;
-            requestAnimationFrame(function() {
-                injectScheduled = false;
-                if (force || needsInjection()) inject();
-            });
-        }
-
-        // 제목창은 접혀 화면 밖으로 나가도 같은 DOM 부모에 고정한다. 방 변경/DOM 교체 때만 다시 찾는다.
-        // 같은 Observer에서 AI 답변 본문의 변화가 잠잠해진 시점도 감지해 자동 정리를 깨운다.
-        var obs = new MutationObserver(function(mutations) {
-            var currentRoute = getChatId() || location.pathname || 'current';
-            var routeChanged = !!topHeaderContainerRoute && topHeaderContainerRoute !== currentRoute;
-            if (routeChanged) {
-                cancelAutoMemorySchedule();
-                AUTO_MEMORY_LAST_WAKE_AT = 0;
-                clearTopHeaderRetry();
-                topHeaderContainerCache = null;
-                topHeaderContainerRoute = currentRoute;
-                topHeaderLayoutMode = isMobileHeaderLayout() ? 'mobile' : 'desktop';
-                topHeaderSearchRetryAt = 0;
-                if (topHeaderAiBtn && topHeaderAiBtn.isConnected) topHeaderAiBtn.remove();
-            }
-            var retryDue = Date.now() >= topHeaderSearchRetryAt;
-            var buttonCount = document.querySelectorAll('.crack-ext-header-ai-btn').length;
-            var headerButtonEnabled = isTopHeaderButtonEnabled();
-            var duplicateButtons = headerButtonEnabled ? buttonCount !== 1 : buttonCount !== 0;
-            var knownAnchorAdded = false;
-            var sidebarAnchorChanged = false;
-            for (var anchorIndex = 0; anchorIndex < mutations.length; anchorIndex++) {
-                if (!knownAnchorAdded && mutationContainsKnownHeaderAnchor(mutations[anchorIndex])) knownAnchorAdded = true;
-                if (!sidebarAnchorChanged && mutationTouchesAiSummarySidebar(mutations[anchorIndex])) sidebarAnchorChanged = true;
-                if (knownAnchorAdded && sidebarAnchorChanged) break;
-            }
-            var shouldRescan = routeChanged || duplicateButtons || sidebarAnchorChanged || (headerButtonEnabled &&
-                (knownAnchorAdded || (retryDue && (!topHeaderAiBtn || !topHeaderAiBtn.isConnected ||
-                    !isRetainableTopHeaderContainer(topHeaderContainerCache)))));
-            if (shouldRescan) scheduleInject();
+        ceUiRoute = getChatId() || location.pathname || 'current';
+        ceLayoutObserver = new MutationObserver(function() { ceScheduleLayout(120); });
+        // Text changes still wake automatic summarisation, but do not rescan the header.
+        // Global class/style observation is replaced by the narrow ancestor observer above.
+        var bodyObserver = new MutationObserver(function(mutations) {
+            var needsLayout = ceCheckRoute();
+            var responseChanged = false;
             for (var i = 0; i < mutations.length; i++) {
-                if (mutationTouchesAutoMemoryResponse(mutations[i])) {
-                    scheduleAutoMemoryResponseCheck(AUTO_MEMORY_RESPONSE_DEBOUNCE_MS);
-                    break;
-                }
+                if (!needsLayout && ceTouchesLayout(mutations[i])) needsLayout = true;
+                if (!responseChanged && mutationTouchesAutoMemoryResponse(mutations[i])) responseChanged = true;
+                if (needsLayout && responseChanged) break;
             }
-            if (routeChanged) {
-                notifyAutoMemoryStatus(getChatId());
-                scheduleAutoMemoryResponseCheck(500);
-            }
+            if (needsLayout) ceScheduleLayout(120);
+            if (responseChanged) scheduleAutoMemoryResponseCheck(AUTO_MEMORY_RESPONSE_DEBOUNCE_MS);
         });
-        obs.observe(document.body, { childList:true, characterData:true, attributes:true, attributeFilter:['class', 'style', 'aria-hidden'], subtree:true });
-
-        scheduleInject(true);
-        window.addEventListener('resize', function() {
-            scheduleInject();
-        }, { passive:true });
-        // DOM 클래스 전환을 놓쳐도 캐시는 버리지 않고 같은 제목창을 유지한다.
+        bodyObserver.observe(document.body, { childList:true, characterData:true, subtree:true });
+        ceScheduleLayout(0);
+        window.addEventListener('resize', function() { ceScheduleLayout(160); }, { passive:true });
+        window.addEventListener('popstate', function() { ceCheckRoute(); ceScheduleLayout(0); });
+        window.addEventListener('hashchange', function() { ceCheckRoute(); ceScheduleLayout(0); });
+        // A pathname-only heartbeat also works in userscript isolated worlds.
+        // It does not patch history/fetch or scan the DOM once per second.
         setInterval(function() {
-            scheduleInject();
-        }, 5000);
+            if (document.visibilityState !== 'hidden') ceCheckRoute();
+        }, 1000);
+        setInterval(function() {
+            if (document.visibilityState !== 'hidden') ceScheduleLayout(120);
+        }, 10000);
         scheduleAutoMemoryResponseCheck(1500);
         window.addEventListener('focus', wakeAutoMemoryOnReturn, { passive:true });
-        window.addEventListener('pageshow', wakeAutoMemoryOnReturn, { passive:true });
+        window.addEventListener('pageshow', function() {
+            ceCheckRoute();
+            ceScheduleLayout(0);
+            wakeAutoMemoryOnReturn();
+        }, { passive:true });
         window.addEventListener('storage', function(event) {
-            if (event && event.key === TOP_HEADER_BUTTON_STORAGE_KEY) {
-                injectTopHeaderBtn();
+            if (event && (event.key === TOP_HEADER_BUTTON_STORAGE_KEY || event.key === null)) {
+                ceScheduleLayout(0);
                 return;
             }
             var chatId = getChatId();
@@ -6968,10 +6791,13 @@ if (btnTurnInfo && turnInfoPopover) {
             if (getAutoMemorySettings(chatId).enabled) scheduleAutoMemoryResponseCheck(100);
         });
         document.addEventListener('visibilitychange', function() {
-            if (document.visibilityState === 'visible') wakeAutoMemoryOnReturn();
+            if (document.visibilityState === 'visible') {
+                ceCheckRoute();
+                ceScheduleLayout(0);
+                wakeAutoMemoryOnReturn();
+            }
         });
     }
-
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once:true });
     else start();
 })();
