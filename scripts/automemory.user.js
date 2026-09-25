@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.3.8
+// @version      2.4.0
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -33,6 +33,7 @@
         plus:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
         save:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11l3 3v15H5Z"/><path d="M8 3v6h8V3M8 15h8v6H8Z"/></svg>',
         info:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg>',
+        transfer:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h14"/><path d="m14 4 4 4-4 4"/><path d="M20 16H6"/><path d="m10 12-4 4 4 4"/></svg>',
         close:'<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>'
     });
     const AI_SUMMARY_SIDEBAR_MENU_ID = 'crack-ext-ai-sidebar-menu';
@@ -804,7 +805,7 @@ This requirement controls coverage only. It must not change or add any output fo
 
     function acquireAutoMemoryLock(chatId) {
         if (!chatId) return false;
-        var key = AUTO_MEMORY_LOCK_PREFIX + chatId;
+        var key = AUTO_MEMORY_LOCK_PREFIX + String(chatId).toLowerCase();
         var now = Date.now();
         try {
             var current = JSON.parse(localStorage.getItem(key) || 'null');
@@ -820,7 +821,7 @@ This requirement controls coverage only. It must not change or add any output fo
 
     function releaseAutoMemoryLock(chatId) {
         if (!chatId) return;
-        var key = AUTO_MEMORY_LOCK_PREFIX + chatId;
+        var key = AUTO_MEMORY_LOCK_PREFIX + String(chatId).toLowerCase();
         try {
             var current = JSON.parse(localStorage.getItem(key) || 'null');
             if (current && current.owner === AUTO_MEMORY_SESSION_ID) localStorage.removeItem(key);
@@ -829,7 +830,7 @@ This requirement controls coverage only. It must not change or add any output fo
 
     function renewAutoMemoryLock(chatId) {
         if (!chatId) return false;
-        var key = AUTO_MEMORY_LOCK_PREFIX + chatId;
+        var key = AUTO_MEMORY_LOCK_PREFIX + String(chatId).toLowerCase();
         try {
             var current = JSON.parse(localStorage.getItem(key) || 'null');
             if (!current || current.owner !== AUTO_MEMORY_SESSION_ID) return false;
@@ -900,17 +901,27 @@ async function fetchSummaries(options) {
     let allSummaries = [];
     let cursor = null;
     let seenCursors = new Set();
+    let seenSummaryIds = options.strict ? new Set() : null;
+    let type = options.type || 'longTerm';
     while (true) {
-        let path = '/summaries?limit=20&type=longTerm&orderBy=newest&filter=all';
+        let path = '/summaries?limit=20&type=' + encodeURIComponent(type) + '&orderBy=newest' + (type === 'longTerm' ? '&filter=all' : '');
         if (cursor) path += '&cursor=' + encodeURIComponent(cursor);
         let res = await apiCall('GET', path, null, options);
         if (!res || !res.data || !Array.isArray(res.data.summaries)) {
             if (options.strict) throw new Error('장기기억 목록 응답 형식이 올바르지 않습니다.');
             break;
         }
+        if (options.onPage) options.onPage(res.data);
         if (res.data.summaries.length === 0) {
             if (options.strict && res.data.nextCursor) throw new Error('장기기억 페이지 응답이 불완전합니다.');
             break;
+        }
+        if (seenSummaryIds) {
+            for (let item of res.data.summaries) {
+                let id = String(getSummaryId(item) || '').toLowerCase();
+                if (id && seenSummaryIds.has(id)) throw new Error('장기기억 목록에 중복 ID가 있어 작업을 중단했습니다: ' + id);
+                if (id) seenSummaryIds.add(id);
+            }
         }
         allSummaries = allSummaries.concat(res.data.summaries);
         if (res.data.nextCursor) {
@@ -926,6 +937,487 @@ async function fetchSummaries(options) {
     }
     return allSummaries;
 }
+
+    // ============== 장기기억 백업 · 복원 · 방 간 이식 ==============
+    var MEMORY_USER_CARD_LIMIT = 100;          // 플랫폼의 [추가] 카드 상한
+    var MEMORY_ROOM_PAGE_SIZE = 40;            // 채팅방 목록 API는 limit 40까지만 받는다(50은 400 오류).
+    var MEMORY_ROOM_MAX_PAGES = 150;
+    var MEMORY_ROOM_CACHE_MS = 60 * 1000;
+    var MEMORY_ROOM_RENDER_STEP = 200;
+    var MEMORY_TRANSFER_MAX_ROOMS = 50;
+    var MEMORY_TRANSFER_MAX_CARDS = 2000;
+    var MEMORY_WRITE_GAP_MS = 80;
+    var MEMORY_PENDING_PLAN_MESSAGE = '끝나지 않은 자동 장기기억 저장 계획이 있습니다. 해당 방의 자동 정리를 마치거나 "기준점 초기화"로 계획을 정리한 뒤 다시 시도해주세요.';
+    var MEMORY_ROOM_CACHE = null;
+
+    function pauseMs(ms) {
+        return new Promise(function(resolve) { setTimeout(resolve, ms); });
+    }
+
+    function memoryCardSignature(item) {
+        return JSON.stringify([String(item && item.title || '').trim(), String(item && item.summary || '').trim()]);
+    }
+
+    function memoryCardProblem(card) {
+        var title = String(card && card.title || '').trim();
+        var summary = String(card && card.summary || '').trim();
+        if (!title || !summary) return '제목 또는 본문이 비어 있음';
+        if (title.length > GENERATED_TITLE_MAX) return '제목 ' + title.length + '자 (최대 ' + GENERATED_TITLE_MAX + '자)';
+        if (summary.length > GENERATED_SUMMARY_MAX) return '본문 ' + summary.length + '자 (최대 ' + GENERATED_SUMMARY_MAX + '자)';
+        return '';
+    }
+
+    function uniqueValidCards(items) {
+        var seen = new Set();
+        var result = { cards:[], invalid:0, duplicate:0 };
+        (items || []).forEach(function(item) {
+            var card = { title:String(item && item.title || '').trim(), summary:String(item && item.summary || '').trim() };
+            if (memoryCardProblem(card)) { result.invalid++; return; }
+            var signature = memoryCardSignature(card);
+            if (seen.has(signature)) { result.duplicate++; return; }
+            seen.add(signature);
+            result.cards.push(card);
+        });
+        return result;
+    }
+
+    // 새 카드는 추가한 순서대로 최신 위치에 쌓인다. 원래 시간 순서를 지키려면 오래된 카드부터 추가해야 하므로
+    // 작성 시각이 있으면 그 순서로, 없으면 최신순으로 저장하는 longTerm 백업만 뒤집는다.
+    function orderImportedCards(rows, newestFirst) {
+        var indexed = rows.map(function(item, index) {
+            var time = Date.parse(item && (item.createdAt || item.updatedAt) || '');
+            return { item:item, index:index, time:time };
+        });
+        if (indexed.length && indexed.every(function(row) { return Number.isFinite(row.time); })) {
+            indexed.sort(function(a, b) { return a.time - b.time || a.index - b.index; });
+            return indexed.map(function(row) { return row.item; });
+        }
+        return newestFirst ? rows.slice().reverse() : rows.slice();
+    }
+
+    function validateImportedCards(cards) {
+        if (!cards.length) throw new Error('파일에 복원할 카드가 없습니다.');
+        if (cards.length > 5000) throw new Error('한 번에 5000개를 넘는 항목은 복원할 수 없습니다.');
+        cards.forEach(function(card, index) {
+            var problem = memoryCardProblem(card);
+            if (problem) throw new Error((index + 1) + '번째 카드 [' + String(card.title || '').slice(0, 20) + ']: ' + problem + '. 파일을 고친 뒤 다시 선택해주세요.');
+        });
+        return cards;
+    }
+
+    function normalizeMemoryArchive(raw) {
+        var rows = null;
+        var newestFirst = false;
+        if (Array.isArray(raw)) { rows = raw; newestFirst = true; }
+        else if (raw && Array.isArray(raw.longTerm)) { rows = raw.longTerm; newestFirst = true; }
+        else if (raw && Array.isArray(raw.summaries)) rows = raw.summaries;
+        if (!rows) throw new Error('AutoMemory의 summaries 또는 기존 백업의 longTerm 배열이 있는 JSON을 선택해주세요.');
+        var cards = orderImportedCards(rows, newestFirst).map(function(item) {
+            return {
+                title:typeof item?.title === 'string' ? item.title.trim() : '',
+                summary:typeof item?.summary === 'string' ? item.summary.trim() : ''
+            };
+        });
+        return validateImportedCards(cards);
+    }
+
+    // AutoMemory TXT 내보내기("[제목]" 다음 본문, 일괄 추가용 "[번호 | 제목]"도 허용)와
+    // Markdown 내보내기("## 1. 제목" 다음 본문)를 읽는다.
+    function parseMemoryTextArchive(text, isMarkdown) {
+        var lines = String(text || '').replace(/^\uFEFF/, '').replace(/\u200B/g, '').replace(/\r\n?/g, '\n').split('\n');
+        var cards = [];
+        var current = null;
+        function push() {
+            if (current && !current.skip) cards.push({ title:current.title.trim(), summary:current.body.join('\n').trim() });
+        }
+        lines.forEach(function(line) {
+            var heading = isMarkdown ? line.match(/^##\s+(?:\d+\.\s+)?(.+?)\s*$/) : line.match(/^\s*\[([^\]\n]+)\]\s*(.*)$/);
+            if (heading) {
+                push();
+                var title = heading[1].replace(/^\s*\d+\s*\|\s*/, '');
+                current = { title:title, body:[], skip:/🎬/.test(title) };
+                if (!isMarkdown && heading[2] && heading[2].trim()) current.body.push(heading[2].trim());
+                return;
+            }
+            if (!current) return;
+            if (isMarkdown && /^---\s*$/.test(line)) return;
+            current.body.push(line);
+        });
+        push();
+        if (!cards.length) throw new Error(isMarkdown ? '"## 제목" 형식의 카드를 찾지 못했습니다.' : '"[제목]" 다음 줄에 본문이 오는 카드를 찾지 못했습니다.');
+        return validateImportedCards(cards);
+    }
+
+    async function readMemoryArchiveFile(file) {
+        if (file.size > 8 * 1024 * 1024) throw new Error('8MB 이하 파일을 선택해주세요.');
+        var text = (await file.text()).replace(/^\uFEFF/, '');
+        var name = String(file.name || '').toLowerCase();
+        function parseJson() {
+            try { return normalizeMemoryArchive(JSON.parse(text)); }
+            catch (error) { throw error instanceof SyntaxError ? new Error('JSON 형식이 올바르지 않습니다: ' + error.message) : error; }
+        }
+        if (/\.json$/.test(name)) return parseJson();
+        if (/\.(md|markdown)$/.test(name)) return parseMemoryTextArchive(text, true);
+        if (/\.txt$/.test(name)) return parseMemoryTextArchive(text, false);
+        try { return parseJson(); }
+        catch (ignored) { return parseMemoryTextArchive(text, /^\s*##\s/m.test(text)); }
+    }
+
+    function memoryArchiveSnapshot(cards) {
+        return JSON.stringify((cards || []).map(function(item) {
+            return [String(getSummaryId(item) || ''), memoryCardSignature(item), String(item.createdBy || ''), String(item.badge || ''), String(item.createdAt || ''), String(item.updatedAt || '')];
+        }).sort(function(a, b) { return JSON.stringify(a).localeCompare(JSON.stringify(b)); }));
+    }
+
+    async function fetchMemoryState(chatId) {
+        var meta = null;
+        var cards = await fetchSummaries({ strict:true, silent:true, chatId:chatId, onPage:function(data) { if (!meta) meta = data; } });
+        var apiUserCount = meta ? finiteNumber(meta.userCreatedCount) : null;
+        return {
+            cards:cards,
+            userCount:apiUserCount != null ? apiUserCount : cards.filter(isUserAddedSummary).length,
+            isCreatable:meta && typeof meta.isCreatable === 'boolean' ? meta.isCreatable : null
+        };
+    }
+
+    // 덮어쓰기는 수정 가능한 카드(기본: assistant 카드)를 오래된 것부터 파일 카드와 짝지어 수정하고,
+    // 남는 파일 카드는 추가, 남는 기존 카드는 삭제한다. 같은 제목·본문은 건드리지 않는다.
+    function makeMemoryImportPlan(imported, existing, options) {
+        options = options || {};
+        var cards = existing || [];
+        var userCount = Number.isFinite(options.userCount) ? options.userCount : cards.filter(isUserAddedSummary).length;
+        var plan = { overwrite:!!options.overwrite, patches:[], additions:[], deletions:[], skipped:0, protectedCount:0, userCount:userCount, blockReason:'' };
+        if (!plan.overwrite) {
+            var known = new Set(cards.map(memoryCardSignature));
+            imported.forEach(function(card) {
+                var signature = memoryCardSignature(card);
+                if (known.has(signature)) plan.skipped++;
+                else { plan.additions.push(card); known.add(signature); }
+            });
+        } else {
+            var editable = sortSummariesOldest(cards.filter(function(item) {
+                return !!getSummaryId(item) && (options.includeUserAdded || isNativeSummary(item));
+            }));
+            var editableSet = new Set(editable);
+            var protectedCards = cards.filter(function(item) { return !editableSet.has(item); });
+            var protectedSignatures = new Set(protectedCards.map(memoryCardSignature));
+            var pool = new Map();
+            editable.forEach(function(item) {
+                var signature = memoryCardSignature(item);
+                if (!pool.has(signature)) pool.set(signature, []);
+                pool.get(signature).push(item);
+            });
+            var kept = new Set();
+            var unmatched = [];
+            imported.forEach(function(card) {
+                var signature = memoryCardSignature(card);
+                var same = pool.get(signature);
+                if (protectedSignatures.has(signature)) plan.skipped++;
+                else if (same && same.length) { kept.add(same.shift()); plan.skipped++; }
+                else unmatched.push(card);
+            });
+            var free = editable.filter(function(item) { return !kept.has(item); });
+            var patchCount = Math.min(unmatched.length, free.length);
+            plan.protectedCount = protectedCards.length;
+            plan.patches = unmatched.slice(0, patchCount).map(function(card, index) { return { target:free[index], card:card }; });
+            plan.additions = unmatched.slice(patchCount);
+            plan.deletions = free.slice(patchCount);
+        }
+        // 추가가 있으면 남는 기존 카드가 없으므로(모두 수정에 쓰임) 추가 도중의 [추가] 카드 수가 최종 수와 같다.
+        plan.userAfter = userCount - plan.deletions.filter(isUserAddedSummary).length + plan.additions.length;
+        if (plan.additions.length && plan.userAfter > MEMORY_USER_CARD_LIMIT) {
+            plan.blockReason = '[추가] 카드가 ' + plan.userAfter + '개가 되어 크랙 한도(' + MEMORY_USER_CARD_LIMIT + '개)를 넘습니다. 이 방의 [추가] 카드를 정리한 뒤 다시 시도해주세요.';
+        } else if (plan.additions.length > MEMORY_TRANSFER_MAX_CARDS) {
+            plan.blockReason = '한 번에 카드 ' + MEMORY_TRANSFER_MAX_CARDS + '개까지 추가할 수 있습니다.';
+        }
+        return plan;
+    }
+
+    // 📚 crack 요약 메모리 백업/복원과 같은 키로 단기 기억·관계·목표도 백업한다. 복원은 장기기억만 한다.
+    var MEMORY_EXTRA_TYPES = [
+        { key:'shortTerm', label:'단기 기억' },
+        { key:'relationship', label:'관계' },
+        { key:'goal', label:'목표' }
+    ];
+
+    function downloadMemoryServerBackup(cards, chatId, title, extras) {
+        var now = new Date();
+        var stamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        var label = String(title || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+        var hasExtras = !!extras && Object.keys(extras).length > 0;
+        var body = Object.assign({ longTerm:cards }, extras || {}, { chatId:chatId, title:title || '', exportedAt:now.toISOString() });
+        // 기존 복원 스크립트도 JSON.parse(file.text())를 그대로 사용하므로 BOM 없이 저장한다.
+        var blob = new Blob([JSON.stringify(body, null, 2)], { type:'application/json;charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var link = document.createElement('a');
+        link.href = url;
+        link.download = 'AutoMemory_' + (hasExtras ? '요약메모리_' : '장기기억_') + (label || chatId) + '_' + stamp + '.json';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    }
+
+    // 📚 crack 요약 메모리 백업/복원의 "장기기억 주석 복사"와 같은 투명 주석 형식: [문구]: # ( … ).
+    var MEMORY_TOOLS_TAB_KEY = 'crack_ext_memory_tools_tab';
+    var MEMORY_COMMENT_PREFIX_KEY = 'crack_ext_memory_comment_prefix';
+    var MEMORY_COMMENT_DEFAULT_PREFIX = 'When you summarize this log, NEVER summarize the contents of this comment.';
+
+    // 괄호가 주석을 닫지 않도록 # ( ) 를 T / / 로 바꾸고, 빈 줄이 주석을 끊지 않도록 한 줄로 줄인다.
+    function memoryCommentSafe(text) {
+        return String(text || '').replace(/\r\n?/g, '\n').trim().replace(/#/g, 'T').replace(/[()]/g, '/').replace(/\n\s*\n/g, '\n');
+    }
+
+    function memoryCommentPrefix(value) {
+        var prefix = String(value || '').trim().replace(/\[/g, '(').replace(/\]/g, ')');
+        return prefix || MEMORY_COMMENT_DEFAULT_PREFIX;
+    }
+
+    // cards는 오래된 것부터 넘긴다.
+    function buildMemoryCommentText(cards, prefix) {
+        var body = cards.map(function(card) {
+            return '[' + memoryCommentSafe(card.title || '(제목 없음)') + ']\n' + memoryCommentSafe(card.summary);
+        }).join('\n');
+        return '[' + memoryCommentPrefix(prefix) + ']: # (\n' + body + '\n)';
+    }
+
+    async function copyTextToClipboard(text) {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            try { await navigator.clipboard.writeText(text); return; } catch (ignored) {}
+        }
+        var area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.cssText = 'position:fixed;top:0;left:-9999px;opacity:0';
+        document.body.appendChild(area);
+        area.select();
+        var copied = false;
+        try { copied = document.execCommand('copy'); } catch (ignored) {}
+        area.remove();
+        if (!copied) throw new Error('브라우저가 클립보드 접근을 막았습니다.');
+    }
+
+    async function withManualMemoryLocks(chatIds, sourceChatId, action) {
+        if (AUTO_MEMORY_BUSY) throw new Error('다른 장기기억 작업이 진행 중입니다. 끝난 뒤 다시 시도해주세요.');
+        var ids = Array.from(new Set(chatIds.map(String).filter(Boolean))).sort();
+        var locked = [];
+        var lockLost = false;
+        var heartbeat = 0;
+        var nextLockCheckAt = 0;
+        AUTO_MEMORY_BUSY = true;
+        try {
+            for (var id of ids) {
+                if (!acquireAutoMemoryLock(id)) throw new Error('다른 탭에서 장기기억을 작업 중인 방이 있습니다. 잠시 후 다시 시도해주세요.');
+                locked.push(id);
+            }
+            var assertReady = function() {
+                if (String(getChatId() || '').toLowerCase() !== sourceChatId) throw new Error('작업 중 채팅방이 바뀌어 남은 변경을 중단했습니다.');
+                if (lockLost) throw new Error('장기기억 작업 잠금이 풀려 남은 변경을 중단했습니다.');
+                var now = Date.now();
+                if (now >= nextLockCheckAt) {
+                    if (locked.some(function(id) { return !renewAutoMemoryLock(id); })) throw new Error('장기기억 작업 잠금이 풀려 남은 변경을 중단했습니다.');
+                    nextLockCheckAt = now + 5000;
+                }
+            };
+            heartbeat = setInterval(function() {
+                if (locked.some(function(id) { return !renewAutoMemoryLock(id); })) lockLost = true;
+            }, AUTO_MEMORY_LOCK_HEARTBEAT_MS);
+            assertReady();
+            return await action(assertReady);
+        } finally {
+            if (heartbeat) clearInterval(heartbeat);
+            locked.forEach(releaseAutoMemoryLock);
+            AUTO_MEMORY_BUSY = false;
+            locked.forEach(function(id) { notifyAutoMemoryStatus(id); });
+            refreshAutoMemorySchedule(true);
+        }
+    }
+
+    function hasPendingMemoryPlan(chatId) {
+        var id = String(chatId || '');
+        if (!id) return false;
+        if (getAutoMemoryState(id).pendingApply) return true;
+        var routeChatId = String(getChatId() || '');
+        return routeChatId !== id && routeChatId.toLowerCase() === id.toLowerCase() && !!getAutoMemoryState(routeChatId).pendingApply;
+    }
+
+    // apiCall의 "Crack API 400: {…}" 오류를 화면에 보일 한 줄로 줄인다.
+    function memoryErrorText(error) {
+        var text = String(error && error.message || error || '알 수 없는 오류');
+        var match = text.match(/^Crack API (\d{3}): ([\s\S]*)$/);
+        if (!match) return text;
+        var detail = match[2].trim();
+        try {
+            var data = JSON.parse(detail);
+            var message = data && (data.message || data.error && (data.error.message || data.error));
+            if (Array.isArray(message)) message = message.join(', ');
+            if (message && typeof message === 'string') detail = message;
+        } catch (ignored) {}
+        return 'Crack API ' + match[1] + ' · ' + detail.replace(/\s+/g, ' ').slice(0, 160);
+    }
+
+    function assertMemoryMutationResponse(response) {
+        if (!response || response.success === false || /^(?:FAIL|FAILED|FAILURE|ERROR)$/i.test(String(response.result || ''))) {
+            throw new Error('서버가 장기기억 변경을 확인하지 않았습니다.');
+        }
+    }
+
+    async function addMemoryCard(chatId, card) {
+        // 크랙 웹 앱이 장기기억을 추가할 때 보내는 본문과 같은 type을 사용한다.
+        var response = await apiCall('POST', '/summaries', { type:'longTerm', title:card.title, summary:card.summary }, { strict:true, silent:true, chatId:chatId });
+        assertMemoryMutationResponse(response);
+    }
+
+    // 변경 뒤 목록을 한 번만 다시 읽어 수정·삭제·추가 결과를 모두 확인한다.
+    async function verifyMemoryPlan(chatId, plan, beforeCards) {
+        var after = await fetchSummaries({ strict:true, silent:true, chatId:chatId });
+        var afterById = new Map(after.map(function(item) { return [String(getSummaryId(item) || ''), item]; }));
+        var expectedIds = new Set((beforeCards || []).map(function(item) { return String(getSummaryId(item) || ''); }).filter(Boolean));
+        (plan.deletions || []).forEach(function(item) {
+            var id = String(getSummaryId(item) || '');
+            expectedIds.delete(id);
+            if (afterById.has(id)) throw new Error('삭제 결과를 확인하지 못했습니다: ' + item.title);
+        });
+        (plan.patches || []).forEach(function(patch) {
+            var live = afterById.get(String(getSummaryId(patch.target) || ''));
+            if (!live || memoryCardSignature(live) !== memoryCardSignature(patch.card)) throw new Error('수정 결과를 확인하지 못했습니다: ' + patch.card.title);
+        });
+        var fresh = new Map();
+        after.forEach(function(item) {
+            if (expectedIds.has(String(getSummaryId(item) || ''))) return;
+            var signature = memoryCardSignature(item);
+            fresh.set(signature, (fresh.get(signature) || 0) + 1);
+        });
+        (plan.additions || []).forEach(function(card) {
+            var signature = memoryCardSignature(card);
+            var count = fresh.get(signature) || 0;
+            if (!count) throw new Error('추가 결과를 확인하지 못했습니다: ' + card.title);
+            fresh.set(signature, count - 1);
+        });
+    }
+
+    async function applyMemoryImportPlan(chatId, plan, beforeCards, assertReady, onProgress, result) {
+        result = result || { patched:0, added:0, deleted:0, skipped:plan.skipped };
+        var requestOptions = { strict:true, silent:true, chatId:chatId };
+        for (var i = 0; i < plan.patches.length; i++) {
+            assertReady();
+            var patch = plan.patches[i];
+            onProgress('덮어쓰기 ' + (i + 1) + '/' + plan.patches.length);
+            assertMemoryMutationResponse(await updateExistingSummary(patch.target, patch.card.title, patch.card.summary, requestOptions));
+            result.patched++;
+        }
+        for (var j = 0; j < plan.additions.length; j++) {
+            assertReady();
+            onProgress('추가 ' + (j + 1) + '/' + plan.additions.length);
+            await addMemoryCard(chatId, plan.additions[j]);
+            result.added++;
+            if (j < plan.additions.length - 1) await pauseMs(MEMORY_WRITE_GAP_MS);
+        }
+        for (var k = 0; k < plan.deletions.length; k++) {
+            assertReady();
+            onProgress('남는 카드 삭제 ' + (k + 1) + '/' + plan.deletions.length);
+            assertMemoryMutationResponse(await deleteExistingSummary(plan.deletions[k], requestOptions));
+            result.deleted++;
+        }
+        onProgress('서버 반영 확인 중');
+        await verifyMemoryPlan(chatId, plan, beforeCards);
+        return result;
+    }
+
+    function refreshNativeMemoryDialog() {
+        var dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(function(el) {
+            return !el.closest('.crack-ext-ai-overlay, .crack-ext-ui-dialog-overlay');
+        });
+        if (dialog) refreshCurrentTab(dialog);
+    }
+
+    function memoryRoomId(room) {
+        var id = String(room && (room._id || room.id) || '').toLowerCase();
+        return /^[a-f0-9-]{10,}$/.test(id) ? id : '';
+    }
+    function memoryRoomStoryId(room) {
+        return String(room && (room.story && (room.story._id || room.story.id) || room.storyId) || '').toLowerCase();
+    }
+    function memoryRoomTitle(room) {
+        return String(room && (room.title || room.story && room.story.name) || '').trim() || '제목 없음';
+    }
+    function memoryRoomStoryName(room) {
+        return String(room && room.story && room.story.name || '').trim() || '작품명 없음';
+    }
+    function memoryRoomTime(room) {
+        var time = Date.parse(room && (room.messagedAt || room.updatedAt || room.createdAt) || '');
+        return Number.isFinite(time) ? time : 0;
+    }
+    function memoryRoomThumb(room) {
+        var image = room && room.story && room.story.profileImage;
+        var url = String(image && (image.w200 || image.w600 || image.origin) || '');
+        return /^https:\/\/[^\s"'<>]+$/i.test(url) ? url : '';
+    }
+    function formatMemoryRoomTime(time) {
+        if (!time) return '';
+        var diff = Date.now() - time;
+        if (diff < 60000) return '방금';
+        if (diff < 3600000) return Math.floor(diff / 60000) + '분 전';
+        if (diff < 86400000) return Math.floor(diff / 3600000) + '시간 전';
+        if (diff < 30 * 86400000) return Math.floor(diff / 86400000) + '일 전';
+        var date = new Date(time);
+        return date.getFullYear() + '.' + String(date.getMonth() + 1).padStart(2, '0') + '.' + String(date.getDate()).padStart(2, '0');
+    }
+
+    async function readCrackErrorDetail(response) {
+        try {
+            var raw = await response.text();
+            if (!raw) return '';
+            try {
+                var data = JSON.parse(raw);
+                var message = data && (data.message || data.error && (data.error.message || data.error));
+                if (Array.isArray(message)) message = message.join(', ');
+                if (message && typeof message === 'string') return message.slice(0, 160);
+            } catch (ignored) {}
+            return raw.replace(/\s+/g, ' ').slice(0, 160);
+        } catch (error) {
+            return '';
+        }
+    }
+
+    // folderId 없이 부르면 보관함 방까지 포함한 전체 목록이 최근 대화 순으로 온다.
+    // onBatch(새 방 목록)가 false를 돌려주면 읽기를 멈춘다.
+    async function fetchMemoryTransferRooms(onBatch) {
+        var token = getToken();
+        if (!token) throw new Error('로그인 정보를 찾지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해주세요.');
+        var headers = { 'Authorization':'Bearer ' + token, 'Accept':'application/json' };
+        var rooms = [];
+        var seen = new Set();
+        var cursors = new Set();
+        var cursor = '';
+        for (var page = 0; page < MEMORY_ROOM_MAX_PAGES; page++) {
+            var response = await fetch(API_BASE + '?limit=' + MEMORY_ROOM_PAGE_SIZE + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), { method:'GET', headers:headers });
+            if (!response.ok) {
+                var detail = await readCrackErrorDetail(response);
+                throw new Error('채팅방 목록 API ' + response.status + ' 오류' + (detail ? ' (' + detail + ')' : ''));
+            }
+            var payload = await response.json();
+            if (!payload || payload.success === false || /^(?:FAIL|FAILED|FAILURE|ERROR)$/i.test(String(payload.result || ''))) throw new Error('채팅방 목록 API가 요청을 거부했습니다.');
+            var data = payload.data || payload;
+            if (!data || !Array.isArray(data.chats)) throw new Error('채팅방 목록 응답 형식이 올바르지 않습니다.');
+            var fresh = [];
+            data.chats.forEach(function(room) {
+                var id = memoryRoomId(room);
+                if (!id || seen.has(id)) return;
+                seen.add(id);
+                rooms.push(room);
+                fresh.push(room);
+            });
+            var next = String(data.nextCursor || (data.pageInfo && data.pageInfo.nextCursor) || (data.pagination && data.pagination.nextCursor) || '');
+            var stalled = !!next && (!data.chats.length || cursors.has(next));
+            var done = !next || stalled;
+            if (onBatch && onBatch(fresh, done) === false) return null;
+            if (done) return { rooms:rooms, complete:!stalled && data.hasNext !== true };
+            cursors.add(next);
+            cursor = next;
+        }
+        return { rooms:rooms, complete:false };
+    }
 
 async function fetchRecentMessageObjects(limit, options) {
     options = options || {};
@@ -2343,15 +2835,15 @@ try {
 .crack-ext-auto-field input[type="number"]{height:40px!important;padding:8px 10px!important;font-variant-numeric:tabular-nums}
 .crack-ext-auto-toggle-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:16px 0 0}
 .crack-ext-auto-check{display:inline-flex!important;align-items:center!important;justify-content:flex-start!important;gap:8px!important;width:auto!important;margin:0!important;color:var(--ce-ink-dim,#555)!important;font-size:.875rem!important;font-weight:600!important}
-.crack-ext-auto-check input[type="checkbox"]{width:18px!important;height:18px!important;min-width:18px!important;margin:0!important;padding:0!important;accent-color:var(--ce-sage,#4f8069)}
+.crack-ext-auto-check input[type="checkbox"]{width:18px!important;height:18px!important;min-width:18px!important;margin:0!important;padding:0!important;accent-color:var(--ce-amber,#FF4432)}
 .crack-ext-entry-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0 0 16px;padding:8px 16px;border:1px solid var(--ce-line-soft,#eee);border-radius:10px;background:var(--ce-panel-2,#fafafa)}
 .crack-ext-entry-toggle-note{min-width:0;color:var(--ce-ink-faint,#777);font-size:.875rem;line-height:1.6;text-align:right;word-break:keep-all}
 @media(max-width:430px){.crack-ext-entry-toggle-row{align-items:flex-start;flex-direction:column;gap:8px}.crack-ext-entry-toggle-note{text-align:left}}
-.crack-ext-auto-note{margin:16px 0 0;padding:12px 16px;border-left:3px solid var(--ce-sage,#4f8069);background:var(--ce-sage-glow,rgba(79,128,105,.13));color:var(--ce-ink-dim,#555);font-size:.875rem;line-height:1.6}
+.crack-ext-auto-note{margin:16px 0 0;padding:12px 16px;border-radius:8px;background:var(--ce-panel-2,#F7F7F5);color:var(--ce-ink-dim,#555);font-size:.875rem;line-height:1.6}
 .crack-ext-auto-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:16px}
 .crack-ext-auto-status{flex:1 1 240px;min-width:0;color:var(--ce-ink-faint,#777);font-size:.875rem;line-height:1.6;word-break:break-word}
 .crack-ext-auto-usage{margin-top:10px;padding-top:10px;border-top:1px dashed var(--ce-line-soft,#eee);color:var(--ce-ink-dim,#555);font-size:.8125rem;line-height:1.55;word-break:break-word;font-variant-numeric:tabular-nums}
-#ce-auto-run:not(:disabled){background:var(--ce-sage-glow,rgba(79,128,105,.13))!important;color:var(--ce-sage,#4f8069)!important;border-color:color-mix(in srgb,var(--ce-sage,#4f8069) 42%,transparent)!important}
+#ce-auto-run:not(:disabled){background:var(--ce-sage-glow,#E6F2FF)!important;color:var(--ce-sage,#0C6ACF)!important;border-color:color-mix(in srgb,var(--ce-sage,#0C6ACF) 42%,transparent)!important}
 @media(max-width:760px){.crack-ext-auto-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.crack-ext-auto-summary-status{display:none}}
 @media(max-width:430px){.crack-ext-auto-grid{grid-template-columns:1fr}.crack-ext-auto-actions .crack-ext-ai-mbtn{flex:1 1 auto}.crack-ext-auto-status{flex-basis:100%}}
 #ce-ai-preview-container{margin-top:10px}
@@ -2450,6 +2942,88 @@ try {
 .crack-ext-editor-danger:hover{background:#fff1f2!important}
 .crack-ext-editor-restore{font-size:11px!important;padding:5px 9px!important}
 .crack-ext-editor-empty{text-align:center;padding:40px 10px;color:#999}
+.ce-memory-tools-modal{width:760px!important}
+.ce-memory-tools-modal [hidden]{display:none!important}
+.ce-memory-tools-section{border:1px solid var(--ce-line,#e5e7eb);border-radius:12px;padding:16px;margin:12px 0;background:var(--ce-card,#fff)}
+.ce-memory-tools-section:first-child{margin-top:0}
+.ce-memory-tools-section h4{margin:0 0 8px;color:var(--ce-ink,#222);font-size:14px}
+.ce-memory-tools-note{font-size:12px;line-height:1.6;color:var(--ce-ink-dim,#666);margin:6px 0 12px}
+.ce-memory-tools-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ce-memory-tools-row input[type=file]{flex:1 1 220px;min-width:0}
+.ce-memory-tools-preview,.ce-memory-tools-status{white-space:pre-wrap;line-height:1.55;font-size:12px;color:var(--ce-ink-dim,#666);margin-top:10px}
+.ce-memory-tools-preview{max-height:220px;overflow:auto}
+.ce-memory-tools-status{min-height:18px;color:var(--ce-ink,#222)}
+.crack-ext-ai-modal .ce-mt-check{margin:10px 0!important}
+.ce-mt-tabs{display:flex;gap:22px;margin:0 0 16px;padding:0;border:0;border-bottom:1px solid var(--ce-line,#DBDAD5);border-radius:0;background:transparent}
+.ce-mt-tab{flex:0 0 auto;min-height:40px;padding:0 2px!important;border:0!important;border-bottom:2px solid transparent!important;border-radius:0!important;background:transparent!important;color:var(--ce-ink-dim,#42413D)!important;font:inherit!important;font-size:14px!important;font-weight:600!important;cursor:pointer;transition:color .2s,border-color .2s}
+.ce-mt-tab:hover:not(:disabled){color:var(--ce-ink,#222)!important}
+.ce-mt-tab[aria-selected="true"]{color:var(--ce-ink,#1A1918)!important;border-bottom-color:var(--ce-amber,#FF4432)!important}
+.ce-mt-tab:disabled,.ce-mt-seg button:disabled,.ce-mt-scope button:disabled{cursor:not-allowed;opacity:.5}
+.ce-mt-seg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 10px}
+.ce-mt-seg button{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0;padding:10px 12px!important;border:1px solid var(--ce-line,#ddd)!important;border-radius:10px!important;background:var(--ce-card,#fff)!important;color:var(--ce-ink,#222)!important;font:inherit!important;text-align:left;cursor:pointer;transition:border-color .2s,background .2s}
+.ce-mt-seg strong{font-size:13.5px;font-weight:700}
+.ce-mt-seg small{color:var(--ce-ink-faint,#888);font-size:11.5px;font-weight:500}
+.ce-mt-seg button[aria-checked="true"]{border-color:var(--ce-amber,#FF4432)!important;background:var(--ce-amber-glow,#FFEDEA)!important}
+.ce-mt-seg button[aria-checked="true"] small{color:var(--ce-ink-dim,#666)}
+.ce-mt-lead{margin:0 0 4px;color:var(--ce-ink-dim,#666);font-size:12.5px;line-height:1.6}
+.ce-mt-meta{margin:0 0 12px;color:var(--ce-ink-faint,#888);font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
+.ce-mt-filter{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ce-mt-scope{display:inline-flex;flex:0 0 auto;padding:3px;border:1px solid var(--ce-line,#ddd);border-radius:9px;background:var(--ce-bg,#fafafa)}
+.ce-mt-scope button{min-height:32px;padding:5px 11px!important;border:0!important;border-radius:7px!important;background:transparent!important;color:var(--ce-ink-dim,#666)!important;font:inherit!important;font-size:12.5px!important;font-weight:650!important;white-space:nowrap;cursor:pointer}
+.ce-mt-scope button[aria-checked="true"]{background:var(--ce-card,#fff)!important;color:var(--ce-ink,#222)!important;box-shadow:inset 0 0 0 1px var(--ce-line,#ddd),0 1px 4px color-mix(in srgb,var(--ce-ink,#222) 12%,transparent)}
+.crack-ext-ai-modal #ce-mt-search{flex:1 1 180px;width:auto!important;min-width:0}
+.ce-mt-icon-btn{flex:0 0 auto;width:36px;min-width:36px;height:36px;padding:0!important}
+.ce-mt-listhead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:12px 0 6px;color:var(--ce-ink-faint,#888);font-size:12px;font-variant-numeric:tabular-nums}
+.ce-mt-link{padding:2px 4px!important;border:0!important;background:transparent!important;color:var(--ce-accent-text,#C33228)!important;font:inherit!important;font-size:12px!important;font-weight:650!important;cursor:pointer}
+.ce-mt-list{max-height:min(46vh,380px);overflow:auto;border:1px solid var(--ce-line,#ddd);border-radius:10px;background:var(--ce-bg,#fafafa);overscroll-behavior:contain}
+.crack-ext-ai-modal .ce-mt-room{display:flex!important;align-items:center!important;justify-content:flex-start!important;gap:10px!important;margin:0!important;padding:9px 12px!important;border-bottom:1px solid var(--ce-line-soft,#eee);color:var(--ce-ink,#222)!important;font-size:13px!important;font-weight:500!important;letter-spacing:0!important;line-height:1.35;cursor:pointer;transition:background .15s}
+.ce-mt-room:last-of-type{border-bottom:0}
+.ce-mt-room:hover{background:var(--ce-card,#fff)}
+.ce-mt-room.is-checked{background:var(--ce-amber-glow,#FFEDEA)}
+.ce-mt-room input[type=checkbox]{flex:0 0 auto!important;width:18px!important;height:18px!important;min-width:18px!important;min-height:18px!important;margin:0!important;padding:0!important}
+.ce-mt-thumb{flex:0 0 auto;width:36px;height:36px;border-radius:8px;object-fit:cover;background:var(--ce-card-hi,#eee)}
+.ce-mt-thumb.is-empty{display:grid;place-items:center;color:var(--ce-ink-faint,#888);font-size:14px;font-weight:700}
+.ce-mt-room-main{display:flex;flex:1 1 auto;flex-direction:column;gap:2px;min-width:0}
+.ce-mt-room-title,.ce-mt-room-meta,.ce-mt-room-snippet{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ce-mt-room-title{color:var(--ce-ink,#222);font-weight:650}
+.ce-mt-room-meta{color:var(--ce-ink-faint,#888);font-size:11.5px;font-variant-numeric:tabular-nums}
+.ce-mt-room-snippet{color:var(--ce-ink-dim,#666);font-size:11.5px}
+.ce-mt-order{flex:0 0 auto;display:grid;place-items:center;min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--ce-primary,#0D0D0C);color:var(--ce-on-primary,#FCFCFA);font-size:11px;font-weight:700}
+.ce-mt-empty{padding:28px 16px;color:var(--ce-ink-faint,#888);font-size:12.5px;line-height:1.6;text-align:center}
+.ce-mt-more{display:block;width:100%;padding:11px!important;border:0!important;border-top:1px solid var(--ce-line-soft,#eee)!important;background:transparent!important;color:var(--ce-accent-text,#C33228)!important;font:inherit!important;font-size:12.5px!important;font-weight:650!important;cursor:pointer}
+.ce-mt-plan{padding:14px 16px;border:1px solid var(--ce-line,#ddd);border-radius:12px;background:var(--ce-card,#fff)}
+.ce-mt-plan-head{margin:0 0 6px;color:var(--ce-ink,#222);font-size:14px;font-weight:700}
+.ce-mt-plan-note{margin:0 0 10px;color:var(--ce-ink-dim,#666);font-size:12px;line-height:1.6}
+.ce-mt-plan-list{max-height:min(40vh,320px);margin:0;padding:0;overflow:auto;list-style:none}
+.ce-mt-plan-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--ce-line-soft,#eee);font-size:12.5px}
+.ce-mt-plan-row:first-child{border-top:0}
+.ce-mt-plan-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ce-ink,#222);font-weight:600}
+.ce-mt-plan-state{flex:0 1 auto;max-width:62%;color:var(--ce-ink-dim,#666);text-align:right;font-variant-numeric:tabular-nums}
+.ce-mt-plan-row.is-skip .ce-mt-plan-state,.ce-mt-plan-row.is-aborted .ce-mt-plan-state{color:var(--ce-ink-faint,#888)}
+.ce-mt-plan-row.is-running .ce-mt-plan-state{color:var(--ce-ink,#1A1918);font-weight:600}
+.ce-mt-plan-row.is-done .ce-mt-plan-state{color:var(--ce-sage,#0C6ACF)}
+.ce-mt-plan-row.is-error .ce-mt-plan-state{color:var(--ce-rose,#b95146)}
+.ce-mt-plan-warn{margin:10px 0 0;padding:9px 12px;border:1px solid color-mix(in srgb,var(--ce-rose,#C33228) 30%,transparent);border-radius:8px;background:var(--ce-rose-glow,#FCECE9);color:var(--ce-ink,#222);font-size:12px;line-height:1.55}
+.ce-mt-plan-warn.is-soft{border-color:var(--ce-line,#DBDAD5);background:var(--ce-panel-2,#F7F7F5)}
+.ce-mt-status{min-height:18px;margin-top:10px;color:var(--ce-ink,#222);font-size:12px;line-height:1.55;white-space:pre-wrap}
+#ce-mt-pane-comment .ce-mt-lead{margin-bottom:12px}
+.ce-mc-badge{flex:0 0 auto;padding:2px 8px;border-radius:999px;background:var(--ce-sage-glow,#E6F2FF);color:var(--ce-sage,#0C6ACF);font-size:11px;font-weight:700}
+@media(max-width:520px){
+.ce-mt-seg button{padding:9px 10px!important}
+.ce-mt-seg small{font-size:11px}
+.ce-mt-scope{flex:1 1 100%}
+.ce-mt-scope button{flex:1 1 0}
+.ce-mt-list{max-height:min(52vh,420px)}
+.ce-mt-plan-row{flex-direction:column;gap:2px}
+.ce-mt-plan-name{width:100%}
+.ce-mt-plan-state{max-width:none;text-align:left}
+}
+@media(pointer:coarse){
+.ce-mt-tab{min-height:44px}
+.ce-mt-scope button{min-height:40px}
+.ce-mt-icon-btn{width:44px;min-width:44px;height:44px}
+.crack-ext-ai-modal .ce-mt-room{min-height:56px}
+}
 @media(max-width:760px){
 .crack-ext-ai-overlay{padding:8px;box-sizing:border-box}
 .crack-ext-ai-modal{width:calc(100vw - 16px)!important;max-width:none!important;max-height:calc(100vh - 16px)!important;max-height:calc(100dvh - 16px)!important;padding:16px!important;border-radius:14px;box-sizing:border-box}
@@ -2505,33 +3079,38 @@ try {
 @media(max-width:480px){.crack-ext-ui-dialog-message{max-height:42vh}.crack-ext-toast{top:max(12px,env(safe-area-inset-top));max-width:calc(100vw - 24px);padding:10px 14px}}
 
 /* ==========================================================
-   기억 서고 테마 — 원본 기능·문구·폰트 유지
+   순정 블렌드 테마 — 크랙 화면의 색·선·글자 단계를 그대로 쓴다 (원본 기능·문구·폰트 유지)
    ========================================================== */
 .crack-ext-ai-overlay,
 .crack-ext-ui-dialog-overlay,
 .crack-ext-toast{
---ce-bg:#F3EDE2;
---ce-panel:#FFFBF4;
---ce-panel-2:#F8F0E4;
---ce-card:#FBF5EA;
---ce-card-hi:#F2E8D9;
---ce-line:#D8CAB7;
---ce-line-soft:#E8DDCE;
---ce-ink:#362E25;
---ce-ink-dim:#746858;
---ce-ink-faint:#9A8C7A;
---ce-amber:#B67822;
---ce-amber-deep:#8F5B18;
---ce-amber-glow:rgba(182,120,34,.14);
---ce-sage:#4F8069;
---ce-sage-deep:#3B6854;
---ce-sage-glow:rgba(79,128,105,.13);
+/* 이름은 예전 테마 그대로 두고 역할만 바꾼다: amber = 크랙 브랜드 빨강(선택·표시), sage = 크랙 파랑(보조 동작·완료), rose = 위험 */
+--ce-bg:#F7F7F5;
+--ce-panel:#FFFFFF;
+--ce-panel-2:#F7F7F5;
+--ce-card:#FFFFFF;
+--ce-card-hi:#F0EFEB;
+--ce-line:#DBDAD5;
+--ce-line-soft:#E5E5E1;
+--ce-ink:#1A1918;
+--ce-ink-dim:#42413D;
+--ce-ink-faint:#61605A;
+--ce-amber:#FF4432;
+--ce-amber-deep:#C33228;
+--ce-amber-glow:#FFEDEA;
+--ce-accent-text:#C33228;
+--ce-primary:#0D0D0C;
+--ce-on-primary:#FCFCFA;
+--ce-sage:#0C6ACF;
+--ce-sage-deep:#0A5299;
+--ce-sage-glow:#E6F2FF;
 --ce-on-sage:#FFFFFF;
---ce-rose:#B95146;
---ce-rose-deep:#923B33;
---ce-rose-glow:rgba(185,81,70,.11);
---ce-overlay:rgba(38,29,19,.48);
---ce-shadow:0 24px 70px rgba(61,43,23,.24),0 0 0 1px rgba(86,61,31,.06);
+--ce-rose:#C33228;
+--ce-rose-deep:#81433A;
+--ce-rose-glow:#FCECE9;
+--ce-warn:#FFA600;
+--ce-overlay:rgba(26,25,24,.6);
+--ce-shadow:0 16px 48px rgba(13,13,12,.18);
 --ce-scheme:light;
 }
 body[data-theme="dark"] .crack-ext-ai-overlay,
@@ -2543,28 +3122,32 @@ html[data-theme="dark"] .crack-ext-toast,
 html[data-sgb-theme="dark"] .crack-ext-ai-overlay,
 html[data-sgb-theme="dark"] .crack-ext-ui-dialog-overlay,
 html[data-sgb-theme="dark"] .crack-ext-toast{
---ce-bg:#14120F;
---ce-panel:#1D1A15;
---ce-panel-2:#211D17;
---ce-card:#262119;
---ce-card-hi:#2C2720;
---ce-line:#3B342A;
---ce-line-soft:#2E2921;
---ce-ink:#EDE5D6;
---ce-ink-dim:#A79B85;
---ce-ink-faint:#756B5C;
---ce-amber:#E2A84B;
---ce-amber-deep:#B87F2C;
---ce-amber-glow:rgba(226,168,75,.16);
---ce-sage:#8FB8A0;
---ce-sage-deep:#6E9A84;
---ce-sage-glow:rgba(143,184,160,.14);
---ce-on-sage:#102018;
---ce-rose:#D97B6C;
---ce-rose-deep:#B85D51;
---ce-rose-glow:rgba(217,123,108,.12);
---ce-overlay:rgba(5,4,3,.64);
---ce-shadow:0 24px 70px rgba(0,0,0,.5),0 0 0 1px rgba(0,0,0,.3);
+--ce-bg:#2E2D2B;
+--ce-panel:#242321;
+--ce-panel-2:#1A1918;
+--ce-card:#2E2D2B;
+--ce-card-hi:#42413D;
+--ce-line:#42413D;
+--ce-line-soft:#2E2D2B;
+--ce-ink:#F0EFEB;
+--ce-ink-dim:#C7C5BD;
+--ce-ink-faint:#A8A69D;
+--ce-amber:#FF6352;
+--ce-amber-deep:#C33228;
+--ce-amber-glow:#311816;
+--ce-accent-text:#FF6352;
+--ce-primary:#FCFCFA;
+--ce-on-primary:#0D0D0C;
+--ce-sage:#94C9F9;
+--ce-sage-deep:#64B0F7;
+--ce-sage-glow:#102737;
+--ce-on-sage:#0D0D0C;
+--ce-rose:#FDBAAF;
+--ce-rose-deep:#FFDCD7;
+--ce-rose-glow:#442928;
+--ce-warn:#FFB938;
+--ce-overlay:rgba(26,25,24,.7);
+--ce-shadow:0 16px 48px rgba(0,0,0,.5);
 --ce-scheme:dark;
 }
 .crack-ext-ai-overlay *,
@@ -2576,10 +3159,10 @@ html[data-sgb-theme="dark"] .crack-ext-toast{
 .crack-ext-ai-overlay{background:var(--ce-overlay)!important;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);padding:18px}
 .crack-ext-ai-modal{
 position:relative;
-background:radial-gradient(ellipse 720px 320px at 76% -12%,var(--ce-amber-glow),transparent 64%),var(--ce-panel)!important;
+background:var(--ce-panel)!important;
 color:var(--ce-ink)!important;
 border:1px solid var(--ce-line)!important;
-border-radius:14px!important;
+border-radius:16px!important;
 padding:24px!important;
 box-shadow:var(--ce-shadow)!important;
 color-scheme:var(--ce-scheme);
@@ -2598,24 +3181,9 @@ gap:14px;
 margin:-24px -24px 20px!important;
 padding:20px 22px 18px!important;
 border-bottom:1px solid var(--ce-line-soft);
-background:linear-gradient(180deg,var(--ce-panel-2),var(--ce-panel));
+background:transparent;
 overflow:hidden;
 }
-.crack-ext-ai-modal-header::after{
-content:"";
-position:absolute;
-inset:0;
-z-index:-1;
-pointer-events:none;
-background:var(--ce-amber);
-opacity:.38;
--webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 700 74' preserveAspectRatio='none'%3E%3Cpath d='M-10 58C120 30 190 64 300 42S520 18 710 40' fill='none' stroke='black' stroke-width='1.2'/%3E%3Ccircle cx='140' cy='44' r='2.6'/%3E%3Ccircle cx='300' cy='42' r='2.6'/%3E%3Ccircle cx='470' cy='30' r='2.6'/%3E%3Ccircle cx='620' cy='36' r='2.6'/%3E%3C/svg%3E") center/100% 100% no-repeat;
-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 700 74' preserveAspectRatio='none'%3E%3Cpath d='M-10 58C120 30 190 64 300 42S520 18 710 40' fill='none' stroke='black' stroke-width='1.2'/%3E%3Ccircle cx='140' cy='44' r='2.6'/%3E%3Ccircle cx='300' cy='42' r='2.6'/%3E%3Ccircle cx='470' cy='30' r='2.6'/%3E%3Ccircle cx='620' cy='36' r='2.6'/%3E%3C/svg%3E") center/100% 100% no-repeat;
-transform-origin:left center;
-animation:ce-thread-in 1.35s ease both .12s;
-}
-.crack-ext-compress-modal .crack-ext-ai-modal-header::after{background:var(--ce-sage)}
-@keyframes ce-thread-in{from{opacity:0;transform:scaleX(.08)}to{opacity:.38;transform:scaleX(1)}}
 .crack-ext-ai-modal-header h3{
 position:relative;
 z-index:1;
@@ -2635,8 +3203,8 @@ place-items:center;
 flex:0 0 auto;
 width:36px;
 height:36px;
-border:1px solid color-mix(in srgb,var(--ce-amber) 34%,transparent);
-border-radius:10px;
+border:0;
+border-radius:50%;
 background:var(--ce-amber-glow);
 color:var(--ce-amber);
 font-size:17px;
@@ -2659,7 +3227,7 @@ transition:color .2s,background .2s,transform .2s!important;
 }
 .crack-ext-ai-close-btn:hover{background:color-mix(in srgb,var(--ce-ink) 7%,transparent)!important;color:var(--ce-ink)!important;opacity:1!important;transform:rotate(90deg)}
 .crack-ext-ai-close-btn:focus-visible,.crack-ext-ai-modal :focus-visible,.crack-ext-ui-dialog :focus-visible{outline:2px solid var(--ce-amber)!important;outline-offset:2px}
-.crack-ext-ai-modal label{color:var(--ce-ink-dim)!important;font-size:11px!important;font-weight:650!important;letter-spacing:.055em;margin-bottom:6px!important}
+.crack-ext-ai-modal label{color:var(--ce-ink-dim)!important;font-size:12px!important;font-weight:600!important;letter-spacing:0;margin-bottom:6px!important}
 .crack-ext-ai-modal input:not([type="checkbox"]),
 .crack-ext-ai-modal textarea,
 .crack-ext-ai-modal select,
@@ -2667,7 +3235,7 @@ transition:color .2s,background .2s,transform .2s!important;
 background:var(--ce-bg)!important;
 color:var(--ce-ink)!important;
 border:1px solid var(--ce-line)!important;
-border-radius:9px!important;
+border-radius:8px!important;
 font-family:inherit!important;
 font-size:13px!important;
 transition:border-color .2s,box-shadow .2s,background .2s!important;
@@ -2678,7 +3246,7 @@ transition:border-color .2s,box-shadow .2s,background .2s!important;
 .crack-ext-ui-dialog input:focus{outline:none!important;border-color:var(--ce-amber)!important;box-shadow:0 0 0 3px var(--ce-amber-glow)!important}
 .crack-ext-ai-modal input::placeholder,.crack-ext-ai-modal textarea::placeholder,.crack-ext-ui-dialog input::placeholder{color:var(--ce-ink-faint)!important}
 .crack-ext-ai-modal select option{background:var(--ce-bg)!important;color:var(--ce-ink)!important}
-.crack-ext-ai-modal input[type="checkbox"]{accent-color:var(--ce-sage)}
+.crack-ext-ai-modal input[type="checkbox"]{accent-color:var(--ce-amber)}
 .crack-ext-ai-modal input:disabled,.crack-ext-ai-modal textarea:disabled,.crack-ext-ai-modal select:disabled{opacity:.48!important;cursor:not-allowed}
 #ce-ai-result{min-height:150px;resize:vertical;line-height:1.7;padding:14px!important}
 #ce-ai-top-settings{display:grid;grid-template-columns:1.2fr 2fr 1.5fr .8fr;gap:12px;margin-bottom:12px}
@@ -2731,7 +3299,7 @@ height:13px!important;
 
 .crack-ext-turn-info-btn:hover,
 .crack-ext-turn-info-btn[aria-expanded="true"]{
-color:var(--ce-amber)!important;
+color:var(--ce-accent-text)!important;
 background:var(--ce-amber-glow)!important;
 }
 
@@ -2790,7 +3358,7 @@ white-space:nowrap;
 }
 
 .crack-ext-turn-info-popover b{
-color:var(--ce-amber);
+color:var(--ce-accent-text);
 font-weight:750;
 }
 
@@ -2830,7 +3398,7 @@ background:var(--ce-panel-2)!important;
 border:1px solid var(--ce-line)!important;
 background:var(--ce-card)!important;
 color:var(--ce-ink)!important;
-border-radius:9px!important;
+border-radius:8px!important;
 font-family:inherit!important;
 font-weight:650!important;
 box-shadow:none!important;
@@ -2843,26 +3411,26 @@ transition:transform .15s ease,box-shadow .2s,border-color .2s,background .2s,co
 .crack-ext-ai-mbtn:hover,.crack-ext-export-btn:hover,#ce-ai-card-nav button:hover{background:var(--ce-card-hi)!important;border-color:var(--ce-ink-faint)!important;transform:translateY(-1px)}
 .crack-ext-ai-mbtn:active,.crack-ext-export-btn:active,#ce-ai-card-nav button:active{transform:translateY(0)}
 .crack-ext-ai-mbtn-p:not(:disabled),#ce-ai-generate:not(:disabled),#ce-editor-save:not(:disabled){
-background:linear-gradient(160deg,var(--ce-amber),var(--ce-amber-deep))!important;
-color:#1B150A!important;
+background:var(--ce-primary)!important;
+color:var(--ce-on-primary)!important;
 border-color:transparent!important;
-box-shadow:0 3px 14px var(--ce-amber-glow)!important;
+box-shadow:none!important;
 }
-.crack-ext-ai-mbtn-p:not(:disabled):hover,#ce-ai-generate:not(:disabled):hover,#ce-editor-save:not(:disabled):hover{box-shadow:0 5px 22px var(--ce-amber-glow)!important}
+.crack-ext-ai-mbtn-p:not(:disabled):hover,#ce-ai-generate:not(:disabled):hover,#ce-editor-save:not(:disabled):hover{box-shadow:0 6px 16px rgba(0,0,0,.22)!important}
 #ce-ai-compress-btn:not(:disabled){background:var(--ce-sage-glow)!important;color:var(--ce-sage)!important;border-color:color-mix(in srgb,var(--ce-sage) 42%,transparent)!important}
-#ce-compress-start:not(:disabled){background:linear-gradient(160deg,var(--ce-sage),var(--ce-sage-deep))!important;color:var(--ce-on-sage)!important;border-color:transparent!important;box-shadow:0 3px 14px var(--ce-sage-glow)!important}
+#ce-compress-start:not(:disabled){background:var(--ce-sage)!important;color:var(--ce-on-sage)!important;border-color:transparent!important;box-shadow:none!important}
 #ce-compress-back,#ce-editor-back,#ce-ai-prompt-back{background:transparent!important;border-color:transparent!important;color:var(--ce-ink-dim)!important}
 #ce-compress-back:hover,#ce-editor-back:hover,#ce-ai-prompt-back:hover{background:color-mix(in srgb,var(--ce-ink) 6%,transparent)!important;color:var(--ce-ink)!important}
 .crack-ext-editor-danger,.crack-ext-prompt-icon-btn.is-delete{background:transparent!important;color:var(--ce-rose)!important;border-color:color-mix(in srgb,var(--ce-rose) 48%,transparent)!important}
 .crack-ext-editor-danger:hover,.crack-ext-prompt-icon-btn.is-delete:hover{background:var(--ce-rose-glow)!important;color:var(--ce-rose-deep)!important}
-.crack-ext-ai-mbtn-save{background:var(--ce-sage)!important;color:#102018!important;border-color:transparent!important}
+.crack-ext-ai-mbtn-save{background:var(--ce-sage)!important;color:var(--ce-on-sage)!important;border-color:transparent!important}
 .crack-ext-ai-mbtn:disabled,.crack-ext-ai-mbtn-p:disabled,.crack-ext-export-btn:disabled{background:var(--ce-line-soft)!important;color:var(--ce-ink-faint)!important;border-color:var(--ce-line-soft)!important;box-shadow:none!important;cursor:not-allowed;transform:none;opacity:.68}
 #ce-ai-generate:disabled{position:relative;overflow:hidden}
 #ce-ai-generate:disabled::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,color-mix(in srgb,var(--ce-ink) 22%,transparent) 50%,transparent 70%);animation:ce-shimmer 1.35s linear infinite}
 @keyframes ce-shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
 .crack-ext-export-actions{gap:6px}
 .crack-ext-export-btn{padding:7px 13px;border-radius:999px!important;background:transparent!important;color:var(--ce-ink-dim)!important}
-.crack-ext-export-btn:hover{color:var(--ce-amber)!important;border-color:var(--ce-amber-deep)!important}
+.crack-ext-export-btn:hover{color:var(--ce-ink)!important}
 .crack-ext-prompt-header{margin-bottom:8px;gap:12px}
 .crack-ext-prompt-heading-main{display:inline-flex;align-items:center;gap:9px;color:var(--ce-ink)!important;font-size:15px;font-weight:700}
 .crack-ext-prompt-heading-main::before{content:"";width:7px;height:7px;flex:0 0 auto;border-radius:50%;background:var(--ce-amber);box-shadow:0 0 8px var(--ce-amber);animation:ce-pulse 2.4s ease-in-out infinite}
@@ -2872,7 +3440,7 @@ box-shadow:0 3px 14px var(--ce-amber-glow)!important;
 .crack-ext-prompt-header.is-editing{border-color:var(--ce-line)!important;border-radius:10px;background:var(--ce-card)!important;padding:11px 12px}
 .crack-ext-prompt-header.is-editing .crack-ext-prompt-heading-main::before{background:var(--ce-sage);box-shadow:0 0 8px var(--ce-sage)}
 .crack-ext-prompt-field select{background-color:var(--ce-bg)!important}
-.crack-ext-prompt-icon-btn.is-save{background:linear-gradient(160deg,var(--ce-amber),var(--ce-amber-deep))!important;color:#1B150A!important;border-color:transparent!important}
+.crack-ext-prompt-icon-btn.is-save{background:var(--ce-primary)!important;color:var(--ce-on-primary)!important;border-color:transparent!important}
 #ce-ai-selection-counter{color:var(--ce-sage)!important;font-weight:650}
 #ce-ai-preview-container{margin-top:14px}
 #ce-ai-card-nav{gap:14px;margin:10px 0 8px;color:var(--ce-ink-dim)!important;font-weight:600}
@@ -2881,16 +3449,16 @@ box-shadow:0 3px 14px var(--ce-amber-glow)!important;
 position:relative;
 overflow:hidden;
 margin-bottom:8px;
-padding:14px 16px 12px 22px!important;
+padding:14px 16px 12px!important;
 background:var(--ce-card)!important;
 border:1px solid var(--ce-line)!important;
-border-radius:9px!important;
+border-radius:10px!important;
 transition:transform .2s ease,box-shadow .25s ease!important;
 }
-.crack-ext-session-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,var(--ce-amber),var(--ce-amber-deep))}
-.crack-ext-session-card::after{content:"";position:absolute;left:9px;top:14px;width:5px;height:5px;border-radius:50%;background:var(--ce-bg);border:1px solid var(--ce-line)}
+.crack-ext-session-title>div::before{content:"";display:inline-block;width:6px;height:6px;margin:0 8px 2px 0;border-radius:50%;background:var(--ce-amber);vertical-align:middle}
+.crack-ext-session-title>div>span{color:var(--ce-ink-faint)!important}
 .crack-ext-session-card:hover{transform:translateY(-2px);box-shadow:0 8px 24px color-mix(in srgb,var(--ce-ink) 14%,transparent)}
-.crack-ext-session-title{color:var(--ce-amber)!important;font-size:14px;line-height:1.45}
+.crack-ext-session-title{color:var(--ce-ink)!important;font-size:14px;line-height:1.45}
 .crack-ext-session-content{color:var(--ce-ink-dim)!important;line-height:1.75!important}
 .crack-ext-char-count{color:var(--ce-ink-faint)!important;font-variant-numeric:tabular-nums}
 .crack-ext-count-error{color:var(--ce-rose)!important}
@@ -2903,9 +3471,8 @@ transition:transform .2s ease,box-shadow .25s ease!important;
 .crack-ext-compress-item{position:relative;gap:12px;padding:12px 14px;border-bottom:1px solid var(--ce-line-soft);font-size:12px;transition:background .18s}
 .crack-ext-compress-item:last-child{border-bottom:0}
 .crack-ext-compress-item:hover{background:color-mix(in srgb,var(--ce-ink) 4%,transparent)}
-.crack-ext-compress-item:has(input:checked){background:var(--ce-sage-glow)}
-.crack-ext-compress-item:has(input:checked)::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ce-sage)}
-.crack-ext-compress-item input[type="checkbox"]{width:17px!important;height:17px!important;margin-top:2px!important;accent-color:var(--ce-sage)}
+.crack-ext-compress-item:has(input:checked){background:var(--ce-amber-glow)}
+.crack-ext-compress-item input[type="checkbox"]{width:17px!important;height:17px!important;margin-top:2px!important;accent-color:var(--ce-amber)}
 .crack-ext-compress-item .item-title{color:var(--ce-ink)!important;font-size:13px;font-weight:650}
 .crack-ext-compress-item .item-summary{max-width:500px;color:var(--ce-ink-faint)!important;font-size:11.5px;margin-top:2px}
 .crack-ext-compress-note{display:flex;align-items:flex-start;gap:8px;padding:11px 14px;margin-top:14px!important;border:1px solid color-mix(in srgb,var(--ce-sage) 30%,transparent);border-radius:9px;background:var(--ce-sage-glow);color:var(--ce-sage)!important;line-height:1.6}
@@ -2914,7 +3481,7 @@ transition:transform .2s ease,box-shadow .25s ease!important;
 .crack-ext-editor-search-row{gap:10px}
 .crack-ext-editor-search-row input{min-width:220px;padding-left:12px!important}
 .crack-ext-editor-check-label{color:var(--ce-ink-dim)!important;font-size:12px!important;letter-spacing:0!important}
-.crack-ext-editor-check-label input[type="checkbox"]{accent-color:var(--ce-sage)}
+.crack-ext-editor-check-label input[type="checkbox"]{accent-color:var(--ce-amber)}
 #ce-editor-summary{color:var(--ce-ink-faint)!important;font-variant-numeric:tabular-nums}
 .crack-ext-editor-list{gap:14px}
 .crack-ext-editor-card{
@@ -2923,19 +3490,19 @@ overflow:hidden;
 padding:0;
 background:var(--ce-card)!important;
 border:1px solid var(--ce-line)!important;
-border-radius:14px;
+border-radius:12px;
 box-shadow:none;
 transition:border-color .25s,box-shadow .25s,opacity .25s;
 }
-.crack-ext-editor-card.is-selected{border-color:var(--ce-sage)!important;box-shadow:0 0 0 2px var(--ce-sage-glow)!important}
-.crack-ext-editor-card.is-changed{border-color:color-mix(in srgb,var(--ce-amber) 55%,var(--ce-line))!important;box-shadow:0 0 0 1px var(--ce-amber-glow)!important}
+.crack-ext-editor-card.is-selected{border-color:var(--ce-amber)!important;box-shadow:0 0 0 2px var(--ce-amber-glow)!important}
+.crack-ext-editor-card.is-changed{border-color:color-mix(in srgb,var(--ce-sage) 55%,var(--ce-line))!important;box-shadow:0 0 0 1px var(--ce-sage-glow)!important}
 .crack-ext-editor-card.is-delete{border-color:color-mix(in srgb,var(--ce-rose) 58%,var(--ce-line))!important;background:var(--ce-card)!important;opacity:.78}
 .crack-ext-editor-card.is-error{border-color:var(--ce-rose)!important;box-shadow:0 0 0 2px var(--ce-rose-glow)!important}
 .crack-ext-editor-card-head{margin:0;padding:11px 16px;border-bottom:1px solid var(--ce-line-soft);background:color-mix(in srgb,var(--ce-ink) 2.5%,transparent)}
 .crack-ext-editor-card-title{gap:12px}
 .crack-ext-editor-index{display:flex;align-items:center;gap:8px;color:var(--ce-ink-faint)!important;font-variant-numeric:tabular-nums}
 .crack-ext-editor-status{display:inline-flex;padding:3px 9px;border-radius:999px;background:color-mix(in srgb,var(--ce-ink) 5%,transparent);color:var(--ce-ink-faint);font-size:10px;line-height:1.35;letter-spacing:.035em}
-.crack-ext-editor-card.is-changed .crack-ext-editor-status{background:var(--ce-amber-glow);color:var(--ce-amber)}
+.crack-ext-editor-card.is-changed .crack-ext-editor-status{background:var(--ce-sage-glow);color:var(--ce-sage)}
 .crack-ext-editor-card.is-delete .crack-ext-editor-status{background:var(--ce-rose-glow);color:var(--ce-rose)}
 .crack-ext-editor-grid{grid-template-columns:1fr 1fr;gap:0}
 .crack-ext-editor-pane{padding:14px 16px;background:transparent!important;border:0!important;border-radius:0}
@@ -2950,22 +3517,20 @@ transition:border-color .25s,box-shadow .25s,opacity .25s;
 .crack-ext-editor-meta span:last-child:not(:empty){color:var(--ce-rose)!important;font-weight:650}
 .crack-ext-editor-empty{color:var(--ce-ink-faint)!important}
 .crack-ext-ui-dialog-overlay{background:var(--ce-overlay)!important;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
-.crack-ext-ui-dialog{background:var(--ce-panel)!important;color:var(--ce-ink)!important;border:1px solid var(--ce-line);border-radius:14px;padding:20px;box-shadow:var(--ce-shadow);color-scheme:var(--ce-scheme)}
-.crack-ext-ui-dialog::before{height:3px;background:var(--ce-amber)!important}
+.crack-ext-ui-dialog{background:var(--ce-panel)!important;color:var(--ce-ink)!important;border:1px solid var(--ce-line);border-radius:16px;padding:20px;box-shadow:var(--ce-shadow);color-scheme:var(--ce-scheme)}
+.crack-ext-ui-dialog::before{height:3px;background:transparent!important}
 .crack-ext-ui-dialog.is-danger::before{background:var(--ce-rose)!important}
-.crack-ext-ui-dialog.is-warning::before{background:var(--ce-amber)!important}
+.crack-ext-ui-dialog.is-warning::before{background:var(--ce-warn)!important}
 .crack-ext-ui-dialog.is-success::before{background:var(--ce-sage)!important}
 .crack-ext-ui-dialog h4{color:var(--ce-ink)!important;font-size:15px}
 .crack-ext-ui-dialog p{color:var(--ce-ink-dim)!important;line-height:1.65}
 .crack-ext-ui-dialog-error{color:var(--ce-rose)!important}
-.crack-ext-toast{background:var(--ce-panel)!important;color:var(--ce-ink)!important;border:1px solid var(--ce-line)!important;border-left:3px solid var(--ce-amber)!important;border-radius:10px;box-shadow:0 8px 28px color-mix(in srgb,var(--ce-ink) 18%,transparent)!important}
-.crack-ext-header-ai-btn{color:#6E5F4C!important}
-.crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#9D6D2B!important}
-.crack-ext-header-ai-btn:hover{background:rgba(182,120,34,.09)!important;border-color:rgba(182,120,34,.15)!important;color:#8F5B18!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn,html[data-theme="dark"] .crack-ext-header-ai-btn,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn{color:#C9BBA5!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:#D5A052!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-theme="dark"] .crack-ext-header-ai-btn:hover,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn:hover{background:rgba(226,168,75,.1)!important;border-color:rgba(226,168,75,.16)!important;color:#EDE5D6!important}
-body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating{background:rgba(39,35,30,.96)!important;border-color:rgba(213,160,82,.34)!important;color:#EDE5D6!important;box-shadow:0 7px 24px rgba(0,0,0,.38)!important}
+.crack-ext-toast{background:var(--ce-panel)!important;color:var(--ce-ink)!important;border:1px solid var(--ce-line)!important;border-radius:12px;box-shadow:0 8px 28px color-mix(in srgb,var(--ce-ink) 18%,transparent)!important}
+.crack-ext-header-ai-btn{color:var(--text_secondary,#61605A)!important}
+.crack-ext-header-ai-btn .crack-ext-header-ai-icon{color:var(--icon_secondary,#61605A)!important}
+.crack-ext-header-ai-btn:hover{background:var(--surface_tertiary,#F7F7F5)!important;border-color:var(--outline_tertiary,#E5E5E1)!important;color:var(--text_primary,#1A1918)!important}
+.crack-ext-header-ai-btn.crack-ext-floating{background:var(--bg_elevated_primary,#FFFFFF)!important;border-color:var(--divider_secondary,#DBDAD5)!important;color:var(--text_primary,#1A1918)!important;box-shadow:0 7px 22px rgba(13,13,12,.18)!important}
+body[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating,html[data-sgb-theme="dark"] .crack-ext-header-ai-btn.crack-ext-floating{box-shadow:0 7px 24px rgba(0,0,0,.45)!important}
 @media(max-width:820px){
 #ce-ai-top-settings{
 grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(58px,.62fr);
@@ -3009,7 +3574,7 @@ margin-bottom:12px;
 #ce-ai-main-actions,.crack-ext-ai-footer-right{width:100%}
 #ce-ai-main-actions .crack-ext-ai-mbtn,.crack-ext-ai-footer-right .crack-ext-ai-mbtn{flex:1 1 auto;justify-content:center}
 .crack-ext-ai-modal-header h3{font-size:16px!important;gap:9px}
-.crack-ext-head-glyph{width:34px;height:34px;border-radius:9px;font-size:16px}
+.crack-ext-head-glyph{width:34px;height:34px;border-radius:50%;font-size:16px}
 .crack-ext-badge{display:inline-flex;margin:5px 0 0}
 }
 @media(max-width:430px){
@@ -3077,7 +3642,7 @@ margin-bottom:12px;
 .crack-ext-editor-toolbar{position:static!important;top:auto!important}
 }
 @media(prefers-reduced-motion:reduce){
-.crack-ext-ai-modal,.crack-ext-ai-modal-header::after,.crack-ext-prompt-heading-main::before,#ce-ai-generate:disabled::after{animation:none!important;transition:none!important}
+.crack-ext-ai-modal,.crack-ext-prompt-heading-main::before,#ce-ai-generate:disabled::after{animation:none!important;transition:none!important}
 }
 `;
         document.head.appendChild(s);
@@ -3220,6 +3785,7 @@ margin-bottom:12px;
             ];
         } else if (provider === 'firebase') {
             models = [
+                {v:'gemini-3.8-flash', t:'3.8 Flash'},
                 {v:'gemini-3.7-flash', t:'3.7 Flash'},
                 {v:'gemini-3.6-flash', t:'3.6 Flash'},
                 {v:'gemini-3.1-pro-preview', t:'3.1 Pro'},
@@ -4767,6 +5333,1067 @@ margin-bottom:12px;
         return runAutoMemory(false);
     }
 
+    function showMemoryArchiveModal(parentOverlay) {
+        injectAiStyles();
+        var currentChatId = String(getChatId() || '').toLowerCase();
+        if (!currentChatId) { showUiAlert('현재 채팅방 ID를 찾지 못했습니다.', '채팅방 확인', { tone:'warning' }); parentOverlay.style.display = ''; return; }
+        var storyMatch = location.pathname.match(/\/stories\/([a-f0-9-]+)\/episodes\//i);
+        var currentStoryId = storyMatch ? storyMatch[1].toLowerCase() : '';
+        var refreshIcon = '<svg class="crack-ext-ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg>';
+        var overlay = document.createElement('div');
+        overlay.className = 'crack-ext-ai-overlay';
+        overlay.innerHTML = '<div class="crack-ext-ai-modal ce-memory-tools-modal">' +
+            '<div class="crack-ext-ai-modal-header"><h3><span class="crack-ext-head-glyph" aria-hidden="true">' + UI_ICONS.transfer + '</span><span class="crack-ext-head-title">장기기억 이식 · 백업 · 복사</span></h3><div class="crack-ext-ai-modal-header-actions"><button class="crack-ext-ai-close-btn" id="ce-memory-x-close" type="button" aria-label="창 닫기" title="창 닫기">' + UI_ICONS.close + '</button></div></div>' +
+            '<div class="ce-mt-tabs" role="tablist" aria-label="장기기억 도구">' +
+                '<button type="button" class="ce-mt-tab" role="tab" id="ce-mt-tab-transfer" data-tab="transfer" aria-selected="true" aria-controls="ce-mt-pane-transfer">방 이식</button>' +
+                '<button type="button" class="ce-mt-tab" role="tab" id="ce-mt-tab-archive" data-tab="archive" aria-selected="false" aria-controls="ce-mt-pane-archive">백업 · 복원</button>' +
+                '<button type="button" class="ce-mt-tab" role="tab" id="ce-mt-tab-comment" data-tab="comment" aria-selected="false" aria-controls="ce-mt-pane-comment">주석 복사</button>' +
+            '</div>' +
+            '<div class="ce-mt-pane" id="ce-mt-pane-transfer" role="tabpanel" aria-labelledby="ce-mt-tab-transfer">' +
+                '<div class="ce-mt-seg" role="radiogroup" aria-label="이식 방향">' +
+                    '<button type="button" role="radio" data-direction="push" aria-checked="true"><strong>보내기</strong><small>이 방 → 선택한 방</small></button>' +
+                    '<button type="button" role="radio" data-direction="pull" aria-checked="false"><strong>가져오기</strong><small>선택한 방 → 이 방</small></button>' +
+                '</div>' +
+                '<p class="ce-mt-lead" id="ce-mt-lead"></p>' +
+                '<p class="ce-mt-meta" id="ce-mt-meta">이 방의 장기기억을 확인하는 중…</p>' +
+                '<div id="ce-mt-select">' +
+                    '<div class="ce-mt-filter">' +
+                        '<div class="ce-mt-scope" role="radiogroup" aria-label="표시할 방">' +
+                            '<button type="button" role="radio" data-scope="story" aria-checked="false">같은 작품</button>' +
+                            '<button type="button" role="radio" data-scope="all" aria-checked="false">모든 작품</button>' +
+                        '</div>' +
+                        '<input type="search" id="ce-mt-search" placeholder="방 제목·작품명 검색" aria-label="방 제목·작품명 검색" autocomplete="off">' +
+                        '<button type="button" class="crack-ext-ai-mbtn ce-mt-icon-btn" id="ce-mt-refresh" title="목록 새로고침" aria-label="채팅방 목록 새로고침">' + refreshIcon + '</button>' +
+                    '</div>' +
+                    '<div class="ce-mt-listhead"><span id="ce-mt-count" aria-live="polite">채팅방 목록을 불러오는 중…</span><button type="button" class="ce-mt-link" id="ce-mt-clear" hidden>선택 해제</button></div>' +
+                    '<div class="ce-mt-list" id="ce-mt-list"></div>' +
+                '</div>' +
+                '<div class="ce-mt-plan" id="ce-mt-plan" hidden></div>' +
+                '<div class="ce-mt-status" id="ce-mt-status" role="status" aria-live="polite"></div>' +
+            '</div>' +
+            '<div class="ce-mt-pane" id="ce-mt-pane-archive" role="tabpanel" aria-labelledby="ce-mt-tab-archive" hidden>' +
+                '<div class="ce-memory-tools-section"><h4>서버 백업</h4><p class="ce-memory-tools-note">이 방의 장기기억 전체와 단기 기억·관계·목표를 JSON 파일 하나로 받습니다. 복원은 장기기억만 하며, 아래 복원과 기존 백업 스크립트에서 읽을 수 있습니다. AI 창의 "내보내기"(생성 결과 중심)와는 별개입니다.</p><button class="crack-ext-ai-mbtn" id="ce-memory-backup" type="button">백업 파일 받기</button></div>' +
+                '<div class="ce-memory-tools-section"><h4>파일에서 복원</h4><p class="ce-memory-tools-note">서버 백업, AutoMemory 내보내기(JSON·TXT·Markdown), 기존 longTerm 백업을 읽습니다. 적용하기 전에 지금 서버 내용과 비교한 결과를 보여 줍니다. 추가 복원은 없는 카드만 더하고, 덮어쓰기는 이 방을 파일 내용에 맞춥니다.</p>' +
+                    '<div class="ce-memory-tools-row"><input id="ce-memory-file" type="file" accept=".json,.txt,.md,application/json,text/plain,text/markdown" aria-label="복원할 장기기억 파일"></div>' +
+                    '<div class="ce-memory-tools-preview" id="ce-memory-import-preview">파일을 선택하면 지금 서버 내용과 비교한 결과를 표시합니다.</div>' +
+                    '<label class="crack-ext-editor-check-label ce-mt-check"><input id="ce-memory-include-user" type="checkbox"><span>덮어쓰기에서 [추가] 카드도 바꾸기</span></label>' +
+                    '<div class="ce-memory-tools-row"><button class="crack-ext-ai-mbtn" id="ce-memory-add" type="button" disabled>추가 복원</button><button class="crack-ext-ai-mbtn crack-ext-editor-danger" id="ce-memory-overwrite" type="button" disabled>덮어쓰기</button></div>' +
+                '</div>' +
+                '<div class="ce-memory-tools-status" id="ce-memory-status" role="status" aria-live="polite"></div>' +
+            '</div>' +
+            '<div class="ce-mt-pane" id="ce-mt-pane-comment" role="tabpanel" aria-labelledby="ce-mt-tab-comment" hidden>' +
+                '<p class="ce-mt-lead">선택한 장기기억을 투명 주석 형식 "[주석 문구]: # ( … )"으로 클립보드에 복사합니다. 오래된 카드부터 이어 붙이고, 주석이 깨지지 않도록 제목·본문의 # ( ) 는 T / / 로 바꿉니다.</p>' +
+                '<label for="ce-mc-prefix">주석 문구</label>' +
+                '<input type="text" id="ce-mc-prefix" autocomplete="off" spellcheck="false">' +
+                '<div class="ce-mt-listhead"><span id="ce-mc-count" aria-live="polite">장기기억을 불러오는 중…</span><button type="button" class="ce-mt-link" id="ce-mc-all" hidden>전체 선택</button></div>' +
+                '<div class="ce-mt-list" id="ce-mc-list"></div>' +
+                '<div class="ce-mt-status" id="ce-mc-status" role="status" aria-live="polite"></div>' +
+            '</div>' +
+            '<div class="crack-ext-ai-modal-btns"><div><button class="crack-ext-ai-mbtn" id="ce-memory-back" type="button">돌아가기</button></div><div class="crack-ext-ai-footer-right"><button class="crack-ext-ai-mbtn" id="ce-mt-prev" type="button" hidden>이전</button><button class="crack-ext-ai-mbtn crack-ext-ai-mbtn-p" id="ce-mt-next" type="button" disabled>미리보기</button></div></div>' +
+        '</div>';
+        document.body.appendChild(overlay);
+
+        function q(selector) { return overlay.querySelector(selector); }
+        var closeBtn = q('#ce-memory-x-close');
+        var backBtn = q('#ce-memory-back');
+        var prevBtn = q('#ce-mt-prev');
+        var nextBtn = q('#ce-mt-next');
+        var tabButtons = Array.from(overlay.querySelectorAll('.ce-mt-tab'));
+        var transferPane = q('#ce-mt-pane-transfer');
+        var archivePane = q('#ce-mt-pane-archive');
+        var directionButtons = Array.from(overlay.querySelectorAll('[data-direction]'));
+        var scopeButtons = Array.from(overlay.querySelectorAll('[data-scope]'));
+        var leadEl = q('#ce-mt-lead');
+        var metaEl = q('#ce-mt-meta');
+        var selectEl = q('#ce-mt-select');
+        var searchInput = q('#ce-mt-search');
+        var refreshBtn = q('#ce-mt-refresh');
+        var countEl = q('#ce-mt-count');
+        var clearBtn = q('#ce-mt-clear');
+        var listEl = q('#ce-mt-list');
+        var planEl = q('#ce-mt-plan');
+        var transferStatus = q('#ce-mt-status');
+        var fileInput = q('#ce-memory-file');
+        var importPreview = q('#ce-memory-import-preview');
+        var includeUserInput = q('#ce-memory-include-user');
+        var addBtn = q('#ce-memory-add');
+        var overwriteBtn = q('#ce-memory-overwrite');
+        var backupBtn = q('#ce-memory-backup');
+        var archiveStatus = q('#ce-memory-status');
+        var commentPane = q('#ce-mt-pane-comment');
+        var prefixInput = q('#ce-mc-prefix');
+        var commentCountEl = q('#ce-mc-count');
+        var commentAllBtn = q('#ce-mc-all');
+        var commentListEl = q('#ce-mc-list');
+        var commentStatus = q('#ce-mc-status');
+
+        var closed = false;
+        var running = false;
+        var activeTab = 'transfer';
+        var direction = 'push';
+        var scope = currentStoryId ? 'story' : 'all';
+        var rooms = [];
+        var roomById = new Map();
+        var roomsState = 'loading';
+        var loadToken = 0;
+        var selected = [];
+        var renderLimit = MEMORY_ROOM_RENDER_STEP;
+        var searchTimer = 0;
+        var step = 'select';
+        var plan = null;
+        var lastRunFailed = false;
+        var currentMemory = null;
+        var currentTitle = '';
+        var roomsRequested = false;
+        var commentCards = null;
+        var commentSelected = new Set();
+        var commentStale = true;
+        var commentToken = 0;
+        var prefixTimer = 0;
+
+        function setTransferStatus(message) { if (!closed) transferStatus.textContent = message || ''; }
+        function setArchiveStatus(message) { if (!closed) archiveStatus.textContent = message || ''; }
+        function setCommentStatus(message) { if (!closed) commentStatus.textContent = message || ''; }
+
+        function close() {
+            if (running || closed) return;
+            closed = true;
+            loadToken++;
+            commentToken++;
+            clearTimeout(searchTimer);
+            clearTimeout(prefixTimer);
+            overlay.remove();
+            parentOverlay.style.display = '';
+        }
+        closeBtn.onclick = close;
+        backBtn.onclick = close;
+        overlay.addEventListener('click', function(event) { if (event.target === overlay) close(); });
+
+        function selectTab(tab) {
+            if (running) return;
+            activeTab = tab;
+            tabButtons.forEach(function(button) { button.setAttribute('aria-selected', button.dataset.tab === tab ? 'true' : 'false'); });
+            transferPane.hidden = tab !== 'transfer';
+            archivePane.hidden = tab !== 'archive';
+            commentPane.hidden = tab !== 'comment';
+            localStorage.setItem(MEMORY_TOOLS_TAB_KEY, tab);
+            // 탭을 처음 열 때만 필요한 목록을 읽는다(복사만 하려고 열어도 채팅방 목록을 읽지 않게).
+            if (tab === 'transfer' && !roomsRequested) { roomsRequested = true; loadRooms(false); }
+            if (tab === 'comment' && commentStale) loadCommentCards();
+            updateFooter();
+        }
+        tabButtons.forEach(function(button) { button.onclick = function() { selectTab(button.dataset.tab); }; });
+
+        function setRunning(value) {
+            running = value;
+            [closeBtn, backBtn, prevBtn, searchInput, clearBtn, fileInput, backupBtn, includeUserInput, prefixInput, commentAllBtn].forEach(function(el) { el.disabled = value; });
+            tabButtons.concat(directionButtons).forEach(function(el) { el.disabled = value; });
+            refreshBtn.disabled = value || roomsState === 'loading';
+            updateScopeButtons();
+            listEl.querySelectorAll('input[type="checkbox"]').forEach(function(el) { el.disabled = value || step !== 'select'; });
+            commentListEl.querySelectorAll('input[type="checkbox"]').forEach(function(el) { el.disabled = value; });
+            updateFooter();
+            updateArchiveButtons();
+        }
+
+        // ---------- 방 이식 ----------
+        function updateLead() {
+            leadEl.textContent = direction === 'push'
+                ? '이 방의 장기기억을 선택한 방마다 복사합니다. 이 방은 바뀌지 않고, 복사된 카드는 대상 방에서 [추가] 카드가 됩니다.'
+                : '선택한 방의 장기기억을 이 방에 추가합니다. 이 방에 이미 있는 카드는 건너뛰고, 추가된 카드는 [추가] 카드가 됩니다.';
+            if (!currentMemory) return;
+            metaEl.textContent = '이 방' + (currentTitle ? ' "' + currentTitle + '"' : '') + ' · 장기기억 ' + currentMemory.cards.length + '개 · [추가] ' + currentMemory.userCount + '/' + MEMORY_USER_CARD_LIMIT;
+        }
+
+        function updateScopeButtons() {
+            scopeButtons.forEach(function(button) {
+                button.setAttribute('aria-checked', button.dataset.scope === scope ? 'true' : 'false');
+                button.disabled = running || step !== 'select' || (button.dataset.scope === 'story' && !currentStoryId);
+                if (button.dataset.scope === 'story') button.title = currentStoryId ? '' : '이 방의 작품 정보를 찾지 못했습니다.';
+            });
+        }
+
+        function roomMatches(room, query) {
+            if (scope === 'story' && currentStoryId && memoryRoomStoryId(room) !== currentStoryId) return false;
+            return !query || room.__memorySearch.indexOf(query) >= 0;
+        }
+        function searchQuery() { return searchInput.value.trim().toLocaleLowerCase(); }
+        function visibleRooms() {
+            var query = searchQuery();
+            return rooms.filter(function(room) { return roomMatches(room, query); });
+        }
+
+        function roomRowHtml(room) {
+            var id = memoryRoomId(room);
+            var order = selected.indexOf(id);
+            var thumb = memoryRoomThumb(room);
+            var storyName = memoryRoomStoryName(room);
+            var time = formatMemoryRoomTime(memoryRoomTime(room));
+            var meta = (scope === 'all' ? storyName + ' · ' : '') + (time ? '마지막 대화 ' + time : '대화 기록 없음');
+            var snippet = String(room.lastMessage || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+            return '<label class="ce-mt-room' + (order >= 0 ? ' is-checked' : '') + '">' +
+                '<input type="checkbox" value="' + id + '"' + (order >= 0 ? ' checked' : '') + (running || step !== 'select' ? ' disabled' : '') + '>' +
+                (thumb ? '<img class="ce-mt-thumb" src="' + thumb + '" alt="" loading="lazy" decoding="async">' : '<span class="ce-mt-thumb is-empty" aria-hidden="true">' + escapeHtml(Array.from(storyName)[0] || '?') + '</span>') +
+                '<span class="ce-mt-room-main"><span class="ce-mt-room-title">' + escapeHtml(memoryRoomTitle(room)) + '</span><span class="ce-mt-room-meta">' + escapeHtml(meta) + '</span>' + (snippet ? '<span class="ce-mt-room-snippet">' + escapeHtml(snippet) + '</span>' : '') + '</span>' +
+                (direction === 'pull' && order >= 0 && selected.length > 1 ? '<span class="ce-mt-order" title="' + (order + 1) + '번째로 가져옵니다">' + (order + 1) + '</span>' : '') +
+            '</label>';
+        }
+
+        function emptyListText() {
+            if (roomsState === 'loading') return scope === 'story' ? '같은 작품의 다른 방을 찾는 중입니다…' : '채팅방 목록을 불러오는 중입니다…';
+            if (roomsState === 'error' && !rooms.length) return '채팅방 목록을 불러오지 못했습니다. 새로고침 버튼으로 다시 시도해주세요.';
+            if (searchQuery()) return '검색 결과가 없습니다.';
+            if (scope === 'story') return '같은 작품의 다른 방이 없습니다. "모든 작품"을 누르면 다른 작품의 방도 표시합니다.';
+            return '이식할 수 있는 다른 방이 없습니다.';
+        }
+
+        function syncMoreButton(visibleCount) {
+            var rendered = listEl.querySelectorAll('.ce-mt-room').length;
+            var more = listEl.querySelector('[data-more]');
+            var remaining = visibleCount - rendered;
+            if (remaining > 0) {
+                if (!more) {
+                    listEl.insertAdjacentHTML('beforeend', '<button type="button" class="ce-mt-more" data-more></button>');
+                    more = listEl.querySelector('[data-more]');
+                }
+                more.textContent = '더 보기 (' + remaining + '개 남음)';
+            } else if (more) {
+                more.remove();
+            }
+        }
+
+        function renderRoomList() {
+            if (closed) return;
+            var visible = visibleRooms();
+            listEl.innerHTML = visible.length
+                ? visible.slice(0, renderLimit).map(roomRowHtml).join('')
+                : '<div class="ce-mt-empty">' + escapeHtml(emptyListText()) + '</div>';
+            syncMoreButton(visible.length);
+            updateCount(visible.length);
+        }
+
+        // 목록을 읽는 동안에는 새로 받은 방만 끝에 붙여 사용자가 누르던 행을 다시 그리지 않는다.
+        function appendRooms(fresh) {
+            if (closed) return;
+            var query = searchQuery();
+            var matching = fresh.filter(function(room) { return roomMatches(room, query); });
+            var visibleCount = visibleRooms().length;
+            if (!visibleCount) {
+                listEl.innerHTML = '<div class="ce-mt-empty">' + escapeHtml(emptyListText()) + '</div>';
+                updateCount(0);
+                return;
+            }
+            var empty = listEl.querySelector('.ce-mt-empty');
+            if (empty) empty.remove();
+            var rendered = listEl.querySelectorAll('.ce-mt-room').length;
+            var html = matching.slice(0, Math.max(0, renderLimit - rendered)).map(roomRowHtml).join('');
+            if (html) {
+                var more = listEl.querySelector('[data-more]');
+                if (more) more.insertAdjacentHTML('beforebegin', html);
+                else listEl.insertAdjacentHTML('beforeend', html);
+            }
+            syncMoreButton(visibleCount);
+            updateCount(visibleCount);
+        }
+
+        function updateCount(visibleCount) {
+            if (visibleCount == null) visibleCount = visibleRooms().length;
+            var parts = [(scope === 'story' ? '같은 작품 ' : '') + visibleCount + '개 방'];
+            if (roomsState === 'loading') parts.push('목록 읽는 중 ' + rooms.length + '개');
+            else if (roomsState === 'partial') parts.push('목록 일부만 불러옴');
+            if (selected.length) parts.push(selected.length + '개 선택');
+            countEl.textContent = parts.join(' · ');
+            clearBtn.hidden = !selected.length || step !== 'select';
+            updateFooter();
+        }
+
+        function refreshOrderBadges() {
+            listEl.querySelectorAll('.ce-mt-room').forEach(function(row) {
+                var order = selected.indexOf(row.querySelector('input').value);
+                var badge = row.querySelector('.ce-mt-order');
+                if (direction !== 'pull' || order < 0 || selected.length < 2) {
+                    if (badge) badge.remove();
+                    return;
+                }
+                if (!badge) {
+                    badge = document.createElement('span');
+                    badge.className = 'ce-mt-order';
+                    row.appendChild(badge);
+                }
+                badge.textContent = String(order + 1);
+                badge.title = (order + 1) + '번째로 가져옵니다';
+            });
+        }
+
+        function ingestRooms(list) {
+            var fresh = [];
+            var storyChanged = false;
+            list.forEach(function(room) {
+                var id = memoryRoomId(room);
+                if (!id) return;
+                if (id === currentChatId) {
+                    var storyId = memoryRoomStoryId(room);
+                    if (storyId && storyId !== currentStoryId) {
+                        if (!currentStoryId && scope === 'all') scope = 'story';
+                        currentStoryId = storyId;
+                        storyChanged = true;
+                    }
+                    currentTitle = memoryRoomTitle(room);
+                    updateLead();
+                    return;
+                }
+                if (roomById.has(id)) return;
+                room.__memorySearch = (memoryRoomTitle(room) + ' ' + memoryRoomStoryName(room)).toLocaleLowerCase();
+                roomById.set(id, room);
+                rooms.push(room);
+                fresh.push(room);
+            });
+            if (storyChanged) updateScopeButtons();
+            return { fresh:fresh, storyChanged:storyChanged };
+        }
+
+        function resetRooms() {
+            rooms = [];
+            roomById = new Map();
+            renderLimit = MEMORY_ROOM_RENDER_STEP;
+        }
+
+        async function loadRooms(force) {
+            var token = ++loadToken;
+            var cached = !force && MEMORY_ROOM_CACHE && Date.now() - MEMORY_ROOM_CACHE.at < MEMORY_ROOM_CACHE_MS ? MEMORY_ROOM_CACHE : null;
+            resetRooms();
+            if (cached) {
+                roomsState = cached.complete ? 'ready' : 'partial';
+                ingestRooms(cached.rooms);
+                selected = selected.filter(function(id) { return roomById.has(id); });
+                refreshBtn.disabled = running;
+                renderRoomList();
+                return;
+            }
+            roomsState = 'loading';
+            refreshBtn.disabled = true;
+            renderRoomList();
+            try {
+                var result = await fetchMemoryTransferRooms(function(list) {
+                    if (token !== loadToken || closed) return false;
+                    var batch = ingestRooms(list);
+                    if (batch.storyChanged) renderRoomList();
+                    else appendRooms(batch.fresh);
+                    return true;
+                });
+                if (!result || token !== loadToken || closed) return;
+                MEMORY_ROOM_CACHE = { at:Date.now(), rooms:result.rooms, complete:result.complete };
+                roomsState = result.complete ? 'ready' : 'partial';
+                selected = selected.filter(function(id) { return roomById.has(id); });
+                if (!listEl.querySelector('.ce-mt-room')) renderRoomList();
+                else updateCount();
+                if (!result.complete) setTransferStatus('채팅방이 많아 ' + result.rooms.length + '개까지만 불러왔습니다. 검색으로 찾아 주세요.');
+            } catch (error) {
+                if (token !== loadToken || closed) return;
+                roomsState = rooms.length ? 'partial' : 'error';
+                renderRoomList();
+                setTransferStatus('방 목록 실패: ' + error.message);
+            } finally {
+                if (token === loadToken && !closed) refreshBtn.disabled = running;
+            }
+        }
+
+        function setScope(value) {
+            if (running || step !== 'select' || value === scope || (value === 'story' && !currentStoryId)) return;
+            scope = value;
+            updateScopeButtons();
+            if (scope === 'story') {
+                var before = selected.length;
+                selected = selected.filter(function(id) { var room = roomById.get(id); return !!room && memoryRoomStoryId(room) === currentStoryId; });
+                if (before !== selected.length) setTransferStatus('다른 작품 방 ' + (before - selected.length) + '개는 선택을 해제했습니다.');
+            }
+            renderLimit = MEMORY_ROOM_RENDER_STEP;
+            renderRoomList();
+        }
+        scopeButtons.forEach(function(button) { button.onclick = function() { setScope(button.dataset.scope); }; });
+
+        directionButtons.forEach(function(button) {
+            button.onclick = function() {
+                if (running || button.dataset.direction === direction) return;
+                if (step !== 'select') backToSelect(false);
+                direction = button.dataset.direction;
+                directionButtons.forEach(function(el) { el.setAttribute('aria-checked', el === button ? 'true' : 'false'); });
+                updateLead();
+                refreshOrderBadges();
+                updateFooter();
+            };
+        });
+
+        searchInput.addEventListener('input', function() {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(function() {
+                renderLimit = MEMORY_ROOM_RENDER_STEP;
+                renderRoomList();
+            }, 150);
+        });
+        refreshBtn.onclick = function() { if (!running) { setTransferStatus(''); loadRooms(true); } };
+        clearBtn.onclick = function() {
+            if (running || step !== 'select') return;
+            selected = [];
+            listEl.querySelectorAll('.ce-mt-room').forEach(function(row) {
+                row.classList.remove('is-checked');
+                row.querySelector('input').checked = false;
+            });
+            refreshOrderBadges();
+            updateCount();
+        };
+
+        listEl.addEventListener('change', function(event) {
+            var input = event.target;
+            if (!input || input.type !== 'checkbox' || running || step !== 'select') return;
+            var id = input.value;
+            var index = selected.indexOf(id);
+            if (input.checked && index < 0) {
+                if (selected.length >= MEMORY_TRANSFER_MAX_ROOMS) {
+                    input.checked = false;
+                    setTransferStatus('한 번에 ' + MEMORY_TRANSFER_MAX_ROOMS + '개 방까지 선택할 수 있습니다. 나누어 실행해주세요.');
+                    return;
+                }
+                selected.push(id);
+            } else if (!input.checked && index >= 0) {
+                selected.splice(index, 1);
+            }
+            var row = input.closest('.ce-mt-room');
+            if (row) row.classList.toggle('is-checked', input.checked);
+            refreshOrderBadges();
+            updateCount();
+        });
+        listEl.addEventListener('click', function(event) {
+            if (!event.target.closest('[data-more]')) return;
+            renderLimit += MEMORY_ROOM_RENDER_STEP;
+            renderRoomList();
+        });
+
+        function updateFooter() {
+            prevBtn.hidden = activeTab !== 'transfer' || step !== 'plan';
+            prevBtn.disabled = running;
+            nextBtn.hidden = activeTab === 'archive';
+            if (activeTab === 'comment') {
+                nextBtn.textContent = commentSelected.size ? '클립보드 복사 (' + commentSelected.size + '개)' : '클립보드 복사';
+                nextBtn.disabled = running || !commentSelected.size;
+                return;
+            }
+            if (activeTab !== 'transfer') return;
+            if (step === 'select') {
+                nextBtn.textContent = selected.length ? '미리보기 (' + selected.length + '개 방)' : '미리보기';
+                nextBtn.disabled = running || !selected.length;
+            } else if (step === 'plan') {
+                var ready = plan && !plan.blockReason;
+                if (plan && plan.direction === 'pull') {
+                    nextBtn.textContent = '이 방으로 가져오기 (' + plan.additions.length + '개)';
+                } else {
+                    var targets = plan ? plan.rows.filter(function(row) { return !row.skipReason && row.additions.length; }).length : 0;
+                    nextBtn.textContent = '선택한 방에 이식 (' + targets + '개 방)';
+                    ready = ready && targets > 0;
+                }
+                nextBtn.disabled = running || !ready;
+            } else {
+                nextBtn.textContent = lastRunFailed ? '다시 선택' : '처음으로';
+                nextBtn.disabled = running;
+            }
+        }
+
+        function backToSelect(clearSelection) {
+            step = 'select';
+            plan = null;
+            if (clearSelection) selected = [];
+            planEl.hidden = true;
+            planEl.innerHTML = '';
+            selectEl.hidden = false;
+            updateScopeButtons();
+            renderRoomList();
+            updateFooter();
+        }
+        prevBtn.onclick = function() {
+            if (running) return;
+            setTransferStatus('');
+            backToSelect(false);
+        };
+        nextBtn.onclick = function() {
+            if (running) return;
+            if (activeTab === 'comment') { copyComment(); return; }
+            if (activeTab !== 'transfer') return;
+            if (step === 'select') buildPlan();
+            else if (step === 'plan') runPlan();
+            else { setTransferStatus(''); backToSelect(!lastRunFailed); }
+        };
+
+        function rowStateText(row) {
+            if (row.state === 'running') return '추가 중 ' + row.done + '/' + row.todo;
+            if (row.state === 'error') return '실패 · ' + row.done + '개 추가 후 멈춤: ' + row.error;
+            if (row.state === 'aborted') return '중단됨' + (row.done ? ' · ' + row.done + '개 추가' : '');
+            if (row.skipReason) return '건너뜀 · ' + row.skipReason;
+            var count = plan.direction === 'push' ? row.additions.length : row.added;
+            var extra = (row.existing ? ' · 이미 있음 ' + row.existing : '') + (row.invalid ? ' · 길이 초과 ' + row.invalid : '');
+            if (row.state === 'done') return count ? '완료 · 추가 ' + row.done + extra : '추가할 카드 없음' + extra;
+            if (plan.direction === 'pull' && !row.total) return '장기기억 없음';
+            return count ? '추가 ' + count + extra : '추가할 카드 없음 (모두 이미 있음)';
+        }
+        function rowClass(row) {
+            if (row.state === 'running') return 'is-running';
+            if (row.state === 'error') return 'is-error';
+            if (row.state === 'aborted') return 'is-aborted';
+            if (row.state === 'done') return 'is-done';
+            if (row.skipReason || !(plan.direction === 'push' ? row.additions.length : row.added)) return 'is-skip';
+            return '';
+        }
+        function updatePlanRow(index) {
+            var el = planEl.querySelector('[data-row="' + index + '"]');
+            if (!el || !plan) return;
+            var row = plan.rows[index];
+            el.className = 'ce-mt-plan-row ' + rowClass(row);
+            el.querySelector('.ce-mt-plan-state').textContent = rowStateText(row);
+        }
+
+        function renderPlan() {
+            if (!plan || closed) return;
+            var html;
+            if (plan.direction === 'push') {
+                html = '<p class="ce-mt-plan-head">이 방 → ' + plan.rows.length + '개 방</p>' +
+                    '<p class="ce-mt-plan-note">복사할 카드 ' + plan.source.cards.length + '개' +
+                    (plan.source.invalid ? ' · 길이 제한 초과로 제외 ' + plan.source.invalid + '개' : '') +
+                    (plan.source.duplicate ? ' · 같은 카드 중복 제외 ' + plan.source.duplicate + '개' : '') +
+                    '. 대상 방에 같은 제목·본문이 있으면 건너뛰고, 오래된 카드부터 추가합니다.</p>';
+            } else {
+                html = '<p class="ce-mt-plan-head">' + plan.rows.length + '개 방 → 이 방</p>' +
+                    '<p class="ce-mt-plan-note">가져올 카드 ' + plan.additions.length + '개 · 이 방 [추가] 카드 ' + plan.userCount + ' → ' + (plan.userCount + plan.additions.length) + '/' + MEMORY_USER_CARD_LIMIT +
+                    (plan.rows.length > 1 ? '. 선택한 순서대로, 방마다 오래된 카드부터 추가합니다' : '. 오래된 카드부터 추가합니다') + '. 이 방의 기존 카드는 바뀌지 않습니다.</p>';
+            }
+            html += '<ul class="ce-mt-plan-list">' + plan.rows.map(function(row, index) {
+                return '<li class="ce-mt-plan-row ' + rowClass(row) + '" data-row="' + index + '"><span class="ce-mt-plan-name">' + escapeHtml(row.title) + '</span><span class="ce-mt-plan-state">' + escapeHtml(rowStateText(row)) + '</span></li>';
+            }).join('') + '</ul>';
+            if (plan.blockReason) html += '<p class="ce-mt-plan-warn">' + escapeHtml(plan.blockReason) + '</p>';
+            else if (plan.warning) html += '<p class="ce-mt-plan-warn is-soft">' + escapeHtml(plan.warning) + '</p>';
+            planEl.innerHTML = html;
+            updateFooter();
+        }
+
+        function transferSkipReason(chatId, memory, addCount) {
+            if (!addCount) return '';
+            if (hasPendingMemoryPlan(chatId)) return '자동 정리 저장이 끝나지 않은 방';
+            if (memory.userCount + addCount > MEMORY_USER_CARD_LIMIT) return '[추가] 카드 한도 초과 (' + memory.userCount + ' + ' + addCount + ' > ' + MEMORY_USER_CARD_LIMIT + ')';
+            return '';
+        }
+
+        async function buildPushPlan(ids, current) {
+            var source = uniqueValidCards(sortSummariesOldest(current.cards));
+            if (!source.cards.length) throw new Error(current.cards.length ? '이 방의 장기기억 중 복사할 수 있는 카드가 없습니다. (길이 제한 초과 ' + source.invalid + '개)' : '이 방에 장기기억이 없습니다.');
+            var rows = [];
+            for (var i = 0; i < ids.length; i++) {
+                if (closed) throw new Error('창이 닫혔습니다.');
+                var room = roomById.get(ids[i]);
+                setTransferStatus('대상 방 확인 중 · ' + (i + 1) + '/' + ids.length + ' · ' + memoryRoomTitle(room));
+                var target = await fetchMemoryState(ids[i]);
+                var known = new Set(target.cards.map(memoryCardSignature));
+                var additions = source.cards.filter(function(card) { return !known.has(memoryCardSignature(card)); });
+                rows.push({
+                    id:ids[i], title:memoryRoomTitle(room), additions:additions,
+                    existing:source.cards.length - additions.length,
+                    skipReason:transferSkipReason(ids[i], target, additions.length),
+                    creatable:target.isCreatable, state:'pending', done:0, todo:0
+                });
+            }
+            var total = rows.reduce(function(sum, row) { return sum + (row.skipReason ? 0 : row.additions.length); }, 0);
+            var blocked = rows.filter(function(row) { return !row.skipReason && row.additions.length && row.creatable === false; }).length;
+            return {
+                direction:'push', rows:rows, source:source,
+                sourceSnapshot:memoryArchiveSnapshot(current.cards),
+                blockReason:total > MEMORY_TRANSFER_MAX_CARDS ? '한 번에 카드 ' + MEMORY_TRANSFER_MAX_CARDS + '개까지 추가할 수 있습니다(이번 계획 ' + total + '개). 방을 나누어 실행해주세요.' : '',
+                warning:blocked ? '크랙이 "추가 불가"로 표시한 방이 ' + blocked + '개 있습니다. 그 방은 실패할 수 있으며, 실패해도 나머지 방은 계속 진행합니다.' : ''
+            };
+        }
+
+        async function buildPullPlan(ids, current) {
+            if (hasPendingMemoryPlan(currentChatId)) throw new Error(MEMORY_PENDING_PLAN_MESSAGE);
+            var known = new Set(current.cards.map(memoryCardSignature));
+            var additions = [];
+            var rows = [];
+            for (var i = 0; i < ids.length; i++) {
+                if (closed) throw new Error('창이 닫혔습니다.');
+                var room = roomById.get(ids[i]);
+                setTransferStatus('가져올 방 확인 중 · ' + (i + 1) + '/' + ids.length + ' · ' + memoryRoomTitle(room));
+                var source = await fetchMemoryState(ids[i]);
+                var row = { id:ids[i], title:memoryRoomTitle(room), total:source.cards.length, added:0, existing:0, invalid:0, state:'pending', done:0, todo:0 };
+                sortSummariesOldest(source.cards).forEach(function(item) {
+                    var card = { title:String(item.title || '').trim(), summary:String(item.summary || '').trim(), row:i };
+                    if (memoryCardProblem(card)) { row.invalid++; return; }
+                    var signature = memoryCardSignature(card);
+                    if (known.has(signature)) { row.existing++; return; }
+                    known.add(signature);
+                    additions.push(card);
+                    row.added++;
+                });
+                rows.push(row);
+            }
+            var userAfter = current.userCount + additions.length;
+            var blockReason = '';
+            if (!additions.length) blockReason = '가져올 새 카드가 없습니다. 선택한 방의 카드가 이미 이 방에 있거나 비어 있습니다.';
+            else if (userAfter > MEMORY_USER_CARD_LIMIT) blockReason = '이 방의 [추가] 카드가 ' + userAfter + '개가 되어 크랙 한도(' + MEMORY_USER_CARD_LIMIT + '개)를 넘습니다. 가져올 방을 줄이거나 이 방의 [추가] 카드를 정리해주세요.';
+            else if (additions.length > MEMORY_TRANSFER_MAX_CARDS) blockReason = '한 번에 카드 ' + MEMORY_TRANSFER_MAX_CARDS + '개까지 가져올 수 있습니다.';
+            return {
+                direction:'pull', rows:rows, additions:additions, userCount:current.userCount,
+                currentSnapshot:memoryArchiveSnapshot(current.cards), blockReason:blockReason,
+                warning:!blockReason && current.isCreatable === false ? '크랙이 이 방을 "추가 불가"로 표시했습니다. 가져오기가 실패할 수 있습니다.' : ''
+            };
+        }
+
+        async function buildPlan() {
+            var ids = selected.slice();
+            if (!ids.length) return;
+            setRunning(true);
+            setTransferStatus('장기기억을 확인하는 중…');
+            try {
+                if (String(getChatId() || '').toLowerCase() !== currentChatId) throw new Error('채팅방이 바뀌었습니다. 현재 방에서 다시 열어주세요.');
+                var current = await fetchMemoryState(currentChatId);
+                currentMemory = current;
+                updateLead();
+                var nextPlan = direction === 'push' ? await buildPushPlan(ids, current) : await buildPullPlan(ids, current);
+                if (closed) return;
+                plan = nextPlan;
+                step = 'plan';
+                selectEl.hidden = true;
+                planEl.hidden = false;
+                renderPlan();
+                setTransferStatus(plan.blockReason ? '' : '내용을 확인한 뒤 실행해주세요.');
+            } catch (error) {
+                setTransferStatus('미리보기 실패: ' + memoryErrorText(error));
+            } finally {
+                setRunning(false);
+            }
+        }
+
+        // 방 하나의 요청 오류(400·403·404·409·422, 한도 초과, 결과 확인 실패)는 그 방만 실패로 두고 다음 방을 진행한다.
+        function isRoomScopedError(error) {
+            return !!(error && (error.roomScoped || /^Crack API (400|403|404|409|422)\b/.test(String(error.message || ''))));
+        }
+        function roomScopedError(message) {
+            var error = new Error(message);
+            error.roomScoped = true;
+            return error;
+        }
+
+        async function runPush(current, assertReady) {
+            var liveSource = await fetchSummaries({ strict:true, silent:true, chatId:currentChatId });
+            if (memoryArchiveSnapshot(liveSource) !== current.sourceSnapshot) throw new Error('미리보기 뒤 이 방의 장기기억이 바뀌었습니다. 다시 미리보기 해주세요.');
+            for (var i = 0; i < current.rows.length; i++) {
+                var row = current.rows[i];
+                if (row.skipReason || !row.additions.length) {
+                    if (!row.skipReason) row.state = 'done';
+                    updatePlanRow(i);
+                    continue;
+                }
+                assertReady();
+                row.state = 'running';
+                row.todo = row.additions.length;
+                updatePlanRow(i);
+                try {
+                    var live = await fetchMemoryState(row.id);
+                    var known = new Set(live.cards.map(memoryCardSignature));
+                    var todo = row.additions.filter(function(card) { return !known.has(memoryCardSignature(card)); });
+                    row.existing += row.additions.length - todo.length;
+                    row.todo = todo.length;
+                    if (hasPendingMemoryPlan(row.id)) throw roomScopedError('자동 정리 저장이 끝나지 않은 방');
+                    if (live.userCount + todo.length > MEMORY_USER_CARD_LIMIT) throw roomScopedError('[추가] 카드 한도 초과 (' + live.userCount + ' + ' + todo.length + ')');
+                    updatePlanRow(i);
+                    for (var j = 0; j < todo.length; j++) {
+                        assertReady();
+                        setTransferStatus('이식 중 · 방 ' + (i + 1) + '/' + current.rows.length + ' · 카드 ' + (j + 1) + '/' + todo.length + ' · ' + row.title);
+                        await addMemoryCard(row.id, todo[j]);
+                        row.done++;
+                        updatePlanRow(i);
+                        if (j < todo.length - 1) await pauseMs(MEMORY_WRITE_GAP_MS);
+                    }
+                    if (todo.length) {
+                        try { await verifyMemoryPlan(row.id, { additions:todo }, live.cards); }
+                        catch (verifyError) { throw roomScopedError(verifyError.message); }
+                    }
+                    row.state = 'done';
+                    updatePlanRow(i);
+                } catch (error) {
+                    row.state = 'error';
+                    row.error = memoryErrorText(error);
+                    updatePlanRow(i);
+                    if (!isRoomScopedError(error)) {
+                        for (var k = i + 1; k < current.rows.length; k++) {
+                            if (!current.rows[k].skipReason && current.rows[k].additions.length) { current.rows[k].state = 'aborted'; updatePlanRow(k); }
+                        }
+                        throw error;
+                    }
+                }
+            }
+        }
+
+        async function runPull(current, assertReady) {
+            if (hasPendingMemoryPlan(currentChatId)) throw new Error(MEMORY_PENDING_PLAN_MESSAGE);
+            var live = await fetchMemoryState(currentChatId);
+            if (memoryArchiveSnapshot(live.cards) !== current.currentSnapshot) throw new Error('미리보기 뒤 이 방의 장기기억이 바뀌었습니다. 다시 미리보기 해주세요.');
+            if (live.userCount + current.additions.length > MEMORY_USER_CARD_LIMIT) throw new Error('이 방의 [추가] 카드 한도(' + MEMORY_USER_CARD_LIMIT + '개)를 넘습니다.');
+            current.rows.forEach(function(row, index) {
+                row.todo = row.added;
+                if (!row.added) { row.state = 'done'; updatePlanRow(index); }
+            });
+            try {
+                for (var j = 0; j < current.additions.length; j++) {
+                    assertReady();
+                    var card = current.additions[j];
+                    var row = current.rows[card.row];
+                    if (row.state !== 'running') { row.state = 'running'; updatePlanRow(card.row); }
+                    setTransferStatus('가져오는 중 · ' + (j + 1) + '/' + current.additions.length + ' · ' + row.title);
+                    await addMemoryCard(currentChatId, card);
+                    row.done++;
+                    if (row.done === row.added) row.state = 'done';
+                    updatePlanRow(card.row);
+                    if (j < current.additions.length - 1) await pauseMs(MEMORY_WRITE_GAP_MS);
+                }
+            } catch (error) {
+                current.rows.forEach(function(row, index) {
+                    if (row.state === 'running') { row.state = 'error'; row.error = memoryErrorText(error); }
+                    else if (row.state === 'pending') row.state = 'aborted';
+                    updatePlanRow(index);
+                });
+                throw error;
+            }
+            setTransferStatus('서버 반영 확인 중…');
+            await verifyMemoryPlan(currentChatId, { additions:current.additions }, live.cards);
+        }
+
+        async function runPlan() {
+            if (!plan || plan.blockReason || running) return;
+            var current = plan;
+            var involved = [currentChatId].concat(current.rows.map(function(row) { return row.id; }));
+            setRunning(true);
+            var failure = null;
+            try {
+                await withManualMemoryLocks(involved, currentChatId, function(assertReady) {
+                    return current.direction === 'push' ? runPush(current, assertReady) : runPull(current, assertReady);
+                });
+            } catch (error) {
+                failure = error;
+            }
+            if (closed) { running = false; return; }
+            var added = current.rows.reduce(function(sum, row) { return sum + row.done; }, 0);
+            var failedRooms = current.rows.filter(function(row) { return row.state === 'error'; }).length;
+            if (failure && !added) {
+                // 아무것도 바꾸지 못했으면 선택을 유지한 채 목록으로 돌아가 다시 미리보기할 수 있게 한다.
+                setRunning(false);
+                backToSelect(false);
+                setTransferStatus('실행하지 못했습니다: ' + memoryErrorText(failure));
+                return;
+            }
+            step = 'done';
+            lastRunFailed = !!failure || failedRooms > 0;
+            if (current.direction === 'pull') {
+                refreshNativeMemoryDialog();
+                commentStale = true;
+            }
+            if (failure) {
+                setTransferStatus('중단 · ' + memoryErrorText(failure) + '\n지금까지 추가한 ' + added + '개 카드는 남아 있습니다. 같은 방으로 다시 실행하면 이미 있는 카드는 건너뜁니다.');
+            } else if (current.direction === 'pull') {
+                setTransferStatus('가져오기 완료 · 이 방에 ' + added + '개 카드를 추가했습니다.');
+            } else {
+                setTransferStatus('이식 완료 · ' + added + '개 카드 추가' + (failedRooms ? ' · 실패한 방 ' + failedRooms + '개 (다시 실행하면 이미 있는 카드는 건너뜁니다)' : '') + '. 이 방은 그대로입니다.');
+            }
+            setRunning(false);
+            fetchMemoryState(currentChatId).then(function(state) {
+                if (closed) return;
+                currentMemory = state;
+                updateLead();
+            }).catch(function() {});
+        }
+
+        // ---------- 백업 · 복원 ----------
+        var imported = null;
+        var importName = '';
+        var importState = null;
+        var importSnapshot = '';
+        var previewPlans = null;
+        var fileRequest = 0;
+
+        function updateArchiveButtons() {
+            var add = previewPlans && previewPlans.add;
+            var overwrite = previewPlans && previewPlans.overwrite;
+            addBtn.disabled = running || !add || !!add.blockReason || !add.additions.length;
+            overwriteBtn.disabled = running || !overwrite || !!overwrite.blockReason || !(overwrite.patches.length || overwrite.additions.length || overwrite.deletions.length);
+        }
+
+        function describeImportPlan(target) {
+            var lines = [];
+            if (target.overwrite) {
+                lines.push('덮어쓰기 · 수정 ' + target.patches.length + ' · 추가 ' + target.additions.length + ' · 삭제 ' + target.deletions.length + ' · 그대로 ' + target.skipped);
+                if (target.protectedCount) lines.push('보호 카드 ' + target.protectedCount + '개(' + (includeUserInput.checked ? 'ID 없는 카드' : '[추가] 카드 등') + ')는 바꾸지 않습니다.');
+                target.patches.slice(0, 6).forEach(function(pair) { lines.push('  수정: ' + pair.target.title + ' → ' + pair.card.title); });
+                target.deletions.slice(0, 6).forEach(function(card) { lines.push('  삭제: ' + card.title); });
+            } else {
+                lines.push('추가 복원 · 새 카드 ' + target.additions.length + '개 추가 · 이미 있는 ' + target.skipped + '개 건너뜀');
+            }
+            target.additions.slice(0, 6).forEach(function(card) { lines.push('  추가: ' + card.title); });
+            var shown = Math.min(6, target.patches.length) + Math.min(6, target.deletions.length) + Math.min(6, target.additions.length);
+            var total = target.patches.length + target.deletions.length + target.additions.length;
+            if (total > shown) lines.push('  그 밖의 변경 ' + (total - shown) + '개');
+            if (!total) lines.push('  바꿀 카드가 없습니다.');
+            else lines.push('[추가] 카드 ' + target.userCount + ' → ' + target.userAfter + '/' + MEMORY_USER_CARD_LIMIT);
+            if (target.blockReason) lines.push('실행 불가: ' + target.blockReason);
+            return lines.join('\n');
+        }
+
+        function importPlanOptions(state, overwrite) {
+            return { overwrite:overwrite, includeUserAdded:includeUserInput.checked, userCount:state.userCount };
+        }
+
+        function computeImportPreview() {
+            if (!imported || !importState) return;
+            previewPlans = {
+                add:makeMemoryImportPlan(imported, importState.cards, importPlanOptions(importState, false)),
+                overwrite:makeMemoryImportPlan(imported, importState.cards, importPlanOptions(importState, true))
+            };
+            importPreview.textContent = '"' + importName + '" 카드 ' + imported.length + '개 · 지금 서버 ' + importState.cards.length + '개\n\n' +
+                describeImportPlan(previewPlans.add) + '\n\n' + describeImportPlan(previewPlans.overwrite);
+            updateArchiveButtons();
+        }
+
+        async function refreshImportPreview(requestId) {
+            var state = await fetchMemoryState(currentChatId);
+            if (closed || requestId !== fileRequest) return;
+            importState = state;
+            importSnapshot = memoryArchiveSnapshot(state.cards);
+            computeImportPreview();
+        }
+
+        function resetImport(message) {
+            imported = null; importState = null; previewPlans = null; importSnapshot = '';
+            fileInput.value = '';
+            if (message) importPreview.textContent = message;
+            updateArchiveButtons();
+        }
+
+        includeUserInput.onchange = function() { if (!running) computeImportPreview(); };
+
+        fileInput.onchange = async function() {
+            var file = fileInput.files && fileInput.files[0];
+            if (!file || running) return;
+            var requestId = ++fileRequest;
+            imported = null; importState = null; previewPlans = null; importSnapshot = '';
+            updateArchiveButtons();
+            try {
+                var cards = await readMemoryArchiveFile(file);
+                if (closed || requestId !== fileRequest) return;
+                if (String(getChatId() || '').toLowerCase() !== currentChatId) throw new Error('채팅방이 바뀌었습니다. 현재 방에서 다시 열어주세요.');
+                imported = cards;
+                importName = file.name || '선택한 파일';
+                importPreview.textContent = '서버의 장기기억과 비교하고 있습니다…';
+                await refreshImportPreview(requestId);
+                setArchiveStatus('파일을 읽었습니다. 적용하기 전에 변경 내용을 확인해주세요.');
+            } catch (error) {
+                if (closed || requestId !== fileRequest) return;
+                resetImport('파일을 읽지 못했습니다: ' + error.message);
+                setArchiveStatus('복원할 파일을 다시 선택해주세요.');
+            }
+        };
+
+        backupBtn.onclick = async function() {
+            if (running) return;
+            setRunning(true);
+            try {
+                var saved = await withManualMemoryLocks([currentChatId], currentChatId, async function(assertReady) {
+                    var cards = await fetchSummaries({ strict:true, silent:true, chatId:currentChatId });
+                    var extras = {};
+                    var missing = [];
+                    for (var i = 0; i < MEMORY_EXTRA_TYPES.length; i++) {
+                        assertReady();
+                        var type = MEMORY_EXTRA_TYPES[i];
+                        setArchiveStatus(type.label + ' 읽는 중…');
+                        try {
+                            var list = await fetchSummaries({ strict:true, silent:true, chatId:currentChatId, type:type.key });
+                            if (list.length) extras[type.key] = list;
+                        } catch (error) {
+                            missing.push(type.label);
+                        }
+                    }
+                    assertReady();
+                    if (!currentTitle) {
+                        // 방 이식 탭을 열지 않았으면 파일 이름에 쓸 방 제목을 따로 읽는다.
+                        try {
+                            var detail = await apiCall('GET', '', null, { strict:true, silent:true, chatId:currentChatId });
+                            var room = detail && (detail.data && (detail.data.chat || detail.data) || detail);
+                            if (room && (room.title || room.story)) currentTitle = memoryRoomTitle(room);
+                        } catch (ignored) {}
+                    }
+                    downloadMemoryServerBackup(cards, currentChatId, currentTitle, extras);
+                    return { count:cards.length, extras:extras, missing:missing };
+                });
+                var parts = MEMORY_EXTRA_TYPES.filter(function(type) { return saved.extras[type.key]; }).map(function(type) { return type.label + ' ' + saved.extras[type.key].length + '개'; });
+                setArchiveStatus('장기기억 ' + saved.count + '개' + (parts.length ? ' · ' + parts.join(' · ') : '') + '를 백업 파일로 내려받도록 요청했습니다. 브라우저 다운로드 목록에서 저장됐는지 확인해주세요.' +
+                    (saved.missing.length ? '\n읽지 못해 뺀 항목: ' + saved.missing.join(' · ') : ''));
+            } catch (error) {
+                setArchiveStatus('백업 실패: ' + memoryErrorText(error));
+            } finally {
+                setRunning(false);
+            }
+        };
+
+        async function applyImport(overwrite) {
+            if (running || !imported || !previewPlans) return;
+            var previewPlan = overwrite ? previewPlans.overwrite : previewPlans.add;
+            if (previewPlan.blockReason) { setArchiveStatus(previewPlan.blockReason); return; }
+            if (!overwrite && !(await showUiConfirm(describeImportPlan(previewPlan) + '\n\n파일에 없는 기존 카드는 그대로 둡니다.', '장기기억 추가 복원', { confirmText:'추가 복원' }))) return;
+            var cards = imported.slice();
+            var expectedSnapshot = importSnapshot;
+            var includeUser = includeUserInput.checked;
+            setRunning(true);
+            var progress = { patched:0, added:0, deleted:0, skipped:previewPlan.skipped };
+            var cancelled = false;
+            commentStale = true;
+            try {
+                await withManualMemoryLocks([currentChatId], currentChatId, async function(assertReady) {
+                    if (hasPendingMemoryPlan(currentChatId)) throw new Error(MEMORY_PENDING_PLAN_MESSAGE);
+                    var state = await fetchMemoryState(currentChatId);
+                    assertReady();
+                    if (memoryArchiveSnapshot(state.cards) !== expectedSnapshot) throw new Error('미리보기 뒤 서버 장기기억이 바뀌었습니다. 파일을 다시 선택해 비교해주세요.');
+                    var livePlan = makeMemoryImportPlan(cards, state.cards, { overwrite:overwrite, includeUserAdded:includeUser, userCount:state.userCount });
+                    if (overwrite) {
+                        downloadMemoryServerBackup(state.cards, currentChatId, currentTitle);
+                        setArchiveStatus('덮어쓰기 전에 지금 서버 내용을 백업 파일로 내려받도록 요청했습니다.');
+                        var confirmed = await showUiConfirm(describeImportPlan(livePlan) + '\n\n지금 서버 내용을 백업 파일로 내려받도록 요청했습니다. 브라우저 다운로드 목록에서 저장된 것을 확인한 뒤 진행하세요. 도중에 멈추면 이미 바뀐 카드는 자동으로 되돌리지 않습니다.', '장기기억 덮어쓰기', { confirmText:'백업 확인 후 덮어쓰기', danger:true, preventBackdropClose:true });
+                        if (!confirmed) { cancelled = true; return; }
+                        assertReady();
+                        if (hasPendingMemoryPlan(currentChatId)) throw new Error(MEMORY_PENDING_PLAN_MESSAGE);
+                        state = await fetchMemoryState(currentChatId);
+                        assertReady();
+                        if (memoryArchiveSnapshot(state.cards) !== expectedSnapshot) throw new Error('확인하는 동안 서버 장기기억이 바뀌었습니다. 파일을 다시 선택해 비교해주세요.');
+                        livePlan = makeMemoryImportPlan(cards, state.cards, { overwrite:true, includeUserAdded:includeUser, userCount:state.userCount });
+                    }
+                    if (livePlan.blockReason) throw new Error(livePlan.blockReason);
+                    await applyMemoryImportPlan(currentChatId, livePlan, state.cards, assertReady, setArchiveStatus, progress);
+                });
+                if (cancelled) { setArchiveStatus('덮어쓰기를 취소했습니다. 백업 파일 다운로드는 요청된 상태이니 다운로드 목록을 확인해주세요.'); return; }
+                setArchiveStatus('완료 · 수정 ' + progress.patched + ' · 추가 ' + progress.added + ' · 삭제 ' + progress.deleted + ' · 그대로 ' + progress.skipped);
+                refreshNativeMemoryDialog();
+                try { await refreshImportPreview(++fileRequest); }
+                catch (error) {
+                    resetImport('변경은 끝났지만 새 비교 결과를 읽지 못했습니다. 파일을 다시 선택해주세요.');
+                    setArchiveStatus('완료했지만 새 미리보기를 읽지 못했습니다: ' + error.message);
+                }
+            } catch (error) {
+                setArchiveStatus('중단 · 수정 ' + progress.patched + ' · 추가 ' + progress.added + ' · 삭제 ' + progress.deleted + '\n' + memoryErrorText(error) + '\n이미 반영된 항목은 자동으로 되돌리지 않습니다. 백업 파일과 지금 목록을 확인해주세요.');
+                resetImport('파일을 다시 선택하면 지금 서버 내용과 다시 비교합니다.');
+            } finally {
+                setRunning(false);
+            }
+        }
+        addBtn.onclick = function() { applyImport(false); };
+        overwriteBtn.onclick = function() { applyImport(true); };
+
+        // ---------- 클립보드 복사 ----------
+        function selectedCommentCards() {
+            return sortSummariesOldest((commentCards || []).filter(function(card, index) { return commentSelected.has(index); }));
+        }
+
+        function updateCommentCount() {
+            if (!commentCards) return;
+            var total = commentCards.length;
+            var picked = selectedCommentCards();
+            commentCountEl.textContent = total
+                ? total + '개 중 ' + picked.length + '개 선택' + (picked.length ? ' · 복사할 글자 ' + buildMemoryCommentText(picked, prefixInput.value).length.toLocaleString() + '자' : '')
+                : '이 방에 장기기억이 없습니다.';
+            commentAllBtn.hidden = !total;
+            commentAllBtn.textContent = total && commentSelected.size === total ? '전체 해제' : '전체 선택';
+            updateFooter();
+        }
+
+        function renderCommentList() {
+            if (closed) return;
+            commentListEl.innerHTML = (commentCards || []).map(function(card, index) {
+                var checked = commentSelected.has(index);
+                return '<label class="ce-mt-room' + (checked ? ' is-checked' : '') + '">' +
+                    '<input type="checkbox" value="' + index + '"' + (checked ? ' checked' : '') + (running ? ' disabled' : '') + '>' +
+                    '<span class="ce-mt-room-main"><span class="ce-mt-room-title">' + escapeHtml(String(card.title || '(제목 없음)')) + '</span>' +
+                    '<span class="ce-mt-room-snippet">' + escapeHtml(String(card.summary || '').replace(/\s+/g, ' ').trim()) + '</span></span>' +
+                    (isUserAddedSummary(card) ? '<span class="ce-mc-badge">추가</span>' : '') +
+                '</label>';
+            }).join('') || '<div class="ce-mt-empty">' + (commentCards ? '복사할 장기기억이 없습니다.' : '장기기억을 불러오는 중입니다…') + '</div>';
+            updateCommentCount();
+        }
+
+        async function loadCommentCards() {
+            var token = ++commentToken;
+            commentStale = false;
+            commentCards = null;
+            commentSelected = new Set();
+            commentAllBtn.hidden = true;
+            commentCountEl.textContent = '장기기억을 불러오는 중…';
+            setCommentStatus('');
+            renderCommentList();
+            try {
+                var cards = await fetchSummaries({ strict:true, silent:true, chatId:currentChatId });
+                if (closed || token !== commentToken) return;
+                commentCards = cards;
+                renderCommentList();
+            } catch (error) {
+                if (closed || token !== commentToken) return;
+                commentStale = true;
+                commentCards = [];
+                renderCommentList();
+                commentCountEl.textContent = '장기기억을 읽지 못했습니다.';
+                setCommentStatus('불러오기 실패: ' + memoryErrorText(error) + '\n탭을 다시 누르면 다시 불러옵니다.');
+            }
+        }
+
+        commentListEl.addEventListener('change', function(event) {
+            var input = event.target;
+            if (!input || input.type !== 'checkbox' || running) return;
+            var index = Number(input.value);
+            if (input.checked) commentSelected.add(index);
+            else commentSelected.delete(index);
+            var row = input.closest('.ce-mt-room');
+            if (row) row.classList.toggle('is-checked', input.checked);
+            updateCommentCount();
+        });
+        commentAllBtn.onclick = function() {
+            if (running || !commentCards || !commentCards.length) return;
+            var selectAll = commentSelected.size !== commentCards.length;
+            commentSelected = new Set(selectAll ? commentCards.map(function(card, index) { return index; }) : []);
+            renderCommentList();
+        };
+        prefixInput.addEventListener('input', function() {
+            clearTimeout(prefixTimer);
+            prefixTimer = setTimeout(updateCommentCount, 150);
+        });
+
+        async function copyComment() {
+            var cards = selectedCommentCards();
+            if (!cards.length) return;
+            var text = buildMemoryCommentText(cards, prefixInput.value);
+            try {
+                await copyTextToClipboard(text);
+                var prefix = prefixInput.value.trim();
+                if (prefix && prefix !== MEMORY_COMMENT_DEFAULT_PREFIX) localStorage.setItem(MEMORY_COMMENT_PREFIX_KEY, prefix);
+                else localStorage.removeItem(MEMORY_COMMENT_PREFIX_KEY);
+                setCommentStatus('클립보드에 복사했습니다 · 카드 ' + cards.length + '개 · ' + text.length.toLocaleString() + '자');
+                showToast('장기기억 ' + cards.length + '개를 주석으로 복사했습니다.');
+            } catch (error) {
+                setCommentStatus('복사하지 못했습니다: ' + error.message);
+            }
+        }
+
+        updateLead();
+        updateScopeButtons();
+        prefixInput.value = localStorage.getItem(MEMORY_COMMENT_PREFIX_KEY) || MEMORY_COMMENT_DEFAULT_PREFIX;
+        fetchMemoryState(currentChatId).then(function(state) {
+            if (closed) return;
+            currentMemory = state;
+            updateLead();
+        }).catch(function(error) {
+            if (!closed) metaEl.textContent = '이 방의 장기기억을 읽지 못했습니다: ' + error.message;
+        });
+        var savedTab = localStorage.getItem(MEMORY_TOOLS_TAB_KEY);
+        selectTab(savedTab === 'archive' || savedTab === 'comment' ? savedTab : 'transfer');
+    }
+
     function showMemoryEditorModal(parentOverlay) {
         var overlay = document.createElement('div');
         overlay.className = 'crack-ext-ai-overlay';
@@ -5311,7 +6938,7 @@ if (mainModel && mainProvider) {
         html += '</div></div>';
 
         html += '<div class="crack-ext-ai-modal-btns" id="ce-ai-main-footer">';
-        html += '<div id="ce-ai-main-actions" style="display:flex;gap:8px;flex-wrap:wrap;"><button class="crack-ext-ai-mbtn" id="ce-ai-generate">' + UI_ICONS.sparkle + '<span>요약 생성</span></button><button class="crack-ext-ai-mbtn" id="ce-ai-compress-btn">' + UI_ICONS.flask + '<span>2차 압축</span></button><button class="crack-ext-ai-mbtn" id="ce-ai-memory-edit-btn">' + UI_ICONS.edit + '<span>장기기억 편집</span></button></div>';
+        html += '<div id="ce-ai-main-actions" style="display:flex;gap:8px;flex-wrap:wrap;"><button class="crack-ext-ai-mbtn" id="ce-ai-generate">' + UI_ICONS.sparkle + '<span>요약 생성</span></button><button class="crack-ext-ai-mbtn" id="ce-ai-compress-btn">' + UI_ICONS.flask + '<span>2차 압축</span></button><button class="crack-ext-ai-mbtn" id="ce-ai-memory-edit-btn">' + UI_ICONS.edit + '<span>장기기억 편집</span></button><button class="crack-ext-ai-mbtn" id="ce-ai-memory-archive-btn">' + UI_ICONS.transfer + '<span>이식·백업·복사</span></button></div>';
         html += '<div class="crack-ext-ai-footer-right"><button class="crack-ext-ai-mbtn" id="ce-ai-prompt-back" style="display:none;">돌아가기</button><button class="crack-ext-ai-mbtn crack-ext-ai-mbtn-p" id="ce-ai-save">' + UI_ICONS.plus + '<span>추가하기</span></button></div>';
         html += '</div></div>';
 
@@ -5331,6 +6958,7 @@ if (mainModel && mainProvider) {
         var btnGen = overlay.querySelector('#ce-ai-generate');
         var btnCompress = overlay.querySelector('#ce-ai-compress-btn');
         var btnMemoryEdit = overlay.querySelector('#ce-ai-memory-edit-btn');
+        var btnMemoryArchive = overlay.querySelector('#ce-ai-memory-archive-btn');
         var btnXClose = overlay.querySelector('#ce-ai-x-close');
         var btnTogglePrompt = overlay.querySelector('#ce-ai-toggle-prompt');
         var btnPromptBack = overlay.querySelector('#ce-ai-prompt-back');
@@ -6220,6 +7848,11 @@ if (btnTurnInfo && turnInfoPopover) {
             overlay.style.display = 'none';
             showMemoryEditorModal(overlay);
         };
+        btnMemoryArchive.onclick = function(e) {
+            e.stopPropagation();
+            overlay.style.display = 'none';
+            showMemoryArchiveModal(overlay);
+        };
 
         btnGen.onclick = async function(e) {
             e.stopPropagation();
@@ -6314,7 +7947,7 @@ if (btnTurnInfo && turnInfoPopover) {
             var addFailures = [];
             for (var j = 0; j < parsedCards.length; j++) {
                 btnSave.innerHTML = UI_ICONS.plus + '<span>추가 중... (' + (j + 1) + '/' + parsedCards.length + ')</span>';
-                var res = await apiCall('POST', '/summaries', { type:'shortTerm', title:parsedCards[j].title, summary:parsedCards[j].summary });
+                var res = await apiCall('POST', '/summaries', { type:'longTerm', title:parsedCards[j].title, summary:parsedCards[j].summary });
                 if (res) successCount++;
                 else addFailures.push('[' + parsedCards[j].title + '] 추가 실패');
             }
