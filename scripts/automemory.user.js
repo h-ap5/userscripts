@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.1
+// @version      2.4.0.2
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -848,11 +848,12 @@ This requirement controls coverage only. It must not change or add any output fo
         return m ? m[2] : null;
     }
 
+    // 본문과 속성값(value="…") 모두에 쓰이므로 따옴표까지 바꾼다. 제목에 "가 있으면 편집창 입력값이 잘리던 문제를 막는다.
     function escapeHtml(s) {
         if (!s) return "";
-        const d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
+        return String(s).replace(/[&<>"']/g, function(ch) {
+            return ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : ch === '"' ? '&quot;' : '&#39;';
+        });
     }
 
     function apiCall(method, path, body, options) {
@@ -931,6 +932,7 @@ async function fetchSummaries(options) {
                 break;
             }
             seenCursors.add(cursor);
+            await pauseMs(MEMORY_READ_GAP_MS);
         } else {
             break;
         }
@@ -947,6 +949,8 @@ async function fetchSummaries(options) {
     var MEMORY_TRANSFER_MAX_ROOMS = 50;
     var MEMORY_TRANSFER_MAX_CARDS = 2000;
     var MEMORY_WRITE_GAP_MS = 80;
+    // 여러 페이지·여러 방을 이어 읽을 때 요청 사이에 두는 짧은 간격. 결정화 캐즘 SDK의 기본값과 같다.
+    var MEMORY_READ_GAP_MS = 20;
     var MEMORY_PENDING_PLAN_MESSAGE = '끝나지 않은 자동 장기기억 저장 계획이 있습니다. 해당 방의 자동 정리를 마치거나 "기준점 초기화"로 계획을 정리한 뒤 다시 시도해주세요.';
     var MEMORY_ROOM_CACHE = null;
 
@@ -1299,22 +1303,26 @@ async function fetchSummaries(options) {
     async function applyMemoryImportPlan(chatId, plan, beforeCards, assertReady, onProgress, result) {
         result = result || { patched:0, added:0, deleted:0, skipped:plan.skipped };
         var requestOptions = { strict:true, silent:true, chatId:chatId };
-        for (var i = 0; i < plan.patches.length; i++) {
+        var writes = 0;
+        async function beforeWrite() {
+            if (writes++) await pauseMs(MEMORY_WRITE_GAP_MS);
             assertReady();
+        }
+        for (var i = 0; i < plan.patches.length; i++) {
+            await beforeWrite();
             var patch = plan.patches[i];
             onProgress('덮어쓰기 ' + (i + 1) + '/' + plan.patches.length);
             assertMemoryMutationResponse(await updateExistingSummary(patch.target, patch.card.title, patch.card.summary, requestOptions));
             result.patched++;
         }
         for (var j = 0; j < plan.additions.length; j++) {
-            assertReady();
+            await beforeWrite();
             onProgress('추가 ' + (j + 1) + '/' + plan.additions.length);
             await addMemoryCard(chatId, plan.additions[j]);
             result.added++;
-            if (j < plan.additions.length - 1) await pauseMs(MEMORY_WRITE_GAP_MS);
         }
         for (var k = 0; k < plan.deletions.length; k++) {
-            assertReady();
+            await beforeWrite();
             onProgress('남는 카드 삭제 ' + (k + 1) + '/' + plan.deletions.length);
             assertMemoryMutationResponse(await deleteExistingSummary(plan.deletions[k], requestOptions));
             result.deleted++;
@@ -1415,6 +1423,7 @@ async function fetchSummaries(options) {
             if (done) return { rooms:rooms, complete:!stalled && data.hasNext !== true };
             cursors.add(next);
             cursor = next;
+            await pauseMs(MEMORY_READ_GAP_MS);
         }
         return { rooms:rooms, complete:false };
     }
@@ -1463,6 +1472,7 @@ async function fetchRecentMessageObjects(limit, options) {
                 break;
             }
             seenCursors.add(cursor);
+            await pauseMs(MEMORY_READ_GAP_MS);
         } else {
             break;
         }
@@ -5838,6 +5848,7 @@ margin-bottom:12px;
                 if (closed) throw new Error('창이 닫혔습니다.');
                 var room = roomById.get(ids[i]);
                 setTransferStatus('대상 방 확인 중 · ' + (i + 1) + '/' + ids.length + ' · ' + memoryRoomTitle(room));
+                if (i) await pauseMs(MEMORY_READ_GAP_MS);
                 var target = await fetchMemoryState(ids[i]);
                 var known = new Set(target.cards.map(memoryCardSignature));
                 var additions = source.cards.filter(function(card) { return !known.has(memoryCardSignature(card)); });
@@ -5867,6 +5878,7 @@ margin-bottom:12px;
                 if (closed) throw new Error('창이 닫혔습니다.');
                 var room = roomById.get(ids[i]);
                 setTransferStatus('가져올 방 확인 중 · ' + (i + 1) + '/' + ids.length + ' · ' + memoryRoomTitle(room));
+                if (i) await pauseMs(MEMORY_READ_GAP_MS);
                 var source = await fetchMemoryState(ids[i]);
                 var row = { id:ids[i], title:memoryRoomTitle(room), total:source.cards.length, added:0, existing:0, invalid:0, state:'pending', done:0, todo:0 };
                 sortSummariesOldest(source.cards).forEach(function(item) {
@@ -5942,6 +5954,7 @@ margin-bottom:12px;
                 row.todo = row.additions.length;
                 updatePlanRow(i);
                 try {
+                    await pauseMs(MEMORY_WRITE_GAP_MS);
                     var live = await fetchMemoryState(row.id);
                     var known = new Set(live.cards.map(memoryCardSignature));
                     var todo = row.additions.filter(function(card) { return !known.has(memoryCardSignature(card)); });
@@ -6560,6 +6573,7 @@ margin-bottom:12px;
             var failed = [];
             for (var i = 0; i < targets.length; i++) {
                 var item = targets[i];
+                if (i) await pauseMs(MEMORY_WRITE_GAP_MS);
                 saveBtn.innerHTML = UI_ICONS.save + '<span>저장 중... (' + (i + 1) + '/' + targets.length + ')</span>';
                 try {
                     if (item.deletePending) {
