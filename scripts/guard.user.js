@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🛑 Crack 일일 크래커 가드
 // @namespace    crack-daily-cracker-guard
-// @version      1.2.7
+// @version      1.2.8
 // @description  오늘 사용한 크래커를 내역 API로 합산하고, 설정한 일일 목표의 허용 구간 안에서 메시지 전송과 재생성을 막습니다.
 // @match        https://crack.wrtn.ai/*
 // @match        http://crack.wrtn.ai/*
@@ -14,7 +14,7 @@
     'use strict';
 
     const SCRIPT_NAME = 'Crack 일일 크래커 가드';
-    const VERSION = '1.3.0';
+    const VERSION = '1.4.0';
     const API_HISTORY = 'https://crack-api.wrtn.ai/crack-cash/crackers/history';
     const CONFIG_KEY = 'cdc_guard_config_v1';
     // 첨부된 대시보드가 실제로 사용 중인 API 페이지 크기에 맞춘다.
@@ -51,7 +51,11 @@
     let toastTimer = null;
     let currentUiInlineHost = null;
     let currentUiMountParent = null;
+    let currentUiRadiosonde = null;
+    let currentReservedHost = null;
     let observedPathname = window.location.pathname;
+    const GUARD_PILL_HEIGHT = 20;
+    const GUARD_STACK_GAP = 4;
 
     const seoulDayFormatter = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'Asia/Seoul',
@@ -63,7 +67,7 @@
         timeZone: 'Asia/Seoul',
         hour: '2-digit',
         minute: '2-digit',
-        second: '2-digit',
+        hourCycle: 'h23',
     });
 
     const state = {
@@ -81,17 +85,12 @@
         host: null,
         shadow: null,
         pill: null,
-        pillDot: null,
         pillText: null,
         panel: null,
-        closeButton: null,
-        statusEyebrow: null,
-        statusValue: null,
-        statusMessage: null,
-        progress: null,
-        targetValue: null,
-        marginValue: null,
-        stopValue: null,
+        statusText: null,
+        gauge: null,
+        summary: null,
+        message: null,
         updatedValue: null,
         enabledInput: null,
         limitInput: null,
@@ -99,7 +98,6 @@
         regenerationInput: null,
         validation: null,
         refreshButton: null,
-        saveButton: null,
         toast: null,
     };
 
@@ -196,9 +194,12 @@
         if (!decision.blocked) return '';
         const { range } = decision;
         if (decision.phase === 'upper-reached') {
-            return `오늘 ${formatNumber(state.used)}개로 허용 범위 상한 ${formatNumber(range.upper)}개를 넘었어요.`;
+            return `오늘 ${formatNumber(state.used)}개로 멈춤 구간 상한 ${formatNumber(range.upper)}개를 넘었어요.`;
         }
-        return `오늘 ${formatNumber(state.used)}개에서 목표 허용 범위 ${formatNumber(range.lower)}~${formatNumber(range.upper)}개에 도달했어요.`;
+        if (decision.phase === 'target-reached') {
+            return `오늘 ${formatNumber(state.used)}개로 목표 ${formatNumber(range.target)}개에 닿았어요.`;
+        }
+        return `오늘 ${formatNumber(state.used)}개로 멈춤 구간 ${formatNumber(range.lower)}~${formatNumber(range.upper)}개에 들어왔어요.`;
     }
 
     function isBlocked() {
@@ -819,8 +820,14 @@
         const style = document.createElement('style');
         style.id = 'cdcg-outer-style';
         style.textContent = `
+            /* 단독 라디오존데처럼 입력창 호스트 위에 겹쳐 그리는 막대가 있을 때만
+               가드 한 줄만큼 호스트를 늘리고 그 막대를 같이 내려 가드 자리를 만든다. */
             [data-cdcg-guard-space="1"] {
-                padding-top: calc(var(--cdcg-base-padding-top, 0px) + 20px) !important;
+                padding-top: calc(var(--cdcg-base-padding-top, 0px) + var(--cdcg-guard-reserve, 24px)) !important;
+            }
+
+            [data-cdcg-guard-space="1"] > #igx-live-popup {
+                top: calc(var(--cdcg-radio-base-top, 6px) + var(--cdcg-guard-reserve, 24px)) !important;
             }
 
             #cdcg-root {
@@ -848,6 +855,21 @@
         (document.head || document.documentElement).appendChild(style);
     }
 
+    const ICON_PATHS = Object.freeze({
+        close: '<path d="M6 6l12 12M18 6L6 18"/>',
+        minus: '<path d="M5 12h14"/>',
+        plus: '<path d="M12 5v14M5 12h14"/>',
+        shield: '<path d="M12 3l7.5 3v5.5c0 4.6-3.2 8.2-7.5 9.5-4.3-1.3-7.5-4.9-7.5-9.5V6z"/><path d="M9 12l2 2 4-4"/>',
+        target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/>',
+        range: '<path d="M7 8l-4 4 4 4M17 8l4 4-4 4M3 12h18"/>',
+        repeat: '<path d="M4 12V9a3 3 0 0 1 3-3h13"/><path d="M17 3l3 3-3 3"/><path d="M20 12v3a3 3 0 0 1-3 3H4"/><path d="M7 21l-3-3 3-3"/>',
+        refresh: '<path d="M20 11a8.1 8.1 0 0 0-15.5-2"/><path d="M4 5v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2"/><path d="M20 19v-4h-4"/>',
+    });
+
+    function icon(name, className = '') {
+        return `<svg class="${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICON_PATHS[name]}</svg>`;
+    }
+
     function mountUi() {
         if (ui.host || !document.body) return;
         injectOuterStyle();
@@ -855,52 +877,85 @@
         const host = document.createElement('div');
         host.id = 'cdcg-root';
         host.dataset.theme = getPageTheme();
+        host.dataset.skin = 'crack';
         host.hidden = true;
         const shadow = host.attachShadow({ mode: 'open' });
         shadow.innerHTML = `
             <style>
+                /* 크랙이 body에 둔 색 토큰을 그대로 쓴다. 두 번째 값은 토큰이 없을 때의 다크 기본값. */
                 :host {
-                    --cdcg-primary: #ff6301;
-                    --cdcg-primary-hover: #e85b00;
-                    --cdcg-surface: rgba(24, 24, 27, .98);
-                    --cdcg-surface-soft: rgba(39, 39, 42, .98);
-                    --cdcg-row-hover: rgba(255, 255, 255, .07);
-                    --cdcg-border: rgba(255, 255, 255, .14);
-                    --cdcg-text: rgba(255, 255, 255, .90);
-                    --cdcg-muted: rgba(255, 255, 255, .62);
-                    --cdcg-faint: rgba(255, 255, 255, .44);
-                    --cdcg-inline-text: var(--sgb-readable-text, rgba(255, 255, 255, .88));
-                    --cdcg-inline-muted: var(--sgb-muted-text, rgba(255, 255, 255, .58));
-                    --cdcg-accent-safe: #3ddc84;
-                    --cdcg-accent-warn: #ffd54a;
-                    --cdcg-accent-danger: #ff5c5c;
-                    --cdcg-font-xs: 10px;
-                    --cdcg-font-sm: 11px;
-                    --cdcg-font-md: 12px;
-                    --cdcg-font-title: 13px;
+                    --g-surface: var(--bg_elevated_primary, #242321);
+                    --g-surface-image: none;
+                    --g-backdrop: none;
+                    --g-control: var(--surface_tertiary, #2E2D2B);
+                    --g-line: var(--divider_secondary, #42413D);
+                    --g-text: var(--text_primary, #F0EFEB);
+                    --g-text-2: var(--text_secondary, #A8A69D);
+                    --g-text-3: var(--text_tertiary, #85837D);
+                    --g-hover: var(--state_hover, rgba(255, 255, 255, .1));
+                    --g-switch-on: var(--surface_primary, #FCFCFA);
+                    --g-switch-off: var(--divider_primary, #61605A);
+                    --g-thumb: var(--bg_screen, #141413);
+                    --g-safe: var(--alert_success, #2CAA00);
+                    --g-near: var(--icon_cracker_primary, #FFB938);
+                    --g-danger: var(--text_brand, #FF6352);
+                    --g-warn: var(--alert_warning, #FFAA00);
+                    --g-off: var(--text_tertiary, #85837D);
+                    --g-band: var(--surface_brand_secondary, #6D231C);
+                    --g-caret: var(--text_brand, #FF6352);
+                    --g-focus: hsl(var(--focus, 240 5% 84% / .5));
+                    --g-shadow: 0 12px 32px rgba(0, 0, 0, .38), 0 2px 8px rgba(0, 0, 0, .22);
+                    --cdcg-inline-text: var(--sgb-readable-text, var(--text_primary, rgba(255, 255, 255, .88)));
+                    --cdcg-inline-muted: var(--sgb-muted-text, var(--text_secondary, rgba(255, 255, 255, .58)));
                     all: initial;
-                    color: var(--cdcg-text);
-                    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+                    color: var(--g-text);
+                    font-family: Pretendard, "Pretendard Variable", "Apple SD Gothic Neo", system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
                 }
 
                 :host([data-theme="light"]) {
-                    --cdcg-surface: rgba(250, 250, 250, .98);
-                    --cdcg-surface-soft: rgba(238, 238, 240, .98);
-                    --cdcg-row-hover: rgba(0, 0, 0, .06);
-                    --cdcg-border: rgba(0, 0, 0, .14);
-                    --cdcg-text: rgba(0, 0, 0, .85);
-                    --cdcg-muted: rgba(0, 0, 0, .62);
-                    --cdcg-faint: rgba(0, 0, 0, .44);
-                    --cdcg-inline-text: var(--sgb-readable-text, rgba(0, 0, 0, .82));
-                    --cdcg-inline-muted: var(--sgb-muted-text, rgba(0, 0, 0, .58));
-                    --cdcg-accent-safe: #1da851;
-                    --cdcg-accent-warn: #d49500;
-                    --cdcg-accent-danger: #e03535;
+                    --g-surface: var(--bg_elevated_primary, #FFFFFF);
+                    --g-control: var(--surface_tertiary, #F7F7F5);
+                    --g-line: var(--divider_secondary, #DBDAD5);
+                    --g-text: var(--text_primary, #1A1918);
+                    --g-text-2: var(--text_secondary, #61605A);
+                    --g-hover: var(--state_hover, rgba(0, 0, 0, .1));
+                    --g-switch-on: var(--surface_primary, #0D0D0C);
+                    --g-switch-off: var(--divider_primary, #C7C5BD);
+                    --g-thumb: var(--bg_screen, #FFFFFF);
+                    --g-near: var(--icon_cracker_primary, #D68B00);
+                    --g-danger: var(--text_brand, #FF4432);
+                    --g-band: var(--surface_brand_secondary, #FFCFC7);
+                    --g-caret: var(--text_brand, #FF4432);
+                    --g-focus: hsl(var(--focus, 0 0% 64% / .5));
+                    --g-shadow: 0 12px 32px rgba(26, 25, 24, .14), 0 2px 8px rgba(26, 25, 24, .08);
+                    --cdcg-inline-text: var(--sgb-readable-text, var(--text_primary, rgba(0, 0, 0, .82)));
+                    --cdcg-inline-muted: var(--sgb-muted-text, var(--text_secondary, rgba(0, 0, 0, .58)));
+                }
+
+                /* 테마 확프가 입력창을 꾸민 경우: 바탕·선·글자만 입력창을 따르고 상태 색은 크랙 것을 유지한다. */
+                :host([data-skin="composer"]) {
+                    --g-surface: var(--cdcg-panel-bg, rgba(24, 24, 27, .86));
+                    --g-surface-image: var(--cdcg-inline-bg-image, none);
+                    --g-backdrop: var(--cdcg-panel-backdrop, blur(16px));
+                    --g-line: var(--cdcg-inline-border, rgba(255, 255, 255, .16));
+                    --g-text: var(--sgb-readable-text, var(--text_primary, #F0EFEB));
+                    --g-text-2: var(--sgb-muted-text, var(--text_secondary, #A8A69D));
+                    --g-text-3: var(--sgb-muted-text, var(--text_tertiary, #85837D));
+                    --g-control: rgba(255, 255, 255, .08);
+                    --g-hover: rgba(255, 255, 255, .1);
+                    --g-switch-off: rgba(255, 255, 255, .26);
+                }
+
+                :host([data-skin="composer"][data-theme="light"]) {
+                    --g-control: rgba(0, 0, 0, .05);
+                    --g-hover: rgba(0, 0, 0, .06);
+                    --g-switch-off: rgba(0, 0, 0, .18);
                 }
 
                 *, *::before, *::after { box-sizing: border-box; }
-                button, input { font: inherit; }
+                button, input { margin: 0; font: inherit; color: inherit; letter-spacing: inherit; }
                 button { -webkit-tap-highlight-color: transparent; }
+                svg { display: block; flex: none; }
 
                 .dock {
                     position: absolute;
@@ -910,7 +965,6 @@
                     flex-direction: column;
                     align-items: center;
                     gap: 6px;
-                    transform: none;
                     pointer-events: none;
                 }
 
@@ -923,54 +977,33 @@
                 .pill { order: 3; }
 
                 .pill {
+                    --g-state: var(--g-safe);
                     width: 100%;
                     height: 20px;
                     min-height: 20px;
-                    margin-top: var(--cdcg-panel-lift, 0px);
                     display: flex;
                     align-items: center;
                     gap: 6px;
                     padding: 0 6px;
-                    border: 1px solid var(--cdcg-inline-border, var(--cdcg-border));
+                    border: 1px solid var(--cdcg-inline-border, var(--g-line));
                     border-radius: var(--cdcg-inline-radius, 6px);
-                    background-color: var(--cdcg-inline-bg-color, rgba(24, 24, 27, .72));
+                    background-color: var(--cdcg-inline-bg-color, var(--g-surface));
                     background-image: var(--cdcg-inline-bg-image, none);
                     backdrop-filter: var(--cdcg-inline-backdrop, none);
                     -webkit-backdrop-filter: var(--cdcg-inline-backdrop, none);
-                    color: var(--cdcg-text);
-                    box-shadow: none;
+                    color: var(--cdcg-inline-text);
                     cursor: pointer;
-                    transition: background 140ms ease;
+                    transition: filter 140ms ease;
                 }
 
                 .pill:hover { filter: brightness(1.08); }
                 .pill:active { opacity: .72; }
-                .pill:focus-visible { outline: 2px solid var(--cdcg-primary); outline-offset: 1px; }
-
-                .dot {
-                    width: 6px;
-                    height: 6px;
-                    flex: 0 0 6px;
-                    border-radius: 50%;
-                    background: var(--cdcg-accent-safe);
-                }
-
-                .pill[data-status="blocked"] .dot {
-                    background: var(--cdcg-accent-danger);
-                    box-shadow: 0 0 6px rgba(255, 92, 92, .9);
-                    animation: cdcg-blocked-pulse 1.25s ease-in-out infinite;
-                }
-
-                .pill[data-status="loading"] .dot,
-                .pill[data-status="warning"] .dot {
-                    background: var(--cdcg-accent-warn);
-                }
+                .pill:focus-visible { outline: 2px solid var(--g-focus); outline-offset: 1px; }
 
                 .pill-copy {
                     width: 100%;
                     min-width: 0;
                     display: flex;
-                    flex-direction: row;
                     align-items: center;
                     justify-content: space-between;
                     gap: 12px;
@@ -984,441 +1017,487 @@
                     overflow: hidden;
                 }
 
-                .pill-label {
-                    overflow: hidden;
-                    color: var(--cdcg-inline-text);
-                    font-size: var(--cdcg-font-sm);
-                    font-weight: 650;
-                    line-height: 1;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
+                .dot {
+                    width: 6px;
+                    height: 6px;
+                    flex: 0 0 6px;
+                    border-radius: 50%;
+                    background: var(--g-state);
                 }
 
                 .pill-summary {
                     overflow: hidden;
                     color: var(--cdcg-inline-muted);
-                    font-size: var(--cdcg-font-xs);
-                    font-weight: 560;
+                    font-size: 10px;
+                    font-weight: 500;
                     line-height: 1;
                     font-variant-numeric: tabular-nums;
                     text-overflow: ellipsis;
                     white-space: nowrap;
                 }
 
-                .pill[data-status="blocked"] .pill-summary { color: var(--cdcg-accent-danger); }
-                .pill[data-status="warning"] .pill-summary { color: var(--cdcg-accent-warn); }
-
-                @keyframes cdcg-blocked-pulse {
-                    0%, 100% { opacity: .62; box-shadow: 0 0 2px rgba(255, 92, 92, .45); }
-                    50% { opacity: 1; box-shadow: 0 0 7px rgba(255, 92, 92, .95); }
-                }
-
-                .panel {
-                    width: min(292px, calc(100vw - 16px));
-                    max-height: min(440px, 65vh, var(--cdcg-panel-max-height, 440px));
-                    align-self: flex-end;
-                    margin-right: 4px;
-                    overflow: auto;
-                    border: 1px solid var(--cdcg-border);
-                    border-radius: 12px;
-                    background: var(--cdcg-surface);
-                    box-shadow: 0 12px 34px rgba(0, 0, 0, .34);
-                }
-
-                .panel[hidden] { display: none; }
-
-                .panel-header {
-                    display: flex;
-                    align-items: flex-start;
-                    justify-content: space-between;
-                    gap: 8px;
-                    padding: 10px 10px 8px;
-                    border-bottom: 1px solid var(--cdcg-border);
-                }
-
-                .panel-header h2 {
-                    margin: 0;
-                    color: var(--cdcg-text);
-                    font-size: var(--cdcg-font-title);
-                    font-weight: 750;
-                    line-height: 1.25;
-                }
-
-                .panel-header p {
-                    margin: 2px 0 0;
-                    color: var(--cdcg-muted);
-                    font-size: var(--cdcg-font-xs);
-                    line-height: 1.4;
-                }
-
-                .icon-button {
-                    width: 24px;
-                    height: 24px;
-                    flex: 0 0 24px;
-                    display: grid;
-                    place-items: center;
-                    border: 1px solid transparent;
-                    border-radius: 6px;
-                    background: transparent;
-                    color: var(--cdcg-muted);
-                    font-size: var(--cdcg-font-md);
-                    cursor: pointer;
-                    transition: background 160ms ease, color 160ms ease;
-                }
-
-                .icon-button:hover { background: var(--cdcg-surface-soft); color: var(--cdcg-text); }
-                .icon-button:active { opacity: .72; }
-                .icon-button:focus-visible { outline: 2px solid var(--cdcg-primary); }
-
-                .status-card {
-                    margin: 8px 10px 0;
-                    padding: 8px;
-                    border: 1px solid var(--cdcg-border);
-                    border-radius: 8px;
-                    background: var(--cdcg-surface-soft);
-                }
-
-                .eyebrow {
-                    margin: 0;
-                    color: var(--cdcg-muted);
-                    font-size: var(--cdcg-font-xs);
-                    font-weight: 650;
-                    line-height: 1.25;
-                }
-
-                .status-value {
-                    margin: 3px 0 0;
-                    color: var(--cdcg-text);
-                    font-size: 16px;
-                    font-weight: 750;
-                    line-height: 1.25;
-                    font-variant-numeric: tabular-nums;
-                }
-
-                .status-value span {
-                    color: var(--cdcg-muted);
-                    font-size: var(--cdcg-font-sm);
-                    font-weight: 560;
-                }
-
-                .track {
-                    height: 3px;
-                    margin-top: 6px;
+                .pill-label {
                     overflow: hidden;
-                    border-radius: 999px;
-                    background: var(--cdcg-border);
-                }
-
-                .progress {
-                    width: 0;
-                    height: 100%;
-                    border-radius: inherit;
-                    background: var(--cdcg-primary);
-                    transition: width 240ms ease, background 160ms ease;
-                }
-
-                .status-message {
-                    margin: 5px 0 0;
-                    color: var(--cdcg-muted);
-                    font-size: var(--cdcg-font-xs);
-                    line-height: 1.4;
-                }
-
-                .metrics {
-                    display: grid;
-                    grid-template-columns: repeat(3, 1fr);
-                    gap: 4px;
-                    margin-top: 7px;
-                }
-
-                .metric {
-                    min-width: 0;
-                    padding: 4px;
-                    border-radius: 5px;
-                    background: var(--cdcg-row-hover);
-                }
-
-                .metric span {
-                    display: block;
-                    overflow: hidden;
-                    color: var(--cdcg-muted);
-                    font-size: var(--cdcg-font-xs);
-                    line-height: 1.15;
+                    color: var(--cdcg-inline-text);
+                    font-size: 11px;
+                    font-weight: 600;
+                    line-height: 1;
                     text-overflow: ellipsis;
                     white-space: nowrap;
                 }
 
-                .metric strong {
-                    display: block;
-                    margin-top: 2px;
-                    color: var(--cdcg-text);
-                    font-size: var(--cdcg-font-sm);
-                    line-height: 1.15;
+                .pill[data-status="blocked"] .pill-summary { color: var(--g-danger); }
+                .pill[data-status="warning"] .pill-summary { color: var(--g-warn); }
+
+                .pill[data-status="blocked"] .dot {
+                    box-shadow: 0 0 6px var(--g-danger);
+                    animation: cdcg-blocked-pulse 1.25s ease-in-out infinite;
+                }
+
+                @keyframes cdcg-blocked-pulse {
+                    0%, 100% { opacity: .62; }
+                    50% { opacity: 1; }
+                }
+
+                .panel {
+                    --g-state: var(--g-safe);
+                    width: min(292px, calc(100vw - 16px));
+                    max-height: min(460px, 72vh, var(--cdcg-panel-max-height, 460px));
+                    align-self: flex-end;
+                    display: flex;
+                    flex-direction: column;
+                    overflow: auto;
+                    overscroll-behavior: contain;
+                    padding: 12px 0 6px;
+                    border: 1px solid var(--g-line);
+                    border-radius: 12px;
+                    background-color: var(--g-surface);
+                    background-image: var(--g-surface-image);
+                    -webkit-backdrop-filter: var(--g-backdrop);
+                    backdrop-filter: var(--g-backdrop);
+                    box-shadow: var(--g-shadow);
+                    color: var(--g-text);
+                    font-size: 14px;
+                    line-height: 1.45;
+                    transform-origin: 100% 100%;
+                    animation: cdcg-pop 180ms cubic-bezier(.16, 1, .3, 1);
+                    scrollbar-width: thin;
+                    scrollbar-color: var(--g-line) transparent;
+                }
+
+                .panel[hidden] { display: none; }
+                .panel:focus { outline: none; }
+                .panel ::selection { background: var(--g-band); color: var(--g-text); }
+
+                @keyframes cdcg-pop {
+                    from { opacity: 0; transform: translateY(4px) scale(.98); }
+                }
+
+                [data-status="approaching"],
+                [data-status="loading"] { --g-state: var(--g-near); }
+                [data-status="blocked"] { --g-state: var(--g-danger); }
+                [data-status="warning"] { --g-state: var(--g-warn); }
+                [data-status="off"] { --g-state: var(--g-off); }
+
+                .head {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    min-height: 28px;
+                    padding: 0 8px 0 14px;
+                }
+
+                .title {
+                    margin: 0;
+                    color: var(--g-text);
+                    font-size: 14px;
+                    font-weight: 600;
+                    line-height: 1.3;
+                    letter-spacing: -.01em;
+                    white-space: nowrap;
+                }
+
+                .status {
+                    min-width: 0;
+                    margin-left: auto;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 6px;
+                    color: var(--g-text-2);
+                    font-size: 12.5px;
+                    white-space: nowrap;
+                }
+
+                .status-dot {
+                    width: 7px;
+                    height: 7px;
+                    flex: 0 0 7px;
+                    border-radius: 50%;
+                    background: var(--g-state);
+                }
+
+                .panel[data-status="blocked"] .status { color: var(--g-danger); }
+
+                .icon-button {
+                    width: 28px;
+                    height: 28px;
+                    flex: 0 0 28px;
+                    display: grid;
+                    place-items: center;
+                    padding: 0;
+                    border: 0;
+                    border-radius: 8px;
+                    background: transparent;
+                    color: var(--g-text-2);
+                    cursor: pointer;
+                    transition: background 140ms ease, color 140ms ease;
+                }
+
+                .icon-button:hover { background: var(--g-hover); color: var(--g-text); }
+                .icon-button:focus-visible { outline: 2px solid var(--g-focus); outline-offset: 0; }
+                .icon-button svg { width: 16px; height: 16px; }
+
+                .gauge {
+                    position: relative;
+                    height: 4px;
+                    flex: none;
+                    margin: 12px 14px 0;
+                    border-radius: 2px;
+                    background: var(--g-control);
+                }
+
+                .gauge-band {
+                    position: absolute;
+                    top: 0;
+                    bottom: 0;
+                    left: var(--band-left, 60%);
+                    width: var(--band-width, 30%);
+                    background: var(--g-band);
+                }
+
+                .gauge-fill {
+                    position: absolute;
+                    inset: 0;
+                    border-radius: inherit;
+                    background: var(--g-state);
+                    transform: scaleX(var(--fill-scale, 0));
+                    transform-origin: 0 50%;
+                    transition: transform 240ms cubic-bezier(.16, 1, .3, 1), background 160ms ease;
+                }
+
+                .gauge-target {
+                    position: absolute;
+                    top: -3px;
+                    bottom: -3px;
+                    left: var(--target-left, 75%);
+                    width: 2px;
+                    margin-left: -1px;
+                    border-radius: 1px;
+                    background: var(--g-text);
+                }
+
+                .summary,
+                .message {
+                    margin: 0 14px;
+                    color: var(--g-text-2);
+                    font-size: 12.5px;
+                    line-height: 1.45;
+                }
+
+                .summary {
+                    margin-top: 9px;
                     font-variant-numeric: tabular-nums;
                 }
 
-                .form {
+                .summary b { color: var(--g-text); font-weight: 600; }
+                .message { margin-top: 2px; }
+                .message:empty { display: none; }
+
+                .divider {
+                    height: 1px;
+                    flex: none;
+                    margin: 12px 0 6px;
+                    background: var(--g-line);
+                }
+
+                .list {
                     display: flex;
                     flex-direction: column;
-                    gap: 10px;
-                    padding: 10px;
+                    padding: 0 6px;
                 }
 
-                .switch-row {
+                .row {
+                    position: relative;
                     display: flex;
                     align-items: center;
-                    justify-content: space-between;
-                    gap: 8px;
+                    gap: 10px;
+                    min-height: 40px;
+                    padding: 0 8px;
+                    border-radius: 8px;
+                    color: var(--g-text);
                 }
 
-                .switch-copy strong,
-                .field label {
-                    display: block;
-                    color: var(--cdcg-text);
-                    font-size: var(--cdcg-font-sm);
-                    font-weight: 650;
-                    line-height: 1.25;
+                .row-icon {
+                    width: 17px;
+                    height: 17px;
+                    color: var(--g-text-2);
                 }
 
-                .switch-copy span,
-                .field small {
-                    display: block;
-                    margin-top: 2px;
-                    color: var(--cdcg-muted);
-                    font-size: var(--cdcg-font-xs);
-                    line-height: 1.35;
+                .row-label {
+                    flex: 1 1 auto;
+                    min-width: 0;
+                    overflow: hidden;
+                    font-size: 14px;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                label.row { cursor: pointer; }
+
+                label.row:hover,
+                .row-button:hover { background: var(--g-hover); }
+
+                .row-button {
+                    width: 100%;
+                    border: 0;
+                    background: transparent;
+                    text-align: left;
+                    cursor: pointer;
+                    transition: background 140ms ease;
+                }
+
+                .row-button:focus-visible { outline: 2px solid var(--g-focus); outline-offset: -2px; }
+
+                .row-meta {
+                    flex: none;
+                    color: var(--g-text-3);
+                    font-size: 12.5px;
+                    font-variant-numeric: tabular-nums;
+                }
+
+                .row-button[aria-busy="true"] .row-icon { animation: cdcg-spin 900ms linear infinite; }
+
+                @keyframes cdcg-spin {
+                    to { transform: rotate(360deg); }
+                }
+
+                .switch-input {
+                    position: absolute;
+                    width: 1px;
+                    height: 1px;
+                    margin: 0;
+                    opacity: 0;
+                    pointer-events: none;
                 }
 
                 .switch {
                     position: relative;
-                    width: 34px;
+                    width: 36px;
                     height: 20px;
-                    flex: 0 0 34px;
-                }
-
-                .switch input {
-                    position: absolute;
-                    width: 1px;
-                    height: 1px;
-                    opacity: 0;
-                }
-
-                .switch span {
-                    position: absolute;
-                    inset: 0;
-                    border: 1px solid var(--cdcg-border);
+                    flex: 0 0 36px;
                     border-radius: 999px;
-                    background: var(--cdcg-surface-soft);
-                    cursor: pointer;
-                    transition: background 160ms ease, border-color 160ms ease;
+                    background: var(--g-switch-off);
+                    transition: background 160ms ease;
                 }
 
-                .switch span::after {
+                .switch::after {
                     content: "";
                     position: absolute;
                     top: 2px;
                     left: 2px;
-                    width: 14px;
-                    height: 14px;
+                    width: 16px;
+                    height: 16px;
                     border-radius: 50%;
-                    background: var(--cdcg-muted);
-                    transition: transform 160ms ease, background 160ms ease;
+                    background: var(--g-thumb);
+                    box-shadow: 0 1px 2px rgba(0, 0, 0, .24);
+                    transition: transform 180ms cubic-bezier(.16, 1, .3, 1);
                 }
 
-                .switch input:checked + span {
-                    border-color: var(--cdcg-primary);
-                    background: var(--cdcg-primary);
+                .switch-input:checked + .switch { background: var(--g-switch-on); }
+                .switch-input:checked + .switch::after { transform: translateX(16px); }
+                .switch-input:focus-visible + .switch { outline: 2px solid var(--g-focus); outline-offset: 2px; }
+
+                .stepper {
+                    height: 32px;
+                    flex: none;
+                    display: flex;
+                    align-items: center;
+                    overflow: hidden;
+                    border: 1px solid var(--g-line);
+                    border-radius: 8px;
+                    background: var(--g-control);
+                    transition: border-color 140ms ease, box-shadow 140ms ease;
                 }
 
-                .switch input:checked + span::after {
-                    transform: translateX(14px);
-                    background: #fff;
+                .stepper:focus-within {
+                    border-color: var(--g-text-3);
+                    box-shadow: 0 0 0 2px var(--g-focus);
                 }
 
-                .switch input:focus-visible + span {
-                    outline: 2px solid var(--cdcg-primary);
-                }
+                .stepper[data-invalid="true"] { border-color: var(--g-danger); }
 
-                .field-grid {
+                .step {
+                    width: 30px;
+                    height: 100%;
                     display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 8px;
+                    place-items: center;
+                    padding: 0;
+                    border: 0;
+                    background: transparent;
+                    color: var(--g-text-2);
+                    cursor: pointer;
+                    transition: background 120ms ease, color 120ms ease;
                 }
 
-                .field input {
-                    width: 100%;
-                    height: 30px;
-                    margin-top: 4px;
-                    padding: 0 8px;
-                    border: 1px solid var(--cdcg-border);
-                    border-radius: 6px;
+                .step:hover,
+                .step:focus-visible { outline: none; background: var(--g-hover); color: var(--g-text); }
+                .step:active svg { transform: scale(.86); }
+                .step svg { width: 14px; height: 14px; }
+
+                .step-input {
+                    width: 60px;
+                    height: 100%;
+                    padding: 0;
+                    border: 0;
                     outline: none;
-                    background: var(--cdcg-surface-soft);
-                    color: var(--cdcg-text);
-                    font-size: var(--cdcg-font-md);
+                    background: transparent;
+                    color: var(--g-text);
+                    caret-color: var(--g-caret);
+                    font-size: 14px;
                     font-variant-numeric: tabular-nums;
-                    transition: border-color 160ms ease, box-shadow 160ms ease;
+                    text-align: center;
                 }
 
-                .field input:focus {
-                    border-color: var(--cdcg-primary);
-                    box-shadow: 0 0 0 2px rgba(255, 99, 1, .16);
+                .step-prefix {
+                    padding-left: 6px;
+                    color: var(--g-text-3);
+                    font-size: 13px;
+                }
+
+                .step-prefix + .step-input {
+                    width: 46px;
+                    padding-left: 2px;
+                    text-align: left;
                 }
 
                 .validation {
-                    min-height: 0;
-                    margin: 0;
-                    color: var(--cdcg-accent-danger);
-                    font-size: var(--cdcg-font-xs);
+                    margin: 2px 14px 4px;
+                    color: var(--g-danger);
+                    font-size: 12px;
                     line-height: 1.4;
                 }
 
                 .validation:empty { display: none; }
 
-                .actions {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 8px;
-                }
-
-                .button {
-                    min-height: 30px;
-                    padding: 5px 8px;
-                    border: 1px solid var(--cdcg-border);
-                    border-radius: 6px;
-                    background: var(--cdcg-surface-soft);
-                    color: var(--cdcg-text);
-                    font-size: var(--cdcg-font-sm);
-                    font-weight: 650;
-                    cursor: pointer;
-                    transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
-                }
-
-                .button:hover { border-color: var(--cdcg-muted); }
-                .button:active { transform: translateY(1px); }
-                .button:focus-visible { outline: 2px solid var(--cdcg-primary); }
-                .button:disabled { cursor: wait; opacity: .52; }
-
-                .button.primary {
-                    border-color: var(--cdcg-primary);
-                    background: var(--cdcg-primary);
-                    color: #fff;
-                }
-
-                .button.primary:hover { background: var(--cdcg-primary-hover); }
-
-                .footnote {
-                    margin: 0;
-                    color: var(--cdcg-muted);
-                    font-size: var(--cdcg-font-xs);
-                    line-height: 1.4;
-                }
-
                 .toast {
-                    display: none;
                     width: min(292px, calc(100vw - 16px));
+                    display: none;
                     align-self: flex-end;
-                    margin-right: 4px;
-                    padding: 7px 9px;
-                    border: 1px solid var(--cdcg-border);
-                    border-radius: 8px;
-                    background: var(--cdcg-surface);
-                    color: var(--cdcg-text);
-                    box-shadow: 0 8px 20px rgba(0, 0, 0, .24);
-                    font-size: var(--cdcg-font-sm);
-                    line-height: 1.4;
+                    align-items: flex-start;
+                    gap: 8px;
+                    padding: 9px 12px;
+                    border: 1px solid var(--g-line);
+                    border-radius: 10px;
+                    background-color: var(--g-surface);
+                    background-image: var(--g-surface-image);
+                    -webkit-backdrop-filter: var(--g-backdrop);
+                    backdrop-filter: var(--g-backdrop);
+                    box-shadow: var(--g-shadow);
+                    color: var(--g-text);
+                    font-size: 13px;
+                    line-height: 1.45;
                 }
 
-                .toast[data-visible="true"] { display: block; }
-                .toast[data-kind="blocked"],
-                .toast[data-kind="error"] { border-color: var(--cdcg-accent-danger); }
-                .toast[data-kind="ok"] { border-color: var(--cdcg-accent-safe); }
+                .toast::before {
+                    content: "";
+                    width: 7px;
+                    height: 7px;
+                    flex: 0 0 7px;
+                    margin-top: 6px;
+                    border-radius: 50%;
+                    background: var(--g-text-3);
+                }
+
+                .toast[data-visible="true"] {
+                    display: flex;
+                    animation: cdcg-pop 180ms cubic-bezier(.16, 1, .3, 1);
+                }
+
+                .toast[data-kind="ok"]::before { background: var(--g-safe); }
+                .toast[data-kind="blocked"]::before,
+                .toast[data-kind="error"]::before { background: var(--g-danger); }
+
+                @media (pointer: coarse) {
+                    .row { min-height: 44px; }
+                    .stepper { height: 36px; }
+                    .step { width: 36px; }
+                    .icon-button { width: 36px; height: 36px; flex-basis: 36px; }
+                }
 
                 @media (max-width: 520px) {
-                    .panel {
-                        width: min(280px, calc(100vw - 16px));
-                        max-height: min(60vh, var(--cdcg-panel-max-height, 440px));
-                    }
-                    .pill-label { font-size: var(--cdcg-font-xs); }
+                    .pill-label { font-size: 10px; }
                 }
 
                 @media (prefers-reduced-motion: reduce) {
                     *, *::before, *::after {
-                        scroll-behavior: auto !important;
+                        animation: none !important;
                         transition: none !important;
                     }
                 }
             </style>
             <div class="dock">
                 <div class="toast" role="status" aria-live="polite"></div>
-                <section class="panel" aria-labelledby="cdcg-title" hidden>
-                    <header class="panel-header">
-                        <div>
-                            <h2 id="cdcg-title">일일 크래커 가드</h2>
-                            <p>사용 내역 기준 자동 차단</p>
-                        </div>
-                        <button class="icon-button" type="button" aria-label="설정 닫기">✕</button>
+                <section class="panel" role="dialog" aria-labelledby="cdcg-title" tabindex="-1" hidden>
+                    <header class="head">
+                        <h2 class="title" id="cdcg-title">크래커 가드</h2>
+                        <span class="status"><span class="status-dot" aria-hidden="true"></span><span class="status-text">확인 중</span></span>
+                        <button class="icon-button" type="button" data-action="close" aria-label="설정 닫기">${icon('close')}</button>
                     </header>
-
-                    <div class="status-card">
-                        <p class="eyebrow">오늘 사용량</p>
-                        <p class="status-value">0 <span>/ 목표 1,000 · 범위 800~1,200</span></p>
-                        <div class="track" aria-hidden="true"><div class="progress"></div></div>
-                        <p class="status-message">사용 내역을 확인하고 있어요.</p>
-                        <div class="metrics">
-                            <div class="metric"><span>일일 목표</span><strong data-metric="target">1,000개</strong></div>
-                            <div class="metric"><span>허용 오차</span><strong data-metric="margin">±200개</strong></div>
-                            <div class="metric"><span>정지 구간</span><strong data-metric="stop">800~1,200개</strong></div>
+                    <div class="gauge" aria-hidden="true"><span class="gauge-band"></span><span class="gauge-fill"></span><span class="gauge-target"></span></div>
+                    <p class="summary"></p>
+                    <p class="message"></p>
+                    <div class="divider" role="presentation"></div>
+                    <div class="list">
+                        <label class="row">
+                            ${icon('shield', 'row-icon')}
+                            <span class="row-label">감시</span>
+                            <input class="switch-input" type="checkbox" role="switch" data-field="enabled">
+                            <span class="switch" aria-hidden="true"></span>
+                        </label>
+                        <div class="row">
+                            ${icon('target', 'row-icon')}
+                            <label class="row-label" for="cdcg-limit">일일 목표</label>
+                            <div class="stepper" data-stepper="limit">
+                                <button class="step" type="button" data-step="limit" data-dir="-1" aria-label="일일 목표 줄이기">${icon('minus')}</button>
+                                <input class="step-input" id="cdcg-limit" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="12" aria-describedby="cdcg-validation">
+                                <button class="step" type="button" data-step="limit" data-dir="1" aria-label="일일 목표 늘리기">${icon('plus')}</button>
+                            </div>
                         </div>
+                        <div class="row">
+                            ${icon('range', 'row-icon')}
+                            <label class="row-label" for="cdcg-margin">허용 오차</label>
+                            <div class="stepper" data-stepper="margin">
+                                <button class="step" type="button" data-step="margin" data-dir="-1" aria-label="허용 오차 줄이기">${icon('minus')}</button>
+                                <span class="step-prefix" aria-hidden="true">±</span>
+                                <input class="step-input" id="cdcg-margin" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="12" aria-describedby="cdcg-validation">
+                                <button class="step" type="button" data-step="margin" data-dir="1" aria-label="허용 오차 늘리기">${icon('plus')}</button>
+                            </div>
+                        </div>
+                        <label class="row">
+                            ${icon('repeat', 'row-icon')}
+                            <span class="row-label">재생성도 막기</span>
+                            <input class="switch-input" type="checkbox" role="switch" data-field="regeneration">
+                            <span class="switch" aria-hidden="true"></span>
+                        </label>
                     </div>
-
-                    <div class="form">
-                        <div class="switch-row">
-                            <div class="switch-copy">
-                                <strong>감시 사용</strong>
-                                <span>끄면 사용량은 표시하되 전송은 막지 않아요.</span>
-                            </div>
-                            <label class="switch">
-                                <input type="checkbox" data-field="enabled">
-                                <span aria-hidden="true"></span>
-                            </label>
-                        </div>
-
-                        <div class="field-grid">
-                            <div class="field">
-                                <label for="cdcg-limit">일일 목표</label>
-                                <input id="cdcg-limit" type="number" min="1" max="10000000" step="1" inputmode="numeric">
-                                <small>하루 사용량의 중심 기준</small>
-                            </div>
-                            <div class="field">
-                                <label for="cdcg-margin">허용 오차 (±)</label>
-                                <input id="cdcg-margin" type="number" min="0" max="9999999" step="1" inputmode="numeric">
-                                <small>목표의 위·아래 범위</small>
-                            </div>
-                        </div>
-
-                        <div class="switch-row">
-                            <div class="switch-copy">
-                                <strong>재생성도 차단</strong>
-                                <span>리롤·다시 생성으로 추가 소모되는 것도 막아요.</span>
-                            </div>
-                            <label class="switch">
-                                <input type="checkbox" data-field="regeneration">
-                                <span aria-hidden="true"></span>
-                            </label>
-                        </div>
-
-                        <p class="validation" role="alert"></p>
-
-                        <div class="actions">
-                            <button class="button" type="button" data-action="refresh">지금 새로고침</button>
-                            <button class="button primary" type="button" data-action="save">설정 저장</button>
-                        </div>
-
-                        <p class="footnote">
-                            사용량은 크랙의 크래커 사용 내역을 한국 시간의 오늘 0시부터 합산합니다.
-                            마지막 확인: <span data-updated>아직 확인 전</span>
-                        </p>
+                    <p class="validation" id="cdcg-validation" role="alert"></p>
+                    <div class="divider" role="presentation"></div>
+                    <div class="list">
+                        <button class="row row-button" type="button" data-action="refresh">
+                            ${icon('refresh', 'row-icon')}
+                            <span class="row-label">지금 확인</span>
+                            <span class="row-meta" data-updated>아직 확인 전</span>
+                        </button>
                     </div>
                 </section>
 
@@ -1438,37 +1517,52 @@
         ui.host = host;
         ui.shadow = shadow;
         ui.pill = shadow.querySelector('.pill');
-        ui.pillDot = shadow.querySelector('.dot');
         ui.pillText = shadow.querySelector('.pill-summary');
         ui.panel = shadow.querySelector('.panel');
-        ui.closeButton = shadow.querySelector('.icon-button');
-        ui.statusEyebrow = shadow.querySelector('.eyebrow');
-        ui.statusValue = shadow.querySelector('.status-value');
-        ui.statusMessage = shadow.querySelector('.status-message');
-        ui.progress = shadow.querySelector('.progress');
-        ui.targetValue = shadow.querySelector('[data-metric="target"]');
-        ui.marginValue = shadow.querySelector('[data-metric="margin"]');
-        ui.stopValue = shadow.querySelector('[data-metric="stop"]');
-        ui.updatedValue = shadow.querySelector('[data-updated]');
+        ui.statusText = shadow.querySelector('.status-text');
+        ui.gauge = shadow.querySelector('.gauge');
+        ui.summary = shadow.querySelector('.summary');
+        ui.message = shadow.querySelector('.message');
         ui.enabledInput = shadow.querySelector('[data-field="enabled"]');
+        ui.regenerationInput = shadow.querySelector('[data-field="regeneration"]');
         ui.limitInput = shadow.querySelector('#cdcg-limit');
         ui.marginInput = shadow.querySelector('#cdcg-margin');
-        ui.regenerationInput = shadow.querySelector('[data-field="regeneration"]');
         ui.validation = shadow.querySelector('.validation');
         ui.refreshButton = shadow.querySelector('[data-action="refresh"]');
-        ui.saveButton = shadow.querySelector('[data-action="save"]');
+        ui.updatedValue = shadow.querySelector('[data-updated]');
         ui.toast = shadow.querySelector('.toast');
 
-        ui.pill.addEventListener('click', () => setPanelOpen(!state.panelOpen));
-        ui.closeButton.addEventListener('click', () => setPanelOpen(false));
+        ui.pill.addEventListener('click', (event) => {
+            setPanelOpen(!state.panelOpen, { focus: event.detail === 0 });
+        });
+        shadow.querySelector('[data-action="close"]').addEventListener('click', () => {
+            setPanelOpen(false);
+            ui.pill.focus({ preventScroll: true });
+        });
         ui.refreshButton.addEventListener('click', () => refreshUsage({
             announce: true,
             force: true,
             activeOnly: false,
         }));
-        ui.saveButton.addEventListener('click', handleSave);
-        ui.limitInput.addEventListener('input', validateForm);
-        ui.marginInput.addEventListener('input', validateForm);
+        ui.enabledInput.addEventListener('change', () => {
+            saveConfig({ ...config, enabled: ui.enabledInput.checked });
+        });
+        ui.regenerationInput.addEventListener('change', () => {
+            saveConfig({ ...config, blockRegeneration: ui.regenerationInput.checked });
+        });
+        for (const button of shadow.querySelectorAll('[data-step]')) {
+            button.addEventListener('click', () => {
+                stepNumberField(button.dataset.step, Number(button.dataset.dir));
+            });
+        }
+        bindNumberInput('limit', ui.limitInput);
+        bindNumberInput('margin', ui.marginInput);
+
+        // 설정창 안에서 누른 키가 크랙 단축키(Enter=입력창 이동, Esc=요약 메모리 등)로 새지 않게 막는다.
+        // 조합키는 그대로 보내 크랙의 눌림 상태 추적이 어긋나지 않게 한다.
+        shadow.addEventListener('keydown', handleShadowKeydown);
+        shadow.addEventListener('keyup', stopKeyLeak);
+        shadow.addEventListener('keypress', stopKeyLeak);
 
         syncFormFromConfig();
         render();
@@ -1476,19 +1570,23 @@
 
     function getPageTheme() {
         const root = document.documentElement;
-        const explicit = String(
-            root.dataset.sgbTheme
+        const themed = String(root.dataset.sgbTheme || '').toLowerCase();
+        if (themed === 'light' || themed === 'dark') return themed;
+        // 크랙은 다크/라이트 표시를 html이 아니라 body[data-theme]에 둔다.
+        const crack = String(
+            document.body?.dataset.theme
             || root.dataset.crackTheme
             || root.dataset.theme
             || '',
         ).toLowerCase();
-        if (explicit === 'light') return 'light';
-        if (explicit === 'dark') return 'dark';
+        if (crack === 'light' || crack === 'dark') return crack;
         return root.classList.contains('dark') ? 'dark' : 'light';
     }
 
     function syncTheme() {
-        if (ui.host) ui.host.dataset.theme = getPageTheme();
+        if (!ui.host) return;
+        const theme = getPageTheme();
+        if (ui.host.dataset.theme !== theme) ui.host.dataset.theme = theme;
     }
 
     function startThemeObserver() {
@@ -1507,6 +1605,12 @@
                 'data-sgb-profile',
             ],
         });
+        if (document.body) {
+            themeObserver.observe(document.body, {
+                attributes: true,
+                attributeFilter: ['data-theme'],
+            });
+        }
     }
 
     function findUiInlineHost() {
@@ -1669,7 +1773,8 @@
         });
     }
 
-    function bindUiGeometryObserver(anchorHost, mountParent) {
+    function bindUiGeometryObserver(anchorHost, mountParent, radiosonde) {
+        currentUiRadiosonde = radiosonde instanceof HTMLElement ? radiosonde : null;
         if (typeof ResizeObserver !== 'function') return;
         if (!uiResizeObserver) {
             uiResizeObserver = new ResizeObserver(scheduleUiAttachment);
@@ -1677,13 +1782,12 @@
         uiResizeObserver.disconnect();
         uiResizeObserver.observe(anchorHost);
         if (mountParent !== anchorHost) uiResizeObserver.observe(mountParent);
+        // 라디오존데 줄이 두 줄로 접히거나 접혔다 펴질 때도 가드가 그 위를 따라간다.
+        if (currentUiRadiosonde) uiResizeObserver.observe(currentUiRadiosonde);
     }
 
     function detachUiInlineHost() {
-        if (currentUiInlineHost instanceof HTMLElement) {
-            currentUiInlineHost.removeAttribute('data-cdcg-guard-space');
-            currentUiInlineHost.style.removeProperty('--cdcg-base-padding-top');
-        }
+        releaseGuardReservedSpace();
         uiResizeObserver?.disconnect();
         if (uiGeometryFrame !== null) {
             window.cancelAnimationFrame(uiGeometryFrame);
@@ -1691,55 +1795,111 @@
         }
         currentUiInlineHost = null;
         currentUiMountParent = null;
+        currentUiRadiosonde = null;
     }
 
-    function syncGuardReservedSpace(host, shouldReserve) {
+    function releaseGuardReservedSpace() {
+        const host = currentReservedHost;
+        currentReservedHost = null;
         if (!(host instanceof HTMLElement)) return;
-        if (!shouldReserve) {
-            host.removeAttribute('data-cdcg-guard-space');
-            host.style.removeProperty('--cdcg-base-padding-top');
-            return;
-        }
-        if (host.hasAttribute('data-cdcg-guard-space')) return;
-        const basePaddingTop = Number.parseFloat(window.getComputedStyle(host).paddingTop) || 0;
-        host.style.setProperty('--cdcg-base-padding-top', `${basePaddingTop}px`);
-        host.setAttribute('data-cdcg-guard-space', '1');
+        host.removeAttribute('data-cdcg-guard-space');
+        host.style.removeProperty('--cdcg-base-padding-top');
+        host.style.removeProperty('--cdcg-radio-base-top');
+        host.style.removeProperty('--cdcg-guard-reserve');
     }
 
-    function syncInlineThemeFromComposer(host, hasSgbLayout) {
-        if (!(host instanceof HTMLElement) || !ui.host) return;
+    // 단독 라디오존데는 입력창 호스트 맨 위(top 6px)에 absolute로 겹쳐 그려서 그 위에 가드 자리가 없다.
+    // 이때만 호스트를 가드 한 줄만큼 늘리고 라디오존데를 같이 내린다.
+    function syncGuardReservedSpace(reserveHost, radiosonde) {
+        if (currentReservedHost !== reserveHost) releaseGuardReservedSpace();
+        if (!(reserveHost instanceof HTMLElement) || !(radiosonde instanceof HTMLElement)) return;
+        currentReservedHost = reserveHost;
+        if (reserveHost.hasAttribute('data-cdcg-guard-space')) return;
+        const basePaddingTop = Number.parseFloat(window.getComputedStyle(reserveHost).paddingTop) || 0;
+        const radioBaseTop = Number.parseFloat(window.getComputedStyle(radiosonde).top);
+        reserveHost.style.setProperty('--cdcg-base-padding-top', `${basePaddingTop}px`);
+        reserveHost.style.setProperty('--cdcg-radio-base-top', `${Number.isFinite(radioBaseTop) ? radioBaseTop : 6}px`);
+        reserveHost.style.setProperty('--cdcg-guard-reserve', `${GUARD_PILL_HEIGHT + GUARD_STACK_GAP}px`);
+        reserveHost.setAttribute('data-cdcg-guard-space', '1');
+    }
+
+    // 입력 박스(테두리 있는 둥근 상자). 가드 줄의 좌우 폭과 배경 톤의 기준이다.
+    function getComposerSurface(host) {
         const editor = getVisibleChatEditor(host) || getVisibleChatEditor();
-        const nativeSurface = editor instanceof HTMLElement
-            ? (
-                editor.closest('div.flex.w-full.flex-col.rounded-lg.border')
-                || editor.closest('div[class*="rounded"][class*="border"]')
-                || getComposerFromEditor(editor)
-            )
-            : null;
-        const source = hasSgbLayout
-            ? (host.querySelector('[data-sgb-input-box]') || nativeSurface || editor)
-            : (nativeSurface || getVisibleComposer() || editor);
+        if (!(editor instanceof HTMLElement)) return null;
+        const surface = editor.closest('[data-sgb-input-box], [data-cmu-theme-input-box]')
+            || editor.closest('div.flex.w-full.flex-col.rounded-lg.border')
+            || editor.closest('div[class*="rounded"][class*="border"]')
+            || getComposerFromEditor(editor);
+        return surface instanceof HTMLElement && host.contains(surface) ? surface : null;
+    }
+
+    // 입력 박스에 딸린 라디오존데 줄. 허브는 입력 박스 바로 앞 흐름 요소로,
+    // 단독 라디오존데는 호스트 안 absolute 막대로 붙지만 둘 다 입력 박스를 품은 부모 아래에 있다.
+    // 숨겨져 있어도 돌려준다: 다시 보일 때 크기 감시로 가드를 제자리에 올리기 위해서다.
+    function getComposerRadiosonde(surface) {
+        const popup = document.getElementById('igx-live-popup');
+        if (!(popup instanceof HTMLElement)) return null;
+        const parent = popup.parentElement;
+        if (!(parent instanceof HTMLElement) || parent === document.body || parent === document.documentElement) return null;
+        return parent.contains(surface) && !surface.contains(popup) ? popup : null;
+    }
+
+    // 가드는 입력창 묶음(라디오존데·추천 답변 줄·입력 박스)의 가장 위 줄보다 한 칸 위에 선다.
+    function measureComposerStackTop(host, surface, radiosonde) {
+        let top = surface.getBoundingClientRect().top;
+        if (radiosonde) top = Math.min(top, radiosonde.getBoundingClientRect().top);
+        const branch = surface === host ? null : getDirectChildUnder(host, surface);
+        if (!branch) return top;
+        for (const child of host.children) {
+            if (child === branch) break;
+            if (!(child instanceof HTMLElement) || child === radiosonde) continue;
+            const position = window.getComputedStyle(child).position;
+            if (position === 'absolute' || position === 'fixed') continue;
+            if (isVisibleElement(child)) top = Math.min(top, child.getBoundingClientRect().top);
+        }
+        return top;
+    }
+
+    function setUiHostVar(name, value) {
+        if (ui.host && ui.host.style.getPropertyValue(name) !== value) ui.host.style.setProperty(name, value);
+    }
+
+    function syncInlineThemeFromComposer(surface) {
+        if (!ui.host) return;
+        const source = surface instanceof HTMLElement
+            ? surface
+            : (getVisibleComposer() || getVisibleChatEditor());
         if (!(source instanceof HTMLElement)) return;
         const style = window.getComputedStyle(source);
         const backgroundColor = style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)'
             ? style.backgroundColor
             : (getPageTheme() === 'dark' ? 'rgba(24, 24, 27, .76)' : 'rgba(250, 250, 250, .82)');
-        const borderRadius = style.borderRadius || '6px';
-        ui.host.style.setProperty('--cdcg-inline-bg-color', backgroundColor);
-        ui.host.style.setProperty('--cdcg-inline-bg-image', style.backgroundImage || 'none');
-        ui.host.style.setProperty('--cdcg-inline-border', style.borderTopColor || style.borderColor || 'transparent');
-        ui.host.style.setProperty('--cdcg-inline-radius', borderRadius);
-        ui.host.style.setProperty(
-            '--cdcg-inline-backdrop',
-            style.backdropFilter || style.webkitBackdropFilter || 'none',
-        );
+        const backdrop = style.backdropFilter || style.webkitBackdropFilter || 'none';
+        setUiHostVar('--cdcg-inline-bg-color', backgroundColor);
+        setUiHostVar('--cdcg-inline-bg-image', style.backgroundImage || 'none');
+        setUiHostVar('--cdcg-inline-border', style.borderTopColor || style.borderColor || 'transparent');
+        setUiHostVar('--cdcg-inline-radius', style.borderRadius || '6px');
+        setUiHostVar('--cdcg-inline-backdrop', backdrop);
+        // 테마 확프가 꾸민 입력창이면 설정창도 그 바탕을 따른다. 뒤 글자가 비치지 않게 불투명도와 흐림을 보탠다.
+        const skin = source.matches('[data-sgb-input-box], [data-cmu-theme-input-box]') ? 'composer' : 'crack';
+        if (ui.host.dataset.skin !== skin) ui.host.dataset.skin = skin;
+        setUiHostVar('--cdcg-panel-bg', withMinimumAlpha(backgroundColor, 0.86));
+        setUiHostVar('--cdcg-panel-backdrop', backdrop !== 'none' ? backdrop : 'blur(16px)');
+    }
+
+    function withMinimumAlpha(color, minimum) {
+        const match = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+)(%?))?\s*\)$/i
+            .exec(String(color).trim());
+        if (!match) return color;
+        let alpha = match[4] === undefined ? 1 : Number.parseFloat(match[4]);
+        if (match[5] === '%') alpha /= 100;
+        return `rgba(${match[1]}, ${match[2]}, ${match[3]}, ${Math.max(alpha, minimum)})`;
     }
 
     function hideGuardUi() {
         detachUiInlineHost();
-        state.panelOpen = false;
-        if (ui.panel) ui.panel.hidden = true;
-        if (ui.pill) ui.pill.setAttribute('aria-expanded', 'false');
+        collapsePanel();
         if (ui.host) {
             ui.host.hidden = true;
             if (document.body && ui.host.parentNode !== document.body) {
@@ -1783,68 +1943,45 @@
             : ui.host.parentElement === nextMountParent;
 
         if (!hostAlreadyBefore) {
-            state.panelOpen = false;
-            if (ui.panel) ui.panel.hidden = true;
-            if (ui.pill) ui.pill.setAttribute('aria-expanded', 'false');
+            collapsePanel();
             ui.host.hidden = true;
             if (before) nextMountParent.insertBefore(ui.host, before);
             else nextMountParent.appendChild(ui.host);
         }
 
-        if (contextChanged) bindUiGeometryObserver(nextHost, nextMountParent);
+        const surface = getComposerSurface(nextHost) || nextHost;
+        const attachedRadiosonde = getComposerRadiosonde(surface);
+        if (contextChanged || currentUiRadiosonde !== attachedRadiosonde) {
+            bindUiGeometryObserver(nextHost, nextMountParent, attachedRadiosonde);
+        }
+        const radiosonde = isVisibleElement(attachedRadiosonde) ? attachedRadiosonde : null;
 
-        const radiosonde = document.getElementById('igx-live-popup');
-        const radiosondeElement = radiosonde instanceof HTMLElement
-            && radiosonde.parentElement === nextHost
-            ? radiosonde
-            : null;
-        const hasRadiosondeRow = isVisibleElement(radiosondeElement);
-        const hasSgbLayout = Boolean(
-            nextHost.matches('[data-sgb-input-host], [data-sgb-input-box]')
-            || nextHost.querySelector('[data-sgb-input-box]'),
-        );
-        // 테마 유무와 관계없이 라디오존데 아래에 가드 한 줄의 공간을 확보한다.
-        syncGuardReservedSpace(nextHost, hasRadiosondeRow);
-        syncInlineThemeFromComposer(nextHost, hasSgbLayout);
+        // 순정·테마·단독 라디오존데·허브 모두 가드 → (라디오존데) → 입력 박스 순서로 통일한다.
+        // 허브 라디오존데와 순정 입력창은 호스트 위 여백(py-4 + gap-4)에 가드가 들어가 레이아웃을 건드리지 않는다.
+        let reserveHost = null;
+        if (radiosonde && window.getComputedStyle(radiosonde).position === 'absolute') {
+            const overlayHost = radiosonde.parentElement;
+            const roomAbove = radiosonde.getBoundingClientRect().top - overlayHost.getBoundingClientRect().top;
+            if (overlayHost === currentReservedHost || roomAbove < GUARD_PILL_HEIGHT + GUARD_STACK_GAP + 2) {
+                reserveHost = overlayHost;
+            }
+        }
+        syncGuardReservedSpace(reserveHost, radiosonde);
+        syncInlineThemeFromComposer(surface);
 
         const mountRect = nextMountParent.getBoundingClientRect();
-        const pureComposer = getVisibleComposer();
-        const anchorElement = hasSgbLayout
-            ? nextHost
-            : (pureComposer instanceof HTMLElement && nextHost.contains(pureComposer)
-                ? pureComposer
-                : nextHost);
-        const rect = anchorElement.getBoundingClientRect();
-        const PILL_HEIGHT = 20;
-        const PURE_COMPOSER_GAP = 8;
-        const STACK_GAP = 4;
-        let pillBottom;
-        let panelLift = 0;
-
-        if (hasRadiosondeRow) {
-            // 테마 확프 유무와 무관하게 라디오존데 → 가드 → 입력창 순서를 고정한다.
-            const radioRect = radiosondeElement.getBoundingClientRect();
-            const radioBottomGap = radioRect.bottom + STACK_GAP;
-            pillBottom = radioBottomGap + PILL_HEIGHT;
-            panelLift = Math.max(0, radioRect.height + STACK_GAP);
-        } else if (hasSgbLayout) {
-            // 테마 확프만 사용하는 경우의 기존 입력창 안쪽 위치.
-            pillBottom = rect.top + 6 + PILL_HEIGHT;
-        } else {
-            // 완전 순정에서는 입력창 바로 위에 띄운다.
-            pillBottom = Math.max(PILL_HEIGHT + 2, rect.top - PURE_COMPOSER_GAP);
-        }
-
-        const pillTop = pillBottom - PILL_HEIGHT;
+        const surfaceRect = surface.getBoundingClientRect();
+        const stackTop = measureComposerStackTop(nextHost, surface, radiosonde);
+        const pillBottom = Math.max(GUARD_PILL_HEIGHT + 2, stackTop - GUARD_STACK_GAP);
+        const pillTop = pillBottom - GUARD_PILL_HEIGHT;
         const originLeft = mountRect.left + nextMountParent.clientLeft;
         const originTop = mountRect.top + nextMountParent.clientTop;
-        const localLeft = rect.left - originLeft + nextMountParent.scrollLeft;
+        const localLeft = surfaceRect.left - originLeft + nextMountParent.scrollLeft;
         const localTop = pillTop - originTop + nextMountParent.scrollTop;
 
-        ui.host.style.setProperty('--cdcg-inline-left', `${localLeft}px`);
-        ui.host.style.setProperty('--cdcg-inline-top', `${localTop}px`);
-        ui.host.style.setProperty('--cdcg-inline-width', `${rect.width}px`);
-        ui.host.style.setProperty('--cdcg-panel-lift', `${panelLift}px`);
+        setUiHostVar('--cdcg-inline-left', `${localLeft}px`);
+        setUiHostVar('--cdcg-inline-top', `${localTop}px`);
+        setUiHostVar('--cdcg-inline-width', `${surfaceRect.width}px`);
 
         const toastVisible = state.panelOpen
             && ui.toast?.dataset.visible === 'true';
@@ -1852,71 +1989,234 @@
             ? Math.ceil(ui.toast.getBoundingClientRect().height) + 6
             : 0;
         const visibleTop = Math.max(0, mountRect.top);
-        ui.host.style.setProperty(
+        setUiHostVar(
             '--cdcg-panel-max-height',
-            `${Math.max(120, pillTop - visibleTop - 12 - panelLift - toastReserve)}px`,
+            `${Math.max(120, pillTop - visibleTop - 12 - toastReserve)}px`,
         );
         ui.host.hidden = false;
         if (contextChanged) render();
         return true;
     }
 
-    function setPanelOpen(open) {
-        state.panelOpen = Boolean(open);
-        if (!ui.panel || !ui.pill) return;
-        ui.panel.hidden = !state.panelOpen;
-        ui.pill.setAttribute('aria-expanded', String(state.panelOpen));
-        if (state.panelOpen) {
-            syncFormFromConfig();
-            render();
+    const MODIFIER_KEYS = new Set(['Control', 'Shift', 'Alt', 'AltGraph', 'Meta', 'OS', 'Fn', 'CapsLock']);
+
+    function stopKeyLeak(event) {
+        if (!MODIFIER_KEYS.has(event.key)) event.stopPropagation();
+    }
+
+    function handleShadowKeydown(event) {
+        if (
+            event.key === 'Escape'
+            && state.panelOpen
+            && !event.defaultPrevented
+            && !event.isComposing
+        ) {
+            event.preventDefault();
+            setPanelOpen(false, { commit: false });
+            ui.pill?.focus({ preventScroll: true });
         }
+        stopKeyLeak(event);
+    }
+
+    function handleOutsidePointer(event) {
+        if (!state.panelOpen || !ui.host) return;
+        const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+        if (path.includes(ui.host)) return;
+        setPanelOpen(false);
+    }
+
+    // 위치를 다시 잡거나 숨길 때처럼 설정창만 조용히 닫는다. 위치 재계산을 다시 부르지 않는다.
+    function collapsePanel() {
+        state.panelOpen = false;
+        if (ui.panel) ui.panel.hidden = true;
+        if (ui.pill) ui.pill.setAttribute('aria-expanded', 'false');
+        document.removeEventListener('pointerdown', handleOutsidePointer, true);
+    }
+
+    function setPanelOpen(open, options = {}) {
+        if (!ui.panel || !ui.pill) {
+            state.panelOpen = Boolean(open);
+            return;
+        }
+        if (!open) {
+            if (state.panelOpen) settlePendingNumbers(options.commit !== false);
+            collapsePanel();
+            scheduleUiAttachment();
+            return;
+        }
+        state.panelOpen = true;
+        ui.panel.hidden = false;
+        ui.pill.setAttribute('aria-expanded', 'true');
+        syncFormFromConfig();
+        render();
+        document.addEventListener('pointerdown', handleOutsidePointer, true);
+        if (options.focus) ui.enabledInput?.focus({ preventScroll: true });
         scheduleUiAttachment();
+    }
+
+    const NUMBER_FIELDS = Object.freeze({
+        limit: { key: 'dailyLimit', step: 100, min: 1, max: 10_000_000 },
+        margin: { key: 'safetyMargin', step: 50, min: 0, max: 9_999_999 },
+    });
+
+    function getNumberInput(name) {
+        return name === 'limit' ? ui.limitInput : ui.marginInput;
+    }
+
+    function getStepper(name) {
+        return ui.shadow?.querySelector(`[data-stepper="${name}"]`) || null;
+    }
+
+    // "1,500", "1500개", "±200"처럼 입력해도 숫자만 읽는다.
+    function parseCount(text) {
+        const digits = String(text ?? '').replace(/[^0-9]/g, '');
+        return digits ? Number.parseInt(digits.slice(0, 9), 10) : Number.NaN;
+    }
+
+    function getNumberError(dailyLimit, safetyMargin) {
+        if (!Number.isFinite(dailyLimit) || dailyLimit < 1) return '일일 목표는 1개 이상으로 입력해 주세요.';
+        if (dailyLimit > NUMBER_FIELDS.limit.max) return '일일 목표는 10,000,000개까지 정할 수 있어요.';
+        if (!Number.isFinite(safetyMargin) || safetyMargin < 0) return '허용 오차는 0개 이상으로 입력해 주세요.';
+        if (safetyMargin >= dailyLimit) return '허용 오차는 일일 목표보다 작아야 해요.';
+        return '';
+    }
+
+    function showNumberError(name, message) {
+        if (!ui.validation) return;
+        ui.validation.textContent = message;
+        for (const key of Object.keys(NUMBER_FIELDS)) {
+            const invalid = key === name;
+            getStepper(key)?.setAttribute('data-invalid', String(invalid));
+            getNumberInput(key)?.setAttribute('aria-invalid', String(invalid));
+        }
+    }
+
+    function clearNumberError() {
+        if (!ui.validation) return;
+        ui.validation.textContent = '';
+        for (const key of Object.keys(NUMBER_FIELDS)) {
+            getStepper(key)?.removeAttribute('data-invalid');
+            getNumberInput(key)?.removeAttribute('aria-invalid');
+        }
+    }
+
+    function syncNumberInput(name) {
+        const input = getNumberInput(name);
+        if (input) input.value = formatNumber(config[NUMBER_FIELDS[name].key]);
+    }
+
+    function isNumberPending(name) {
+        const input = getNumberInput(name);
+        return Boolean(input) && parseCount(input.value) !== config[NUMBER_FIELDS[name].key];
+    }
+
+    function commitNumberField(name, value) {
+        const next = { dailyLimit: config.dailyLimit, safetyMargin: config.safetyMargin };
+        next[NUMBER_FIELDS[name].key] = value;
+        const message = getNumberError(next.dailyLimit, next.safetyMargin);
+        if (message) {
+            showNumberError(name, message);
+            return false;
+        }
+        clearNumberError();
+        if (next.dailyLimit !== config.dailyLimit || next.safetyMargin !== config.safetyMargin) {
+            saveConfig({ ...config, ...next });
+        }
+        syncNumberInput(name);
+        return true;
+    }
+
+    function commitTypedNumber(name) {
+        const input = getNumberInput(name);
+        if (!input) return false;
+        const value = parseCount(input.value);
+        if (!Number.isFinite(value)) {
+            showNumberError(name, name === 'limit'
+                ? '일일 목표는 1개 이상으로 입력해 주세요.'
+                : '허용 오차는 0개 이상으로 입력해 주세요.');
+            return false;
+        }
+        return commitNumberField(name, value);
+    }
+
+    function stepNumberField(name, direction) {
+        const field = NUMBER_FIELDS[name];
+        if (!field) return;
+        const typed = parseCount(getNumberInput(name)?.value);
+        const base = Number.isFinite(typed) ? typed : config[field.key];
+        // 1,037에서 +는 1,100, -는 1,000처럼 단위에 맞춰 움직인다.
+        const stepped = direction > 0
+            ? (Math.floor(base / field.step) + 1) * field.step
+            : (Math.ceil(base / field.step) - 1) * field.step;
+        const min = name === 'limit' ? Math.max(field.min, config.safetyMargin + 1) : field.min;
+        const max = name === 'limit' ? field.max : Math.min(field.max, config.dailyLimit - 1);
+        const value = Math.min(max, Math.max(min, stepped));
+        if (value === config[field.key]) {
+            if (value !== stepped && name === 'limit' && direction < 0) {
+                showNumberError(name, '일일 목표는 허용 오차보다 커야 해요. 오차를 먼저 줄여 주세요.');
+            } else if (value !== stepped && name === 'margin' && direction > 0) {
+                showNumberError(name, '허용 오차는 일일 목표보다 작아야 해요.');
+            } else {
+                clearNumberError();
+            }
+            syncNumberInput(name);
+            return;
+        }
+        commitNumberField(name, value);
+    }
+
+    function bindNumberInput(name, input) {
+        input.addEventListener('focus', () => {
+            window.requestAnimationFrame(() => {
+                if (ui.shadow?.activeElement === input) input.select();
+            });
+        });
+        input.addEventListener('keydown', (event) => {
+            if (event.isComposing || event.keyCode === 229) return;
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                commitTypedNumber(name);
+            } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                event.preventDefault();
+                stepNumberField(name, event.key === 'ArrowUp' ? 1 : -1);
+            } else if (event.key === 'Escape' && isNumberPending(name)) {
+                // 입력 중인 값만 되돌리고, 한 번 더 누르면 설정창을 닫는다.
+                event.preventDefault();
+                syncNumberInput(name);
+                clearNumberError();
+            }
+        });
+        input.addEventListener('change', () => commitTypedNumber(name));
+        input.addEventListener('blur', () => {
+            if (getStepper(name)?.dataset.invalid !== 'true') return;
+            const message = ui.validation?.textContent || '';
+            syncNumberInput(name);
+            clearNumberError();
+            if (message && ui.validation) ui.validation.textContent = `${message} 이전 값으로 되돌렸어요.`;
+        });
+    }
+
+    // 닫을 때 입력칸에 남은 값을 적용하거나(Esc면) 버린다.
+    function settlePendingNumbers(commit) {
+        for (const name of Object.keys(NUMBER_FIELDS)) {
+            if (!isNumberPending(name)) continue;
+            if (commit && !commitTypedNumber(name)) {
+                const message = ui.validation?.textContent || '';
+                if (message) showToast(`${message} 이전 값을 그대로 둘게요.`, 'error');
+            }
+            syncNumberInput(name);
+        }
+        clearNumberError();
     }
 
     function syncFormFromConfig() {
         if (!ui.enabledInput) return;
         ui.enabledInput.checked = config.enabled;
-        ui.limitInput.value = String(config.dailyLimit);
-        ui.marginInput.value = String(config.safetyMargin);
         ui.regenerationInput.checked = config.blockRegeneration;
-        ui.validation.textContent = '';
-        ui.saveButton.disabled = false;
-    }
-
-    function validateForm() {
-        if (!ui.limitInput) return false;
-        const dailyLimit = Number.parseInt(ui.limitInput.value, 10);
-        const safetyMargin = Number.parseInt(ui.marginInput.value, 10);
-        let message = '';
-
-        if (!Number.isFinite(dailyLimit) || dailyLimit < 1) {
-            message = '일일 목표는 1개 이상으로 입력해 주세요.';
-        } else if (!Number.isFinite(safetyMargin) || safetyMargin < 0) {
-            message = '허용 오차는 0개 이상으로 입력해 주세요.';
-        } else if (safetyMargin >= dailyLimit) {
-            message = '허용 오차는 일일 목표보다 작아야 해요.';
+        for (const name of Object.keys(NUMBER_FIELDS)) {
+            if (ui.shadow?.activeElement !== getNumberInput(name)) syncNumberInput(name);
         }
-
-        ui.validation.textContent = message;
-        ui.saveButton.disabled = Boolean(message);
-        return !message;
-    }
-
-    function handleSave() {
-        if (!validateForm()) return;
-        const dailyLimit = clampInteger(ui.limitInput.value, 1, 10_000_000, config.dailyLimit);
-        const safetyMargin = clampInteger(ui.marginInput.value, 0, dailyLimit - 1, config.safetyMargin);
-        saveConfig({
-            enabled: ui.enabledInput.checked,
-            dailyLimit,
-            safetyMargin,
-            blockRegeneration: ui.regenerationInput.checked,
-        });
-        const range = getTargetRange({ dailyLimit, safetyMargin });
-        showToast(
-            `설정했어요. ${formatNumber(range.lower)}~${formatNumber(range.upper)}개 안에서 목표에 가깝게 멈춥니다.`,
-            'ok',
-        );
+        clearNumberError();
     }
 
     function render() {
@@ -1924,66 +2224,70 @@
         const decision = getBudgetDecision();
         const { range } = decision;
         const blockReason = getBlockReason();
-        const blocked = Boolean(blockReason);
-        const ratio = range.target > 0
-            ? Math.min(100, Math.max(0, (state.used / range.target) * 100))
-            : 100;
-        const remainingToRange = Math.max(0, range.lower - state.used);
+        const used = Math.max(0, Number(state.used) || 0);
+        const usedText = formatNumber(used);
         const targetText = formatNumber(range.target);
         const rangeText = `${formatNumber(range.lower)}~${formatNumber(range.upper)}`;
+        const remainingToRange = Math.max(0, range.lower - used);
 
         let status = 'safe';
-        let pillSummary = `오늘 ${formatNumber(state.used)} / ${targetText}`;
-        let eyebrow = '오늘 사용량';
+        let statusText = '전송 가능';
+        let pillSummary = `오늘 ${usedText} / ${targetText}`;
         let message = remainingToRange > 0
-            ? `${formatNumber(remainingToRange)}개 후 목표 허용 범위에 들어가요.`
-            : `목표 허용 범위 ${rangeText}개를 확인하고 있어요.`;
+            ? `${formatNumber(remainingToRange)}개 더 쓰면 멈춤 구간에 들어가요.`
+            : `멈춤 구간 ${rangeText}개 안이에요.`;
 
         if (decision.phase === 'approaching-target' && decision.predicted) {
-            message = `최근 ${formatNumber(decision.estimate)}개 기준, 다음 예상 ${formatNumber(decision.predicted)}개가 목표에 더 가까워 한 번 더 허용해요.`;
+            status = 'approaching';
+            statusText = '한 번 더 가능';
+            message = `최근 1회 ${formatNumber(decision.estimate)}개 기준, 다음엔 ${formatNumber(decision.predicted)}개로 목표에 더 가까워져요.`;
         }
 
         if (!config.enabled) {
-            status = 'warning';
-            pillSummary = `감시 꺼짐, 오늘 ${formatNumber(state.used)} / ${targetText}`;
-            eyebrow = '감시 꺼짐';
-            message = '현재는 사용량과 관계없이 전송할 수 있어요.';
-        } else if (blocked) {
+            status = 'off';
+            statusText = '감시 꺼짐';
+            pillSummary = `감시 꺼짐 · 오늘 ${usedText} / ${targetText}`;
+            message = '사용량만 보여주고 전송은 막지 않아요.';
+        } else if (blockReason) {
+            const waiting = state.loading && !state.lastUpdatedAt;
             status = 'blocked';
-            pillSummary = state.loading && !state.lastUpdatedAt
-                ? '사용량 확인 중, 전송 대기'
-                : `차단됨, 오늘 ${formatNumber(state.used)} / ${targetText}`;
-            eyebrow = '전송 차단 중';
+            statusText = waiting ? '확인 중' : '전송 차단됨';
+            pillSummary = waiting ? '사용량 확인 중 · 전송 대기' : `차단됨 · 오늘 ${usedText} / ${targetText}`;
             message = blockReason;
         } else if (state.loading) {
             status = 'loading';
-            pillSummary = `갱신 중, 오늘 ${formatNumber(state.used)} / ${targetText}`;
+            statusText = '확인 중';
+            pillSummary = `갱신 중 · 오늘 ${usedText} / ${targetText}`;
             message = '최신 사용 내역을 확인하고 있어요.';
         } else if (state.error) {
             status = 'warning';
-            pillSummary = `확인 필요, 오늘 ${formatNumber(state.used)} / ${targetText}`;
+            statusText = '확인 필요';
+            pillSummary = `확인 필요 · 오늘 ${usedText} / ${targetText}`;
             message = state.error;
         }
 
         ui.pill.dataset.status = status;
         ui.pillText.textContent = pillSummary;
-        ui.statusEyebrow.textContent = eyebrow;
-        ui.statusValue.innerHTML = `${formatNumber(state.used)} <span>/ 목표 ${targetText} · 범위 ${rangeText}</span>`;
-        ui.statusMessage.textContent = message;
-        ui.progress.style.width = `${ratio}%`;
-        ui.progress.style.background = blocked
-            ? 'var(--cdcg-accent-danger)'
-            : ratio >= 75
-                ? 'var(--cdcg-accent-warn)'
-                : 'var(--cdcg-primary)';
-        ui.targetValue.textContent = `${targetText}개`;
-        ui.marginValue.textContent = `±${formatNumber(range.tolerance)}개`;
-        ui.stopValue.textContent = `${rangeText}개`;
-        ui.updatedValue.textContent = state.error
-            ? `${formatTime(state.lastUpdatedAt)} · ${state.error}`
-            : `${formatTime(state.lastUpdatedAt)} · ${state.recordCount}건`;
-        ui.refreshButton.disabled = state.loading;
-        ui.refreshButton.textContent = state.loading ? '확인 중…' : '지금 새로고침';
+        ui.panel.dataset.status = status;
+        ui.statusText.textContent = statusText;
+
+        // 게이지 끝은 상한의 1.1배. 상한을 넘겨 쓰면 그만큼 늘려 넘친 양이 보이게 한다.
+        const scaleMax = Math.max(1, range.upper * 1.1, used * 1.02);
+        const toPercent = (value) => `${Math.min(100, Math.max(0, (value / scaleMax) * 100)).toFixed(2)}%`;
+        ui.gauge.style.setProperty('--band-left', toPercent(range.lower));
+        ui.gauge.style.setProperty('--band-width', toPercent(range.upper - range.lower));
+        ui.gauge.style.setProperty('--target-left', toPercent(range.target));
+        ui.gauge.style.setProperty('--fill-scale', Math.min(1, Math.max(0, used / scaleMax)).toFixed(4));
+
+        const usedStrong = document.createElement('b');
+        usedStrong.textContent = usedText;
+        ui.summary.replaceChildren('오늘 ', usedStrong, ` · 목표 ${targetText} · 멈춤 ${rangeText}`);
+        ui.message.textContent = message;
+
+        ui.updatedValue.textContent = state.lastUpdatedAt
+            ? `${formatTime(state.lastUpdatedAt)} · ${state.error ? '확인 실패' : `${formatNumber(state.recordCount)}건`}`
+            : (state.loading ? '확인 중…' : '아직 확인 전');
+        ui.refreshButton.setAttribute('aria-busy', String(state.loading));
     }
 
     function showToast(message, kind = 'info') {
