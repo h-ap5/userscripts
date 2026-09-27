@@ -14,6 +14,7 @@
 - [(구) 미디어 이미지 추가 편의성](#media)
 - [일일 크래커 가드](#guard)
 - [크랙 버블 북마크](#bookmark)
+- [크랙 단축키 오작동 방지](#keyguard)
 
 ---
 
@@ -265,5 +266,41 @@
 - 오래된 북마크는 크랙이 과거 대화를 불러오는 동안 시간이 걸릴 수 있습니다.
 - 원문이 삭제되거나 다른 답변으로 바뀌었다면 저장한 미리보기는 남아 있어도 원문 이동이 완료되지 않을 수 있습니다.
 - CSP 테마, 입력창 대시보드, 모바일 유틸, 라디오존데, 일일 크래커 가드와 함께 사용할 수 있도록 별도 오버레이에 표시됩니다.
+
+<p align="right"><a href="#top">⬆ 목차로 돌아가기</a></p>
+
+---
+
+<a id="keyguard"></a>
+
+## 크랙 단축키 오작동 방지
+
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/keyguard.user.js"><img src="https://github.com/h-ap5/userscripts/blob/main/icons/1d%20(1).png?raw=true" width="20" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/raw/refs/heads/main/scripts/keyguard.user.js"><img src="https://img.shields.io/badge/INSTALL-007acc?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="설치"></a>
+<a href="https://github.com/h-ap5/userscripts/blob/main/PatchNotes/keyguard.md"><img src="https://img.shields.io/badge/%F0%9F%94%A7-PATCH_NOTES-e9a01e?style=for-the-badge" alt="패치노트"></a>
+
+**기능 및 사용 방법**
+
+> 타자를 치는 도중 요약 메모리 창이 저절로 열리거나 입력창 포커스가 풀리는 문제를 막습니다. 설치만 하면 되고 설정 창은 없습니다.
+
+### 왜 생기나요?
+
+- 크랙은 `Esc`를 요약 메모리 열기/닫기와 입력창 포커스 해제 단축키로 씁니다.
+- 일부 확장 프로그램(예: 대화 프로필 매니저 1.7.2 이하)은 크랙 창을 닫을 때 가짜 `Esc`를 **누르기만 하고 떼지 않습니다.**
+- 그러면 크랙 단축키는 `Esc`가 계속 눌려 있다고 기억하고, 이후 `Shift`·`Ctrl` 같은 조합키가 들어올 때마다 `Esc + 조합키`로 판단해 요약 메모리를 엽니다. 다른 앱이나 탭으로 갔다 오기 전까지 계속됩니다.
+
+### 주요 기능
+
+| 기능 | 설명 |
+|---|---|
+| **가짜 키 차단** | 확장 프로그램이 보낸 가짜 키 입력이 크랙 단축키에 닿지 않게 합니다. 크랙 창 닫기, 입력창, 버튼처럼 원래 받던 곳에는 그대로 전달됩니다. |
+| **모바일 단축키 차단** | 휴대폰·태블릿에서는 `Esc`와 조합키(`Shift`·`Ctrl`·`Alt`·`Meta`) 입력으로 크랙 단축키가 실행되지 않습니다. |
+
+### 알아두기
+
+- 입력, `Enter` 전송, 한글 조합, 크랙 창의 `Esc` 닫기는 영향을 받지 않습니다.
+- PC에서는 직접 누른 `Esc` 단축키가 그대로 동작합니다. PC에서도 끄려면 스크립트 맨 위의 `BLOCK_NATIVE_SHORTCUT_KEYS` 값을 `'always'`로, 모바일에서도 켜 두려면 `'never'`로 바꿉니다.
+- 휴대폰·태블릿에 외장 키보드를 연결해 쓰면 다른 확장 프로그램 창의 `Esc` 닫기가 동작하지 않을 수 있습니다. 이때는 닫기 버튼을 눌러 주세요.
+- 외부 서버 전송이나 API 호출 없이 동작합니다.
 
 <p align="right"><a href="#top">⬆ 목차로 돌아가기</a></p>
