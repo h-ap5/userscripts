@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.1.7
+// @version      4.1.8
 // @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -275,13 +275,19 @@ ${TRANSLATION_ONLY_RULE}`;
           const json = await res.json();
           const msgs = (json.data ?? json).messages ?? [];
           const userMsgs = msgs.filter(m => m.role === 'user');
+          // 여러 줄 OOC 문구는 아래 한 줄용 정규식에 안 걸리므로 지금 문구 그대로 붙인 흔적부터 지운다.
+          const exactMarker = oocRuntime.text ? `\n\n[OOC: ${oocRuntime.text}]` : '';
 
           // 지정된 턴 수보다 오래된 메시지의 OOC 삭제
+          let patched = 0;
           for (let i = oocTurns; i < userMsgs.length; i++) {
             const msg = userMsgs[i];
             if (msg.content && msg.content.includes('[OOC:')) {
-              const cleanContent = msg.content.replace(/\n\n\[OOC:.*?\]/g, '').trim();
+              const withoutExact = exactMarker ? msg.content.split(exactMarker).join('') : msg.content;
+              const cleanContent = withoutExact.replace(/\n\n\[OOC:.*?\]/g, '').trim();
               if (cleanContent !== msg.content) {
+                // 쓰기 요청 사이에 간격을 둔다. 실패하면(429·5xx 포함) 남은 정리는 다음 전송 때 다시 한다.
+                if (patched++) await new Promise(resolve => setTimeout(resolve, 80));
                 await patchMessage(chatId, msg._id || msg.id, cleanContent);
                 console.log(`[Crack Translator] Cleaned up OOC marker in older message: ${msg._id || msg.id}`);
               }
@@ -388,7 +394,8 @@ ${TRANSLATION_ONLY_RULE}`;
     style.textContent = `
 #trans-setting-panel,
 #trans-result-modal,
-#trans-nudge {
+#trans-nudge,
+#trans-dialog {
   --t-bg: #ffffff;
   --t-surface: #f7f7f5;
   --t-raised: #ffffff;
@@ -407,7 +414,8 @@ ${TRANSLATION_ONLY_RULE}`;
 
 #trans-setting-panel.trans-theme-dark,
 #trans-result-modal.trans-theme-dark,
-#trans-nudge.trans-theme-dark {
+#trans-nudge.trans-theme-dark,
+#trans-dialog.trans-theme-dark {
   --t-bg: #111113;
   --t-surface: #18181c;
   --t-raised: #202026;
@@ -1204,6 +1212,68 @@ ${TRANSLATION_ONLY_RULE}`;
   color: var(--t-danger);
 }
 
+#trans-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, .42);
+  font-family: var(--t-font);
+}
+
+#trans-dialog.trans-theme-dark {
+  background: rgba(0, 0, 0, .65);
+}
+
+.t-dialog-card {
+  width: min(400px, 100%);
+  box-sizing: border-box;
+  padding: 20px;
+  border: 1px solid var(--t-border);
+  border-radius: 14px;
+  background: var(--t-bg);
+  box-shadow: var(--t-shadow);
+  color: var(--t-tx1);
+}
+
+.t-dialog-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.t-dialog-message {
+  max-height: min(50vh, 360px);
+  overflow-y: auto;
+  color: var(--t-tx2);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.t-dialog-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.t-dialog-actions .t-btn:focus-visible {
+  outline: 2px solid var(--t-accent);
+  outline-offset: 2px;
+}
+
+.t-btn-danger {
+  background: var(--t-danger);
+  border-color: var(--t-danger);
+  color: #fff;
+}
+
 @media (min-width: 768px) {
   #trans-setting-panel {
     width: clamp(620px, 62vw, 860px);
@@ -1307,6 +1377,10 @@ ${TRANSLATION_ONLY_RULE}`;
 
   #trans-nudge {
     bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .t-dialog-actions .t-btn {
+    min-height: 44px;
   }
 
   .t-inline-form {
@@ -1867,17 +1941,22 @@ ${TRANSLATION_ONLY_RULE}`;
       }, 1200);
     });
 
-    resetBtn.addEventListener('click', () => {
+    resetBtn.addEventListener('click', async () => {
       const currentMode = modeSelect.value;
       const customSlot = getPromptSlot(currentMode);
       const message = customSlot
         ? '현재 커스텀 슬롯의 지침을 비울까요?'
         : '지침서를 현재 선택된 방식의 기본값으로 초기화할까요?';
-      if (confirm(message)) {
-        const defaultPrompt = customSlot ? '' : currentMode === 'en' ? promptEn : promptKo;
-        customPromptInput.value = defaultPrompt;
-        persistPromptDraft(currentMode, defaultPrompt);
-      }
+      const confirmed = await transConfirm(message, {
+        title: '번역 지침서 초기화',
+        confirmLabel: customSlot ? '비우기' : '초기화',
+        danger: true,
+      });
+      // 확인을 기다리는 사이 다른 방식으로 바뀌었으면 그 방식의 지침은 건드리지 않는다.
+      if (!confirmed || modeSelect.value !== currentMode) return;
+      const defaultPrompt = customSlot ? '' : currentMode === 'en' ? promptEn : promptKo;
+      customPromptInput.value = defaultPrompt;
+      persistPromptDraft(currentMode, defaultPrompt);
     });
 
     closeSettingsBtn.addEventListener('click', () => {
@@ -1924,10 +2003,11 @@ ${TRANSLATION_ONLY_RULE}`;
         transIndex = transHistory.length - 1;
         renderModalState();
         storeActiveBubbleResult();
-        showNudge('재번역이 완료되었습니다.', 'ok');
+        if (resultObj.truncated) showNudge(TRUNCATED_REVIEW_MESSAGE, 'err', true);
+        else showNudge('재번역이 완료되었습니다.', 'ok');
       } catch (e) {
         showNudge(e.message, 'err');
-        alert(e.message);
+        transNotice(e.message, '다시 번역하지 못했어요');
       } finally {
         rerollBtn.textContent = '↻ 다시 돌리기';
         rerollBtn.disabled = false;
@@ -2011,7 +2091,7 @@ ${TRANSLATION_ONLY_RULE}`;
           applyStatus.textContent = e.message;
           applyStatus.className = 'err';
           showNudge(e.message, 'err');
-          alert(e.message);
+          transNotice(e.message, '교체하지 못했어요');
           patchModalBtn.textContent = getPatchButtonIdleText();
           patchModalBtn.disabled = false;
         }
@@ -2039,7 +2119,7 @@ ${TRANSLATION_ONLY_RULE}`;
       directApplyBtn.addEventListener('click', async () => {
         const chatId = parsePath();
         if (!chatId) {
-          alert('채팅방에서만 사용 가능합니다.');
+          transNotice('채팅방에서만 사용 가능합니다.');
           return;
         }
 
@@ -2054,6 +2134,7 @@ ${TRANSLATION_ONLY_RULE}`;
           if (!original.trim()) throw new Error('번역할 내용이 없습니다.');
 
           const resultObj = await callGemini(original);
+          if (resultObj.truncated) throw new Error(TRUNCATED_APPLY_MESSAGE);
           const displayResult = await saveAndDisplayMessage({
             chatId,
             messageId: msgId,
@@ -2284,6 +2365,83 @@ ${TRANSLATION_ONLY_RULE}`;
     }
   }
 
+  // --- 알림·확인 창 ---
+  // 브라우저 기본 alert/confirm은 탭 전체를 멈추고(다른 확장·자동화도 같이 멈춘다) 번역기 화면과 모양이 맞지 않는다.
+  // 여러 개가 한꺼번에 오면 차례로 띄운다.
+  let transDialogChain = Promise.resolve();
+
+  function openTransDialog({ title, message, confirmLabel = '확인', cancelLabel = '', danger = false }) {
+    const show = () => new Promise(resolve => {
+      const previousFocus = document.activeElement;
+      const overlay = document.createElement('div');
+      overlay.id = 'trans-dialog';
+      overlay.className = detectSiteTheme() === 'dark' ? 'trans-theme-dark' : 'trans-theme-light';
+      overlay.setAttribute('role', cancelLabel ? 'alertdialog' : 'dialog');
+      overlay.setAttribute('aria-modal', 'true');
+      overlay.setAttribute('aria-labelledby', 'trans-dialog-title');
+      overlay.setAttribute('aria-describedby', 'trans-dialog-message');
+      overlay.innerHTML = `
+<div class="t-dialog-card">
+  <div class="t-dialog-title" id="trans-dialog-title"></div>
+  <div class="t-dialog-message" id="trans-dialog-message"></div>
+  <div class="t-dialog-actions">
+    ${cancelLabel ? '<button type="button" class="t-btn t-btn-ghost" data-dialog-cancel></button>' : ''}
+    <button type="button" class="t-btn ${danger ? 't-btn-danger' : 't-btn-primary'}" data-dialog-ok></button>
+  </div>
+</div>`;
+      overlay.querySelector('.t-dialog-title').textContent = title || '초월 번역';
+      overlay.querySelector('.t-dialog-message').textContent = String(message || '');
+      const okButton = overlay.querySelector('[data-dialog-ok]');
+      const cancelButton = overlay.querySelector('[data-dialog-cancel]');
+      okButton.textContent = confirmLabel;
+      if (cancelButton) cancelButton.textContent = cancelLabel;
+      const buttons = [cancelButton, okButton].filter(Boolean);
+
+      const finish = value => {
+        window.removeEventListener('keydown', onKey, true);
+        overlay.remove();
+        try { previousFocus?.focus?.({ preventScroll: true }); } catch (_) {}
+        resolve(value);
+      };
+      // 창이 떠 있는 동안 키는 여기서 끝낸다. 크랙 단축키(Enter 입력창 포커스, Esc 요약 메모리)로 넘어가지 않게 캡처 단계에서 멈춘다.
+      const onKey = event => {
+        event.stopPropagation();
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(false);
+        } else if (event.key === 'Enter' && !event.isComposing) {
+          event.preventDefault();
+          finish(document.activeElement !== cancelButton);
+        } else if (event.key === 'Tab') {
+          event.preventDefault();
+          const index = buttons.indexOf(document.activeElement);
+          buttons[(index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length].focus();
+        }
+      };
+
+      okButton.addEventListener('click', () => finish(true));
+      cancelButton?.addEventListener('click', () => finish(false));
+      overlay.addEventListener('mousedown', event => {
+        if (event.target === overlay) finish(!cancelLabel);
+      });
+      window.addEventListener('keydown', onKey, true);
+      (document.body || document.documentElement).appendChild(overlay);
+      // 되돌리기 어려운 확인은 실수로 Enter를 눌러도 취소되도록 취소 버튼에 둔다.
+      (danger && cancelButton ? cancelButton : okButton).focus({ preventScroll: true });
+    });
+    const result = transDialogChain.then(show, show);
+    transDialogChain = result.catch(() => {});
+    return result;
+  }
+
+  function transNotice(message, title = '초월 번역') {
+    return openTransDialog({ title, message });
+  }
+
+  function transConfirm(message, { title = '초월 번역', confirmLabel = '확인', cancelLabel = '취소', danger = false } = {}) {
+    return openTransDialog({ title, message, confirmLabel, cancelLabel, danger }).then(value => value === true);
+  }
+
   function formatCostForMessage(usage, model) {
     const c = calculateCost(usage, 1500, model);
     return c ? ` (약 ₩${c.krw.toFixed(2)} 소모)` : '';
@@ -2392,27 +2550,32 @@ ${TRANSLATION_ONLY_RULE}`;
               { role: 'user', content: maskedText }
             ]
           }),
+          timeout: TRANSLATION_TIMEOUT_MS,
           onload(res) {
             try {
-              const data = JSON.parse(res.responseText);
+              const data = parseTranslationResponse(res, 'DeepSeek');
               if (data.error) {
                 reject(new Error(data.error.message));
                 return;
               }
-              const raw = data.choices[0].message.content;
+              const choice = data.choices?.[0];
+              const raw = typeof choice?.message?.content === 'string' ? choice.message.content : '';
               const usage = data.usage || {};
               const restored = unmaskCodeBlocks(stripOuterFence(raw));
-              resolve({
+              resolve(checkedTranslation({
                 text: restored,
                 usage: { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens },
                 model: modelId
-              });
+              }, choice?.finish_reason, choice?.finish_reason === 'length'));
             } catch (e) {
               reject(e);
             }
           },
           onerror() {
             reject(new Error('DeepSeek 네트워크 오류가 발생했습니다.'));
+          },
+          ontimeout() {
+            reject(new Error(TRANSLATION_TIMEOUT_MESSAGE));
           }
         });
         return;
@@ -2445,18 +2608,24 @@ ${TRANSLATION_ONLY_RULE}`;
           contents: [{ parts: [{ text: maskedText }] }],
           generationConfig,
         }),
+        timeout: TRANSLATION_TIMEOUT_MS,
         onload(res) {
           try {
-            const data = JSON.parse(res.responseText);
+            const data = parseTranslationResponse(res, 'Google');
             if (data.error) {
               reject(new Error(data.error.message));
               return;
             }
 
-            const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const candidate = data.candidates?.[0];
+            const raw = geminiResponseText(candidate);
             const usage = data.usageMetadata || {};
             const restored = unmaskCodeBlocks(stripOuterFence(raw));
-            resolve({ text: restored, usage, model: modelId });
+            resolve(checkedTranslation(
+              { text: restored, usage, model: modelId },
+              candidate?.finishReason || data.promptFeedback?.blockReason,
+              candidate?.finishReason === 'MAX_TOKENS'
+            ));
           } catch (e) {
             reject(e);
           }
@@ -2464,8 +2633,43 @@ ${TRANSLATION_ONLY_RULE}`;
         onerror() {
           reject(new Error('네트워크 오류가 발생했습니다.'));
         },
+        ontimeout() {
+          reject(new Error(TRANSLATION_TIMEOUT_MESSAGE));
+        },
       });
     });
+  }
+
+  // 응답이 끊기면 GM 요청이 끝나지 않아 '이미 번역이 진행 중' 상태로 계속 막혔다.
+  const TRANSLATION_TIMEOUT_MS = 180000;
+  const TRANSLATION_TIMEOUT_MESSAGE = '번역 API가 3분 동안 응답하지 않아 중단했습니다. 잠시 후 다시 시도해주세요.';
+  const TRUNCATED_APPLY_MESSAGE = '번역이 길이 제한에 걸려 중간에 잘렸습니다. 원문은 그대로 두었습니다. 팝업 모드에서 확인해주세요.';
+  const TRUNCATED_REVIEW_MESSAGE = '번역이 길이 제한에 걸려 잘렸을 수 있어요. 끝부분을 확인한 뒤 교체하세요.';
+
+  function parseTranslationResponse(res, providerName) {
+    try {
+      return JSON.parse(res.responseText);
+    } catch (_) {
+      throw new Error(`${providerName} 응답을 읽지 못했습니다 (HTTP ${res.status || '?'}).`);
+    }
+  }
+
+  // 생각(thought) 부분을 빼고 여러 조각으로 온 본문을 모두 잇는다. 첫 조각만 쓰면 번역이 잘릴 수 있다.
+  function geminiResponseText(candidate) {
+    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
+    return parts
+      .filter(part => part && !part.thought && typeof part.text === 'string')
+      .map(part => part.text)
+      .join('');
+  }
+
+  // 차단·빈 응답을 번역문으로 쓰면 즉시 교체에서 원문이 빈 글로 덮어써진다.
+  function checkedTranslation(result, finishReason, truncated) {
+    if (!String(result.text || '').trim()) {
+      const reason = finishReason ? ` (사유: ${finishReason})` : '';
+      throw new Error(`번역 결과가 비어 있습니다${reason}. 원문은 그대로 두었습니다.`);
+    }
+    return truncated ? { ...result, truncated: true } : result;
   }
 
   async function callFirebaseGemini(maskedText, modelId, finalPrompt, generationConfig) {
@@ -2523,7 +2727,12 @@ ${TRANSLATION_ONLY_RULE}`;
       const rawResult = result.response.text();
       const usage = result.response.usageMetadata || {};
       const restored = unmaskCodeBlocks(stripOuterFence(rawResult));
-      return { text: restored, usage, model: modelId };
+      const candidate = result.response.candidates?.[0];
+      return checkedTranslation(
+        { text: restored, usage, model: modelId },
+        candidate?.finishReason || result.response.promptFeedback?.blockReason,
+        candidate?.finishReason === 'MAX_TOKENS'
+      );
     } catch (e) {
       throw new Error(`Firebase Vertex 통신 실패: ${e.message}`);
     }
@@ -2702,6 +2911,9 @@ ${TRANSLATION_ONLY_RULE}`;
     return role === 'assistant' || role === 'bot' || role === 'character' || role === 'ai';
   }
 
+  let entityDecoder = null;
+  let inertHtmlParser = null;
+
   function normalizeForMessageMatch(text) {
     let normalized = String(text || '');
     normalized = normalized
@@ -2712,13 +2924,15 @@ ${TRANSLATION_ONLY_RULE}`;
       .replace(/[\u200B-\u200D\u2060\uFEFF\uFE0E\uFE0F]/g, '');
 
     if (typeof document !== 'undefined') {
-      const decoder = document.createElement('textarea');
-      decoder.innerHTML = normalized;
-      normalized = decoder.value;
+      // textarea\uC5D0 \uB123\uC73C\uBA74 \uD0DC\uADF8\uB294 \uAE00\uC790\uB85C \uB0A8\uACE0 &lt; \uAC19\uC740 \uC5D4\uD2F0\uD2F0\uB9CC \uD480\uB9B0\uB2E4.
+      if (!entityDecoder) entityDecoder = document.createElement('textarea');
+      entityDecoder.innerHTML = normalized;
+      normalized = entityDecoder.value;
       if (/<[a-z][\s\S]*>/i.test(normalized)) {
-        const container = document.createElement('div');
-        container.innerHTML = normalized;
-        normalized = container.textContent || '';
+        // \uD398\uC774\uC9C0\uC758 div\uC5D0 innerHTML\uB85C \uB123\uC73C\uBA74 \uB300\uD654 \uC18D <img onerror> \uAC19\uC740 \uCF54\uB4DC\uAC00 \uD06C\uB799 \uD398\uC774\uC9C0\uC5D0\uC11C \uC2E4\uD589\uB41C\uB2E4.
+        // DOMParser \uBB38\uC11C\uB294 \uC2A4\uD06C\uB9BD\uD2B8\u00B7\uC774\uBBF8\uC9C0\u00B7\uC774\uBCA4\uD2B8\uAC00 \uB3D9\uC791\uD558\uC9C0 \uC54A\uB294\uB2E4.
+        if (!inertHtmlParser) inertHtmlParser = new DOMParser();
+        normalized = inertHtmlParser.parseFromString(normalized, 'text/html').documentElement?.textContent || '';
       }
     }
 
@@ -2997,6 +3211,8 @@ ${TRANSLATION_ONLY_RULE}`;
 
     for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
       const pageCursor = cursor;
+      // 여러 페이지를 이어 읽을 때는 요청 사이에 잠깐 쉰다(결정화 캐즘 SDK 기본값과 같은 20ms).
+      if (pageIndex > 0) await new Promise(resolve => setTimeout(resolve, 20));
       const page = await fetchChatMessagePage(chatId, pageCursor);
       if (pageIndex === 0) firstPageMessages = page.messages;
       const assistants = page.messages.filter(isAssistantMessage);
@@ -3639,10 +3855,16 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     return element.getClientRects().length > 0;
   }
 
+  // 이미 붙은 클래스를 다시 add해도 DOM 변경 기록이 생긴다. 그 기록이 다시 동기화를 부르고 동기화가 또 add해서,
+  // 번역문을 한 번 적용하면 가만히 있어도 90ms마다 모든 적용 답변을 다시 읽었다. 바뀔 때만 쓴다.
+  function setLiveSourceHidden(source, hidden) {
+    if (source.classList.contains('trans-live-source') !== hidden) source.classList.toggle('trans-live-source', hidden);
+  }
+
   function removeLiveMessageView(patchKey) {
     const tracked = liveMessageViews.get(patchKey);
     if (tracked) {
-      tracked.sources?.forEach(source => source.classList.remove('trans-live-source'));
+      tracked.sources?.forEach(source => setLiveSourceHidden(source, false));
       tracked.view?.remove();
       tracked.label?.remove();
       liveMessageViews.delete(patchKey);
@@ -3660,6 +3882,17 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     liveMessagePatches.delete(patchKey);
   }
 
+  // 교체 기록의 원문·번역문은 바뀌지 않으므로 정규화는 한 번만 한다.
+  function getLivePatchNorms(record) {
+    if (!record.norms) {
+      record.norms = {
+        source: normalizeForMessageMatch(record.sourceContent),
+        content: normalizeForMessageMatch(record.content),
+      };
+    }
+    return record.norms;
+  }
+
   function findLivePatchBubble(record) {
     if (record.bubbleElement?.isConnected && record.bubbleElement.ownerDocument === document) {
       return record.bubbleElement;
@@ -3668,7 +3901,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     const blocks = Array.from(document.querySelectorAll('[data-message-group-id]'));
     const ids = new Set([record.bubbleId, record.messageId].filter(Boolean).map(String));
     const byId = blocks.filter(block => ids.has(String(block.getAttribute('data-message-group-id') || '')));
-    const sourceNorm = normalizeForMessageMatch(record.sourceContent);
+    const sourceNorm = getLivePatchNorms(record).source;
     const matchingById = byId.filter(block => normalizeForMessageMatch(getBubbleVisibleText(block)) === sourceNorm);
     if (matchingById.length === 1) return matchingById[0];
     if (byId.length === 1) return byId[0];
@@ -3688,8 +3921,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
     const nativeText = getBubbleVisibleText(block);
     const nativeNorm = normalizeForMessageMatch(nativeText);
-    const sourceNorm = normalizeForMessageMatch(record.sourceContent);
-    const translatedNorm = normalizeForMessageMatch(record.content);
+    const { source: sourceNorm, content: translatedNorm } = getLivePatchNorms(record);
     if (nativeNorm && nativeNorm === translatedNorm) {
       releaseLiveMessagePatch(patchKey);
       return 'native';
@@ -3701,7 +3933,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
     const sources = Array.from(block.querySelectorAll('.wrtn-markdown:not(.trans-live-content)'));
     if (!sources.length) return 'offscreen';
-    sources.forEach(source => source.classList.add('trans-live-source'));
+    sources.forEach(source => setLiveSourceHidden(source, true));
 
     let view = block.querySelector(`.trans-live-content[data-trans-patch-key]`);
     let label = block.querySelector(`.trans-live-applied-label[data-trans-patch-key]`);
@@ -3726,7 +3958,9 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     return isActuallyVisible(view) ? 'visible' : 'hidden';
   }
 
-  function syncLiveMessagePatches() {
+  // dirtyBlocks가 있으면 그 말풍선과 관계된 기록만 다시 맞춘다. 새 답변이 흘러나오는 동안
+  // 교체해 둔 답변마다 말풍선 글을 다시 읽고 정규화하던 부분(교체한 답변이 많을수록 느려졌다).
+  function syncLiveMessagePatches(dirtyBlocks = null) {
     const currentChatId = parsePath();
     for (const [patchKey, tracked] of liveMessageViews) {
       const record = liveMessagePatches.get(patchKey);
@@ -3735,8 +3969,21 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       }
     }
     for (const record of liveMessagePatches.values()) {
-      if (String(record.chatId) === String(currentChatId)) applyLiveMessagePatch(record);
+      if (String(record.chatId) !== String(currentChatId)) continue;
+      if (dirtyBlocks && !livePatchTouched(record, dirtyBlocks)) continue;
+      applyLiveMessagePatch(record);
     }
+  }
+
+  function livePatchTouched(record, dirtyBlocks) {
+    const tracked = liveMessageViews.get(getLivePatchKey(record.chatId, record.messageId));
+    if (tracked) return dirtyBlocks.has(tracked.block);
+    if (record.bubbleElement?.isConnected) return dirtyBlocks.has(record.bubbleElement);
+    const ids = [record.bubbleId, record.messageId].filter(Boolean).map(String);
+    for (const block of dirtyBlocks) {
+      if (ids.includes(block.getAttribute('data-message-group-id') || '')) return true;
+    }
+    return false;
   }
 
   async function saveAndDisplayMessage({
@@ -3749,6 +3996,8 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     bubbleElement = null,
   }) {
     const patchKey = getLivePatchKey(chatId, messageId);
+    // 빈 글로 교체하면 서버의 답변이 지워진다(결과창에서 글을 모두 지운 경우 포함).
+    if (!String(content ?? '').trim()) throw new Error('번역문이 비어 있어 교체하지 않았습니다.');
     if (pendingMessageSaves.has(patchKey)) throw new Error('이미 교체 중인 답변입니다.');
     pendingMessageSaves.add(patchKey);
 
@@ -3847,9 +4096,30 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     return normalizedText ? `${normalizedChatId}::text::${normalizedText}` : '';
   }
 
+  // 같은 말풍선이라도 수정으로 원문이 바뀌었으면 예전 번역을 다시 열지 않는다.
+  // 교체한 뒤에는 화면에 번역문이 보이므로 저장된 결과 글과도 비교한다.
+  function cachedResultMatchesBubble(cached, bubbleText) {
+    if (!cached.bubbleTextKey) return true;
+    const textKey = normalizeForMessageMatch(bubbleText);
+    if (!textKey || textKey === cached.bubbleTextKey) return true;
+    return cached.history.some(entry => normalizeForMessageMatch(entry) === textKey);
+  }
+
+  // bubbleText는 글이나 글을 돌려주는 함수. 말풍선 글은 ID로 저장된 결과가 있을 때만 읽는다.
+  function findCachedResultForBubble(chatId, bubbleMsgId, bubbleText) {
+    const readText = () => (typeof bubbleText === 'function' ? bubbleText() : bubbleText);
+    if (String(bubbleMsgId || '').trim()) {
+      const cacheKey = getBubbleResultCacheKey(chatId, bubbleMsgId, '');
+      const cached = cacheKey ? bubbleResultCache.get(cacheKey) : null;
+      return cached && cachedResultMatchesBubble(cached, readText()) ? { cacheKey, cached } : null;
+    }
+    const cacheKey = getBubbleResultCacheKey(chatId, '', readText());
+    const cached = cacheKey ? bubbleResultCache.get(cacheKey) : null;
+    return cached ? { cacheKey, cached } : null;
+  }
+
   function hasCachedResultForBubble(chatId, bubbleMsgId, bubbleText) {
-    const cacheKey = getBubbleResultCacheKey(chatId, bubbleMsgId, bubbleText);
-    return Boolean(cacheKey && bubbleResultCache.has(cacheKey));
+    return Boolean(findCachedResultForBubble(chatId, bubbleMsgId, bubbleText));
   }
 
   function storeActiveBubbleResult() {
@@ -3872,9 +4142,9 @@ if(__exports != exports)module.exports = exports;return module.exports}));
   }
 
   function openCachedResultForBubble(chatId, bubbleMsgId, bubbleText) {
-    const cacheKey = getBubbleResultCacheKey(chatId, bubbleMsgId, bubbleText);
-    const cached = cacheKey ? bubbleResultCache.get(cacheKey) : null;
-    if (!cached) return false;
+    const found = findCachedResultForBubble(chatId, bubbleMsgId, bubbleText);
+    if (!found) return false;
+    const { cacheKey, cached } = found;
 
     storeActiveBubbleResult();
     activeBubbleCacheKey = cacheKey;
@@ -3899,22 +4169,24 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     findElementsInRoot(root, '.trans-bubble-btn').forEach(btn => {
       const messageBlock = btn.closest('.w-full[data-message-group-id]');
       const bubbleMsgId = messageBlock?.getAttribute('data-message-group-id') || '';
-      const bubbleText = bubbleResultCache.size > 0 && currentChatId && messageBlock
-        ? getBubbleVisibleText(messageBlock)
-        : '';
+      // 말풍선 글(복제·정규화)은 결과가 저장된 말풍선에서만 읽는다. 전에는 버튼마다 매번 읽었다.
       const hasCachedResult = Boolean(bubbleResultCache.size > 0 && currentChatId && messageBlock)
-        && hasCachedResultForBubble(currentChatId, bubbleMsgId, bubbleText);
+        && hasCachedResultForBubble(currentChatId, bubbleMsgId, () => getBubbleVisibleText(messageBlock));
+      const title = hasCachedResult ? '번역 결과 다시 열기' : '초월 번역';
 
       btn.classList.toggle('trans-has-result', hasCachedResult);
-      btn.title = hasCachedResult ? '번역 결과 다시 열기' : '초월 번역';
-      btn.setAttribute('aria-label', btn.title);
+      // 같은 값을 다시 써도 속성 변경 기록이 생겨 다른 확장의 감시가 깨어난다.
+      if (btn.title !== title) {
+        btn.title = title;
+        btn.setAttribute('aria-label', title);
+      }
     });
   }
 
   async function executeBubbleTranslation(textToTranslate, fallbackMsgId, bubbleElement = null) {
     const chatId = parsePath();
     if (!chatId) {
-      alert('채팅방 페이지에서만 사용 가능합니다.');
+      transNotice('채팅방 페이지에서만 사용 가능합니다.');
       return;
     }
 
@@ -3970,11 +4242,12 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       storeActiveBubbleResult();
       refreshCachedResultBubbleButtons();
       openResultModal();
-      showNudge('번역 완료. 팝업에서 확인하세요.', 'ok');
+      if (resultObj.truncated) showNudge(TRUNCATED_REVIEW_MESSAGE, 'err', true);
+      else showNudge('번역 완료. 팝업에서 확인하세요.', 'ok');
     } catch (err) {
       if (translationSessionId !== transSessionId) return;
       showNudge(`번역 실패: ${err.message}`, 'err');
-      alert(`번역 실패: ${err.message}`);
+      transNotice(err.message, '번역하지 못했어요');
     } finally {
       bubbleTranslationInProgress = false;
     }
@@ -3990,6 +4263,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       if (!originalContent.trim()) throw new Error('번역할 내용이 없습니다.');
 
       const resultObj = await callGemini(originalContent);
+      if (resultObj.truncated) throw new Error(TRUNCATED_APPLY_MESSAGE);
       const newContent = resultObj.text;
 
       const displayResult = await saveAndDisplayMessage({
@@ -4007,7 +4281,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       showNudge(`${displayText}${formatCostForMessage(resultObj.usage, resultObj.model)}`, 'ok');
     } catch (err) {
       showNudge(`번역 실패: ${err.message}`, 'err');
-      alert(`번역 실패: ${err.message}`);
+      transNotice(err.message, '번역하지 못했어요');
     }
   }
 
@@ -4025,6 +4299,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       btn.innerHTML = TRANSLATOR_ICON_SVG;
       btn.style.marginRight = '4px';
       btn.title = '초월 번역';
+      btn.setAttribute('aria-label', btn.title);
       btn.onclick = (e) => {
         e.stopPropagation();
         const messageBlock = e.currentTarget.closest('.w-full[data-message-group-id]');
@@ -4037,7 +4312,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
         }
 
         if (!text) {
-          alert('텍스트를 찾을 수 없습니다.');
+          transNotice('이 말풍선에서 번역할 텍스트를 찾지 못했어요.');
           return;
         }
 
@@ -4078,6 +4353,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       document.getElementById('trans-result-modal'),
       document.getElementById('trans-result-overlay'),
       document.getElementById('trans-nudge'),
+      document.getElementById('trans-dialog'),
     ].filter(Boolean);
 
     targets.forEach(el => {
@@ -4101,7 +4377,9 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
   let uiRefreshTimer = null;
   let fullUiRefreshPending = false;
-  let livePatchRefreshPending = false;
+  // 교체해 둔 답변이 있을 때 바뀐 말풍선만 모은다. 말풍선이 새로 붙으면 전체를 다시 맞춘다.
+  let livePatchFullSync = false;
+  const dirtyPatchBlocks = new Set();
   const uiRefreshRoots = new Set();
 
   function isTranslatorOwnedNode(node) {
@@ -4133,10 +4411,13 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
   function flushUiRefresh() {
     uiRefreshTimer = null;
+    // hydration 전에 온 요청은 남겨 두었다가 준비되면 한 번에 처리한다.
+    if (!pageIntegrationReady) return;
     if (!document?.documentElement) {
       uiRefreshRoots.clear();
       fullUiRefreshPending = false;
-      livePatchRefreshPending = false;
+      livePatchFullSync = false;
+      dirtyPatchBlocks.clear();
       return;
     }
     const roots = [...uiRefreshRoots];
@@ -4144,16 +4425,19 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
     if (fullUiRefreshPending) {
       fullUiRefreshPending = false;
-      livePatchRefreshPending = false;
+      livePatchFullSync = false;
+      dirtyPatchBlocks.clear();
       if (liveMessagePatches.size || liveMessageViews.size) syncLiveMessagePatches();
       injectSidebar(document.body);
       injectBubbleButtons(document.body);
       return;
     }
 
-    if (livePatchRefreshPending) {
-      livePatchRefreshPending = false;
-      if (liveMessagePatches.size || liveMessageViews.size) syncLiveMessagePatches();
+    if (livePatchFullSync || dirtyPatchBlocks.size) {
+      const dirtyBlocks = livePatchFullSync ? null : new Set(dirtyPatchBlocks);
+      livePatchFullSync = false;
+      dirtyPatchBlocks.clear();
+      if (liveMessagePatches.size || liveMessageViews.size) syncLiveMessagePatches(dirtyBlocks);
     }
 
     roots.forEach(root => {
@@ -4175,24 +4459,24 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
   function scheduleMutationRefresh(mutations) {
     if (!document?.documentElement) return;
+    // 조상 탐색(closest)은 교체해 둔 답변이 있을 때만 한다. 없으면 기록마다 건너뛴다.
+    const tracksLivePatches = Boolean(liveMessagePatches.size || liveMessageViews.size);
     for (const mutation of mutations) {
       const targetElement = getRefreshRoot(mutation.target);
 
       if (mutation.type === 'characterData') {
-        if ((liveMessagePatches.size || liveMessageViews.size)
-          && targetElement?.closest?.(MESSAGE_BLOCK_SELECTOR)
-          && !isTranslatorOwnedNode(targetElement)) {
-          livePatchRefreshPending = true;
+        if (tracksLivePatches) {
+          const messageBlock = targetElement?.closest?.(MESSAGE_BLOCK_SELECTOR);
+          if (messageBlock && !isTranslatorOwnedNode(targetElement)) dirtyPatchBlocks.add(messageBlock);
         }
         continue;
       }
 
       if (mutation.type === 'attributes') {
-        const messageBlock = targetElement?.closest?.(MESSAGE_BLOCK_SELECTOR);
-        if ((liveMessagePatches.size || liveMessageViews.size) && messageBlock
-          && (mutation.attributeName === 'data-message-group-id'
-            || targetElement.matches?.('.wrtn-markdown, .trans-live-source'))) {
-          livePatchRefreshPending = true;
+        if (tracksLivePatches && (mutation.attributeName === 'data-message-group-id'
+          || targetElement?.matches?.('.wrtn-markdown, .trans-live-source'))) {
+          const messageBlock = targetElement.closest(MESSAGE_BLOCK_SELECTOR);
+          if (messageBlock) dirtyPatchBlocks.add(messageBlock);
         }
         if (targetElement?.matches?.(BUBBLE_ACTION_SELECTOR)
           && !targetElement.querySelector('.trans-bubble-btn')) {
@@ -4203,10 +4487,9 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
       if (mutation.type !== 'childList') continue;
 
-      const targetBlock = targetElement?.closest?.(MESSAGE_BLOCK_SELECTOR);
-      if ((liveMessagePatches.size || liveMessageViews.size) && targetBlock
-        && !isTranslatorOwnedNode(targetElement)) {
-        livePatchRefreshPending = true;
+      if (tracksLivePatches) {
+        const targetBlock = targetElement?.closest?.(MESSAGE_BLOCK_SELECTOR);
+        if (targetBlock && !isTranslatorOwnedNode(targetElement)) dirtyPatchBlocks.add(targetBlock);
       }
       if (targetElement?.matches?.(BUBBLE_ACTION_SELECTOR)
         && !targetElement.querySelector('.trans-bubble-btn')) {
@@ -4216,10 +4499,10 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       mutation.addedNodes.forEach(node => {
         if (isTranslatorOwnedNode(node)) return;
         const addedRoot = getRefreshRoot(node);
-        if ((liveMessagePatches.size || liveMessageViews.size)
+        if (tracksLivePatches
           && (addedRoot?.matches?.(MESSAGE_BLOCK_SELECTOR)
             || addedRoot?.querySelector?.(MESSAGE_BLOCK_SELECTOR))) {
-          livePatchRefreshPending = true;
+          livePatchFullSync = true;
         }
         if (needsUiInjection(addedRoot)) queueUiRefreshRoot(addedRoot);
       });
@@ -4229,7 +4512,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       }
     }
 
-    if (livePatchRefreshPending || uiRefreshRoots.size) armUiRefresh();
+    if (livePatchFullSync || dirtyPatchBlocks.size || uiRefreshRoots.size) armUiRefresh();
   }
 
   function installRouteRefreshHooks() {
@@ -4247,6 +4530,32 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     });
   }
 
+  // --- React hydration 대기 ---
+  // 크랙은 서버가 그린 HTML을 React가 이어받는다(hydration). 그 전에 #__next 안에 버튼을 넣으면
+  // React #418/#423 오류가 나고 화면 전체를 처음부터 다시 그린다. 번역기 창(body 바로 아래)은 상관없다.
+  const HYDRATION_WAIT_LIMIT = 8000;
+  let pageIntegrationReady = false;
+
+  function reactRootHydrated() {
+    const container = document.getElementById('__next');
+    if (!container) return true;
+    const key = Object.keys(container).find(name => name.startsWith('__reactContainer$'));
+    if (!key) return false; // hydrateRoot가 아직 실행되지 않음
+    const state = container[key]?.stateNode?.current?.memoizedState;
+    // React 내부 구조를 모르면 기다리지 않는다.
+    if (!state || typeof state.isDehydrated !== 'boolean') return true;
+    return !state.isDehydrated;
+  }
+
+  function whenReactHydrated(callback) {
+    const startedAt = Date.now();
+    const check = () => {
+      if (reactRootHydrated() || Date.now() - startedAt > HYDRATION_WAIT_LIMIT) callback();
+      else setTimeout(check, 50);
+    };
+    check();
+  }
+
   let translatorInitialized = false;
   function initializeTranslator() {
     if (translatorInitialized || !document.body) return;
@@ -4254,25 +4563,32 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     addStyles();
     createUI();
 
-    const observer = new MutationObserver(scheduleMutationRefresh);
     const themeObserver = new MutationObserver(() => syncTranslatorTheme());
-    observer.observe(document.body, {
-      childList: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ['class', 'data-message-group-id'],
-      subtree: true,
-    });
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme'] });
 
     installRouteRefreshHooks();
     window.addEventListener('popstate', scheduleFullUiRefresh);
     window.addEventListener('hashchange', scheduleFullUiRefresh);
-    injectSidebar();
-    injectBubbleButtons();
-    syncLiveMessagePatches();
     syncTranslatorTheme(true);
+
+    whenReactHydrated(() => {
+      pageIntegrationReady = true;
+      const observer = new MutationObserver(scheduleMutationRefresh);
+      observer.observe(document.body, {
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ['class', 'data-message-group-id'],
+        subtree: true,
+      });
+      // 기다리는 동안 쌓인 새로고침 요청은 아래 전체 주입으로 대신한다.
+      fullUiRefreshPending = false;
+      uiRefreshRoots.clear();
+      injectSidebar();
+      injectBubbleButtons();
+      syncLiveMessagePatches();
+    });
     // Network hooks above
   }
 
