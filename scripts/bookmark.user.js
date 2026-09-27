@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 버블 북마크 🔖
 // @namespace    https://crack.wrtn.ai/
-// @version      1.0.1
+// @version      1.0.2
 // @description  버블별 색상, 턴 방향 탐색, 입력창 테두리 고정, 유저 버블 ON/OFF, 좌우반전, 3줄 미리보기
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
@@ -40,95 +40,153 @@
     const PEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 4 5 5M4 20l5-1L20 8a2 2 0 0 0-5-5L4 14Z"/></svg>';
     const CROSS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
     const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg>';
+    const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>';
+    const ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8"/></svg>';
 
     const css = `
+    /* 색은 크랙 사이트 변수(body[data-theme])를 먼저 쓰고, 없을 때만 아래 값을 쓴다. */
     [data-cbb-ui] {
-        --cbb-bg: #fafbf9; --cbb-card: #f0f3ef; --cbb-text: #202922;
-        --cbb-muted: #59655c; --cbb-border: #d7dfd8; --cbb-primary: #246649;
-        --cbb-accent: #e0eee4; --cbb-danger: #b02f36;
-        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-        font-size: 14px; line-height: 1.6; color: var(--cbb-text); box-sizing: border-box; color-scheme: light;
+        --cbb-bg: var(--bg_elevated_primary, #ffffff); --cbb-card: var(--surface_tertiary, #f7f7f5);
+        --cbb-text: var(--text_primary, #1a1918); --cbb-muted: var(--text_secondary, #61605a); --cbb-faint: var(--text_tertiary, #85837d);
+        --cbb-border: var(--divider_secondary, #dbdad5); --cbb-hover: var(--state_hover, #0000000f);
+        --cbb-primary: var(--text_brand, #ff4432); --cbb-accent: color-mix(in srgb, var(--cbb-primary) 13%, transparent);
+        --cbb-danger: var(--alert_error, #fa4520); --cbb-switch-on: var(--surface_primary, #0d0d0c); --cbb-switch-knob: var(--bg_screen, #ffffff);
+        --cbb-shadow: 0 18px 48px rgba(20, 18, 16, .16), 0 2px 8px rgba(20, 18, 16, .08);
+        font-family: Pretendard, "Apple SD Gothic Neo", system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 14px; line-height: 1.55; color: var(--cbb-text); box-sizing: border-box; color-scheme: light;
     }
     [data-cbb-ui][data-cbb-dark="true"] {
-        --cbb-bg: #202623; --cbb-card: #2a332d; --cbb-text: #ecf2ed;
-        --cbb-muted: #b2bfb5; --cbb-border: #435248; --cbb-primary: #a0d8b5;
-        --cbb-accent: #334c3d; --cbb-danger: #ffadb0; color-scheme: dark;
+        --cbb-bg: var(--bg_elevated_primary, #242321); --cbb-card: var(--surface_tertiary, #2e2d2b);
+        --cbb-text: var(--text_primary, #f0efeb); --cbb-muted: var(--text_secondary, #a8a69d); --cbb-faint: var(--text_tertiary, #85837d);
+        --cbb-border: var(--divider_secondary, #42413d); --cbb-hover: var(--state_hover, #ffffff14);
+        --cbb-primary: var(--text_brand, #ff6352); --cbb-danger: var(--alert_error, #ff6a4d);
+        --cbb-switch-on: var(--surface_primary, #fcfcfa); --cbb-switch-knob: var(--bg_screen, #141413);
+        --cbb-shadow: 0 20px 56px rgba(0, 0, 0, .5), 0 2px 10px rgba(0, 0, 0, .3); color-scheme: dark;
     }
     [data-cbb-ui] *, [data-cbb-ui] *::before, [data-cbb-ui] *::after { box-sizing: border-box; }
     [data-cbb-ui][hidden], [data-cbb-ui] [hidden] { display: none !important; }
     [data-cbb-ui] button, button[data-cbb-ui] {
         appearance: none; display: inline-flex; align-items: center; justify-content: center;
-        gap: 8px; min-height: 32px; padding: 4px 8px; margin: 0;
-        border: 1px solid transparent; border-radius: 8px; background: transparent;
+        gap: 6px; min-height: 32px; padding: 4px 8px; margin: 0;
+        border: 1px solid transparent; border-radius: 10px; background: transparent;
         color: inherit; font: inherit; cursor: pointer; touch-action: manipulation;
-        transition: background 140ms, color 140ms;
+        transition: background-color 140ms, color 140ms, border-color 140ms, transform 160ms, box-shadow 160ms;
     }
-    [data-cbb-ui] button:hover, button[data-cbb-ui]:hover { background: var(--cbb-accent); color: var(--cbb-primary); }
-    [data-cbb-ui] button:active, button[data-cbb-ui]:active { background: var(--cbb-border); }
+    [data-cbb-ui] button:hover, button[data-cbb-ui]:hover { background: var(--cbb-hover); }
+    [data-cbb-ui] button:active, button[data-cbb-ui]:active { transform: scale(.97); }
     [data-cbb-ui] button:disabled { opacity: .5; cursor: wait; }
-    [data-cbb-ui] :focus-visible, button[data-cbb-ui]:focus-visible { outline: 2px solid var(--cbb-primary); outline-offset: 2px; }
+    [data-cbb-ui] :focus-visible, button[data-cbb-ui]:focus-visible { outline: 2px solid color-mix(in srgb, var(--cbb-primary) 75%, transparent); outline-offset: 2px; }
     [data-cbb-ui] svg { width: 18px; height: 18px; flex-shrink: 0; pointer-events: none; }
+
     #cbb-overlay-root { position: fixed !important; inset: 0 !important; z-index: 40 !important; pointer-events: none !important; overflow: visible !important; contain: layout style; }
-    #cbb-overlay-root .cbb-ribbon { position: absolute !important; width: 44px !important; height: 48px !important; min-height: 48px !important; margin: 0 !important; padding: 2px 4px !important; border: 0 !important; border-radius: 4px !important; background: transparent !important; color: var(--cbb-ribbon-color, #374047) !important; pointer-events: auto; touch-action: pan-y; cursor: pointer; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-    #cbb-overlay-root .cbb-ribbon svg { width: 32px; height: 44px; transform: translateX(4px); filter: drop-shadow(0 2px 2px #0003); opacity: .62; transition: opacity 140ms; }
-    #cbb-overlay-root .cbb-ribbon:hover svg, #cbb-overlay-root .cbb-ribbon:focus-visible svg, #cbb-overlay-root .cbb-ribbon[aria-pressed="true"] svg, #cbb-toolbar svg { opacity: 1; }
+    #cbb-overlay-root .cbb-ribbon { position: absolute !important; width: 44px !important; height: 48px !important; min-height: 48px !important; margin: 0 !important; padding: 2px 4px !important; border: 0 !important; border-radius: 10px !important; background: transparent !important; color: var(--cbb-ribbon-color, #374047) !important; pointer-events: auto; touch-action: pan-y; cursor: pointer; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+    #cbb-overlay-root .cbb-ribbon svg { width: 32px; height: 44px; transform: translateX(4px); filter: drop-shadow(0 2px 3px #0004); opacity: .58; transition: opacity 160ms, transform 180ms cubic-bezier(.2,.8,.2,1); }
+    #cbb-overlay-root .cbb-ribbon:hover svg { opacity: 1; transform: translate(4px, -2px) scale(1.04); }
+    #cbb-overlay-root .cbb-ribbon:focus-visible svg, #cbb-overlay-root .cbb-ribbon[aria-pressed="true"] svg, #cbb-toolbar svg { opacity: 1; }
+    #cbb-overlay-root .cbb-ribbon:active { transform: none; }
+    #cbb-overlay-root .cbb-ribbon:focus-visible { outline: 2px solid color-mix(in srgb, var(--cbb-primary) 70%, transparent) !important; outline-offset: -3px; }
     #cbb-overlay-root .cbb-bubble-ribbon, #cbb-overlay-root .cbb-bubble-ribbon:active { cursor: pointer; touch-action: pan-y; }
     #cbb-overlay-root[data-cbb-mirror="true"] .cbb-ribbon-shape { transform: translateX(36px) scaleX(-1); }
     #cbb-overlay-root[data-cbb-mirror="true"] .cbb-check { transform: translateX(8px); }
     #cbb-overlay-root .cbb-check { display: none; }
     #cbb-overlay-root [aria-pressed="true"] .cbb-check { display: block; }
-    #cbb-toolbar[data-has-items="true"]::after { content: ''; position: absolute; width: 6px; height: 6px; border: 1px solid var(--cbb-bg); border-radius: 50%; right: 8px; top: 9px; background: var(--cbb-primary); pointer-events: none; }
-    #cbb-panel { position: fixed; z-index: 2147483602; width: 376px; max-width: calc(100vw - 16px); display: flex; flex-direction: column; overflow: hidden; background: var(--cbb-bg); border: 1px solid var(--cbb-border); border-radius: 16px; box-shadow: 0 16px 48px #0003; }
-    #cbb-panel header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 16px; border-bottom: 1px solid var(--cbb-border); flex-shrink: 0; cursor: grab; touch-action: none; }
+    #cbb-toolbar[data-has-items="true"]::after { content: ''; position: absolute; width: 8px; height: 8px; border: 2px solid var(--cbb-bg); border-radius: 50%; right: 7px; top: 8px; background: var(--cbb-primary); pointer-events: none; }
+
+    #cbb-panel { position: fixed; z-index: 2147483602; width: 376px; max-width: calc(100vw - 16px); display: flex; flex-direction: column; overflow: hidden; background: var(--cbb-bg); border: 1px solid var(--cbb-border); border-radius: 18px; box-shadow: var(--cbb-shadow); animation: cbb-pop 180ms cubic-bezier(.2,.8,.2,1); }
+    #cbb-panel:focus { outline: none; }
+    #cbb-panel header { display: flex; align-items: center; gap: 10px; padding: 14px 10px 12px 14px; flex-shrink: 0; cursor: grab; touch-action: none; }
     #cbb-panel header:active { cursor: grabbing; }
-    #cbb-panel .cbb-header-buttons { display: flex; gap: 4px; }
-    #cbb-panel h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.03em; line-height: 1.2; }
-    .cbb-subtitle { color: var(--cbb-muted); font-size: 14px; margin-top: 4px; }
-    #cbb-panel .cbb-search-area { padding: 16px 16px 8px; }
-    #cbb-panel label { display: block; color: var(--cbb-muted); margin-bottom: 4px; font-size: 14px; }
-    #cbb-panel input { appearance: none; width: 100%; height: 40px; margin: 0; padding: 8px; border: 1px solid var(--cbb-border); border-radius: 8px; background: var(--cbb-bg); color: var(--cbb-text); font: inherit; font-size: 16px; }
-    #cbb-panel input:focus { border-color: var(--cbb-primary); }
-    #cbb-panel input::placeholder { color: var(--cbb-muted); opacity: 1; }
-    #cbb-settings { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px; }
-    #cbb-settings h3 { font-size: 16px; margin: 0 0 8px; line-height: 1.3; }
-    #cbb-settings p { margin: 8px 0 16px; font-size: 14px; color: var(--cbb-muted); }
-    #cbb-settings .cbb-colors { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }
-    #cbb-settings .cbb-color { width: 40px; height: 40px; min-height: 40px; padding: 4px; border: 1px solid var(--cbb-border); background: var(--swatch); }
-    #cbb-settings .cbb-color[aria-pressed="true"] { outline: 2px solid var(--cbb-primary); outline-offset: 2px; }
-    #cbb-settings .cbb-custom-color { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
-    #cbb-settings input[type="color"] { width: 48px; padding: 4px; flex-shrink: 0; cursor: pointer; }
-    #cbb-settings .cbb-reset { border: 1px solid var(--cbb-border); }
-    #cbb-settings .cbb-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; min-height: 48px; margin: 8px 0; padding: 8px; border: 1px solid var(--cbb-border); text-align: left; }
-    #cbb-settings .cbb-toggle::after { content: 'OFF'; flex-shrink: 0; color: var(--cbb-muted); }
-    #cbb-settings .cbb-toggle[aria-checked="true"]::after { content: 'ON'; color: var(--cbb-primary); font-weight: 700; }
-    #cbb-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; padding: 8px 16px 16px; }
-    #cbb-list .cbb-item { border: 1px solid var(--cbb-border); border-left: 4px solid var(--cbb-item-color, var(--cbb-border)); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
-    #cbb-list .cbb-record-color-toggle::before { content: ''; width: 16px; height: 16px; border-radius: 50%; background: var(--cbb-item-color); border: 1px solid var(--cbb-border); }
-    #cbb-list .cbb-record-palette { padding: 8px 16px 16px; display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--cbb-border); }
-    #cbb-list .cbb-record-palette button[data-record-color] { width: 40px; min-height: 40px; background: var(--swatch); border: 1px solid var(--cbb-border); }
-    #cbb-list .cbb-record-palette button[aria-pressed="true"] { outline: 2px solid var(--cbb-primary); outline-offset: 2px; }
-    #cbb-list .cbb-record-palette label { width: 100%; margin: 0; }
-    #cbb-list .cbb-record-palette input[type="color"] { width: 48px; padding: 4px; }
+    #cbb-panel .cbb-heading-icon { display: grid; place-items: center; width: 34px; height: 34px; flex-shrink: 0; border-radius: 11px; background: var(--cbb-accent); color: var(--cbb-primary); }
+    #cbb-panel .cbb-heading-icon svg { width: 18px; height: 18px; }
+    #cbb-panel .cbb-heading { flex: 1; min-width: 0; }
+    #cbb-panel .cbb-header-buttons { display: flex; gap: 2px; }
+    #cbb-panel .cbb-header-buttons button { width: 34px; height: 34px; min-height: 34px; padding: 0; color: var(--cbb-muted); }
+    #cbb-panel .cbb-header-buttons button:hover { color: var(--cbb-text); }
+    #cbb-panel .cbb-header-buttons button[aria-pressed="true"] { background: var(--cbb-accent); color: var(--cbb-primary); }
+    #cbb-panel .cbb-close svg { transition: transform 220ms cubic-bezier(.2,.8,.2,1); }
+    #cbb-panel .cbb-close:hover svg { transform: rotate(90deg); }
+    #cbb-panel h2 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -.02em; line-height: 1.25; }
+    .cbb-subtitle { color: var(--cbb-muted); font-size: 12px; line-height: 1.3; margin-top: 2px; }
+    #cbb-panel .cbb-search-area { position: relative; padding: 0 14px 10px; }
+    #cbb-panel .cbb-search-area label { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    #cbb-panel .cbb-search-icon { position: absolute; left: 26px; top: 10px; color: var(--cbb-faint); pointer-events: none; }
+    #cbb-panel .cbb-search-icon svg { width: 17px; height: 17px; }
+    #cbb-panel input { appearance: none; width: 100%; height: 38px; margin: 0; padding: 0 12px; border: 1px solid transparent; border-radius: 11px; background: var(--cbb-card); color: var(--cbb-text); font: inherit; font-size: 14px; outline: none; transition: border-color 140ms, box-shadow 140ms; }
+    #cbb-panel .cbb-search-area input { padding-left: 36px; }
+    #cbb-panel input:focus { border-color: color-mix(in srgb, var(--cbb-primary) 55%, transparent); box-shadow: 0 0 0 3px var(--cbb-accent); }
+    #cbb-panel input::placeholder { color: var(--cbb-faint); opacity: 1; }
+    #cbb-panel input::-webkit-search-cancel-button { cursor: pointer; }
+
+    #cbb-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; padding: 2px 14px 14px; scrollbar-width: thin; }
+    #cbb-list .cbb-item { position: relative; flex-shrink: 0; border: 1px solid transparent; border-radius: 14px; background: var(--cbb-card); overflow: hidden; transition: transform 180ms cubic-bezier(.2,.8,.2,1), border-color 160ms, box-shadow 180ms; }
+    #cbb-list .cbb-item::before { content: ''; position: absolute; left: 14px; top: 14px; width: 10px; height: 15px; background: var(--cbb-item-color, var(--cbb-border)); clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 70%, 0 100%); border-radius: 2px 2px 0 0; pointer-events: none; }
+    #cbb-list .cbb-item:hover { transform: translateY(-1px); border-color: var(--cbb-border); box-shadow: 0 8px 22px rgba(0, 0, 0, .12); }
+    #cbb-list .cbb-jump { display: block; width: 100%; min-height: 0; text-align: left; padding: 12px 14px 6px 34px; border: 0; border-radius: 0; background: transparent !important; transform: none !important; }
+    #cbb-list .cbb-item-header { display: flex; align-items: center; gap: 6px; min-height: 20px; margin-bottom: 5px; }
+    #cbb-list .cbb-turn { order: -1; flex-shrink: 0; padding: 1px 8px; border-radius: 999px; background: var(--cbb-accent); color: var(--cbb-primary); font-size: 11.5px; font-weight: 700; line-height: 18px; font-variant-numeric: tabular-nums; }
+    #cbb-list .cbb-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 650; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #cbb-list .cbb-meta { flex: 1; min-width: 0; color: var(--cbb-faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #cbb-list .cbb-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; max-height: 4.8em; color: var(--cbb-muted); }
+    #cbb-list .cbb-item-bottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 2px; padding: 0 8px 8px 28px; }
+    #cbb-list .cbb-item-bottom > div { display: flex; align-items: center; flex-shrink: 0; gap: 2px; }
+    #cbb-list .cbb-item-bottom > div button { width: 32px; padding: 0; color: var(--cbb-faint); }
+    #cbb-list .cbb-item-bottom > div button:hover { color: var(--cbb-text); }
+    #cbb-list .cbb-open-label { gap: 4px; padding: 4px 8px; color: var(--cbb-muted); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+    #cbb-list .cbb-open-label:hover { color: var(--cbb-primary); background: var(--cbb-accent); }
+    #cbb-list .cbb-open-label svg { width: 14px; height: 14px; }
+    #cbb-list button.cbb-delete:hover { color: var(--cbb-danger); background: color-mix(in srgb, var(--cbb-danger) 12%, transparent); }
+    #cbb-list .cbb-record-color-toggle::before { content: ''; width: 14px; height: 14px; border-radius: 50%; background: var(--cbb-item-color); box-shadow: 0 0 0 2px var(--cbb-card), 0 0 0 3px var(--cbb-border); }
+    #cbb-list .cbb-record-palette { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--cbb-border); }
+    #cbb-list .cbb-record-palette button[data-record-color] { width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: 50%; background: var(--swatch); box-shadow: 0 0 0 2px var(--cbb-card), 0 0 0 3px var(--cbb-border); }
+    #cbb-list .cbb-record-palette button[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--cbb-card), 0 0 0 4px var(--cbb-text); }
+    #cbb-list .cbb-record-palette label { margin: 0 0 0 4px; color: var(--cbb-muted); font-size: 12.5px; }
+    #cbb-list .cbb-record-palette > button:last-child { margin-left: auto; font-size: 12.5px; color: var(--cbb-muted); border: 1px solid var(--cbb-border); }
+    #cbb-list .cbb-edit-form { padding: 10px 14px 12px; border-top: 1px solid var(--cbb-border); }
+    #cbb-list .cbb-edit-form label { display: block; margin-bottom: 6px; color: var(--cbb-muted); font-size: 12.5px; }
+    #cbb-list .cbb-edit-form input { background: var(--cbb-bg); border-color: var(--cbb-border); }
+    #cbb-list .cbb-edit-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+    #cbb-list .cbb-edit-buttons button { padding: 4px 14px; font-size: 13px; font-weight: 600; }
+    #cbb-list .cbb-save { background: var(--cbb-primary); color: #fff; }
+    #cbb-list .cbb-save:hover { background: color-mix(in srgb, var(--cbb-primary) 88%, #fff); }
+    .cbb-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 16px 32px; color: var(--cbb-muted); font-size: 13px; line-height: 1.65; text-align: center; white-space: pre-line; }
+    .cbb-empty .cbb-empty-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 16px; background: var(--cbb-accent); color: var(--cbb-primary); }
+    .cbb-empty .cbb-empty-icon svg { width: 24px; height: 24px; }
+
+    #cbb-settings { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 14px 14px; }
+    #cbb-settings h3 { margin: 14px 2px 8px; color: var(--cbb-faint); font-size: 12px; font-weight: 700; letter-spacing: .01em; line-height: 1.3; }
+    #cbb-settings h3:first-child { margin-top: 2px; }
+    #cbb-settings p { margin: 6px 2px 12px; font-size: 12.5px; line-height: 1.6; color: var(--cbb-muted); }
+    #cbb-settings .cbb-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; min-height: 46px; margin: 6px 0; padding: 8px 12px 8px 14px; border: 0; border-radius: 12px; background: var(--cbb-card); text-align: left; font-size: 14px; }
+    #cbb-settings .cbb-toggle:hover { background: color-mix(in srgb, var(--cbb-card) 82%, var(--cbb-text) 6%); }
+    #cbb-settings .cbb-switch { position: relative; width: 36px; height: 20px; flex-shrink: 0; border-radius: 999px; background: var(--cbb-border); transition: background-color 180ms; }
+    #cbb-settings .cbb-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--cbb-switch-knob); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform 200ms cubic-bezier(.2,.8,.2,1); }
+    #cbb-settings .cbb-toggle[aria-checked="true"] .cbb-switch { background: var(--cbb-switch-on); }
+    #cbb-settings .cbb-toggle[aria-checked="true"] .cbb-switch::after { transform: translateX(16px); }
+    #cbb-settings .cbb-colors { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 2px 14px; }
+    #cbb-settings .cbb-color { position: relative; width: 30px; height: 30px; min-height: 30px; padding: 0; border-radius: 50%; background: var(--swatch); box-shadow: 0 0 0 2px var(--cbb-bg), 0 0 0 3px var(--cbb-border); }
+    #cbb-settings .cbb-color:hover { background: var(--swatch); transform: scale(1.08); }
+    #cbb-settings .cbb-color[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--cbb-bg), 0 0 0 4px var(--cbb-text); }
+    #cbb-settings .cbb-color[aria-pressed="true"]::after { content: ''; width: 9px; height: 5px; margin-top: -3px; border: solid #fff; border-width: 0 0 2px 2px; transform: rotate(-45deg); }
+    #cbb-settings .cbb-custom-color { display: flex; align-items: center; gap: 10px; margin: 0 2px 16px; }
+    #cbb-settings .cbb-custom-color label { color: var(--cbb-muted); font-size: 13px; }
+    #cbb-settings input[type="color"], #cbb-list input[type="color"] { width: 30px; height: 30px; padding: 0; flex-shrink: 0; border: 0; border-radius: 50%; background: none; box-shadow: 0 0 0 2px var(--cbb-bg), 0 0 0 3px var(--cbb-border); cursor: pointer; overflow: hidden; }
+    [data-cbb-ui] input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+    [data-cbb-ui] input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 50%; }
+    #cbb-settings .cbb-reset { width: 100%; margin-top: 4px; border: 1px solid var(--cbb-border); color: var(--cbb-muted); font-size: 13px; }
+    #cbb-settings .cbb-reset:hover { color: var(--cbb-text); }
+
     #cbb-navigation-preview { position: fixed !important; z-index: 41 !important; overflow: hidden !important; padding: 0 !important; margin: 0 !important; contain: strict; touch-action: none; cursor: progress; }
-    #cbb-list .cbb-jump { display: block; width: 100%; text-align: left; padding: 16px 16px 8px; border: 0; border-radius: 0; }
-    #cbb-list .cbb-item-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
-    #cbb-list .cbb-title { flex: 1; min-width: 0; font-size: 16px; font-weight: 650; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #cbb-list .cbb-turn { flex-shrink: 0; color: var(--cbb-primary); font-size: 14px; font-variant-numeric: tabular-nums; }
-    #cbb-list .cbb-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; max-height: 4.8em; color: var(--cbb-muted); }
-    #cbb-list .cbb-item-bottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px 16px; }
-    #cbb-list .cbb-item-bottom > div { display: flex; align-items: center; flex-shrink: 0; }
-    #cbb-list .cbb-open-label { color: var(--cbb-muted); font-size: 14px; white-space: nowrap; }
-    #cbb-list .cbb-delete { color: var(--cbb-danger); }
-    #cbb-list .cbb-edit-form { padding: 8px 16px 16px; background: var(--cbb-card); }
-    #cbb-list .cbb-edit-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
-    #cbb-list .cbb-save { background: var(--cbb-accent); color: var(--cbb-primary); }
-    .cbb-empty { padding: 24px 8px; color: var(--cbb-muted); text-align: center; white-space: pre-line; }
-    #cbb-panel footer { padding: 8px 16px; border-top: 1px solid var(--cbb-border); color: var(--cbb-muted); font-size: 14px; flex-shrink: 0; }
-    #cbb-notice { position: fixed; left: 50%; transform: translateX(-50%); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 2147483604; max-width: calc(100vw - 32px); width: max-content; padding: 8px 16px; background: var(--cbb-bg); border: 1px solid var(--cbb-border); border-radius: 8px; box-shadow: 0 8px 24px #0002; display: flex; align-items: center; gap: 8px; }
+    #cbb-panel footer { display: flex; align-items: center; gap: 6px; padding: 10px 16px 12px; border-top: 1px solid var(--cbb-border); color: var(--cbb-faint); font-size: 12px; flex-shrink: 0; }
+    #cbb-notice { position: fixed; left: 50%; transform: translateX(-50%); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 2147483604; max-width: calc(100vw - 32px); width: max-content; display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px; border: 0; border-radius: 14px; background: var(--cbb-text); color: var(--cbb-bg); box-shadow: 0 12px 32px rgba(0, 0, 0, .28); font-size: 13.5px; font-weight: 500; animation: cbb-toast-in 200ms cubic-bezier(.2,.8,.2,1); }
     #cbb-notice span { white-space: pre-line; }
-    .cbb-found { outline: 3px solid #57a779 !important; outline-offset: 4px; border-radius: 8px; }
-    @media (pointer: coarse) { #cbb-panel button { min-height: 44px; } }
-    @media (prefers-reduced-motion: reduce) { [data-cbb-ui] *, button[data-cbb-ui] { transition: none !important; } }
+    #cbb-notice button { flex-shrink: 0; padding: 4px 10px; color: color-mix(in srgb, var(--cbb-primary) 88%, var(--cbb-bg)); font-weight: 700; white-space: nowrap; }
+    #cbb-notice button:hover { background: color-mix(in srgb, var(--cbb-bg) 14%, transparent); }
+    .cbb-found { outline: 2px solid var(--text_brand, #ff4432) !important; outline-offset: 6px; border-radius: 12px; animation: cbb-found-pulse 1.2s ease-out 1; }
+    @keyframes cbb-pop { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+    @keyframes cbb-toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+    @keyframes cbb-found-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--text_brand, #ff4432) 45%, transparent); } 100% { box-shadow: 0 0 0 14px transparent; } }
+    @media (pointer: coarse) { #cbb-panel button { min-height: 44px; } #cbb-panel .cbb-header-buttons button { width: 44px; height: 44px; } #cbb-list .cbb-item-bottom > div button { width: 44px; } }
+    @media (prefers-reduced-motion: reduce) { [data-cbb-ui] *, button[data-cbb-ui], #cbb-panel, #cbb-notice, .cbb-found { transition: none !important; animation: none !important; } }
     `;
     if (typeof GM_addStyle === 'function') GM_addStyle(css);
     else { const style = document.createElement('style'); style.textContent = css; document.head.append(style); }
@@ -176,15 +234,18 @@
     toolbar.setAttribute('aria-controls', 'cbb-panel'); toolbar.setAttribute('aria-expanded', 'false');
     const panel = own(el('section')); panel.id = 'cbb-panel'; panel.hidden = true;
     panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', '이 채팅방의 버블 북마크'); panel.tabIndex = -1;
-    const header = el('header'), heading = el('div'), subtitle = el('div', 'cbb-subtitle');
+    const header = el('header'), heading = el('div', 'cbb-heading'), subtitle = el('div', 'cbb-subtitle');
+    const headingIcon = el('span', 'cbb-heading-icon'); headingIcon.innerHTML = BOOK; headingIcon.setAttribute('aria-hidden', 'true');
     heading.append(el('h2', '', '버블 북마크'), subtitle);
     const headerButtons = el('div', 'cbb-header-buttons');
     const appearanceButton = button('책갈피 색상·위치 설정', GEAR, () => showSettings(settingsPane.hidden));
-    headerButtons.append(appearanceButton, button('북마크 닫기', CROSS, () => setOpen(false, true)));
-    header.append(heading, headerButtons);
+    const closeButton = button('북마크 닫기', CROSS, () => setOpen(false, true)); closeButton.classList.add('cbb-close');
+    headerButtons.append(appearanceButton, closeButton);
+    header.append(headingIcon, heading, headerButtons);
     const searchArea = el('div', 'cbb-search-area'), searchLabel = el('label', '', '북마크 검색');
-    const search = el('input'); search.type = 'search'; search.id = 'cbb-search'; search.placeholder = '제목 또는 대화 내용';
-    searchLabel.htmlFor = search.id; searchArea.append(searchLabel, search);
+    const searchIcon = el('span', 'cbb-search-icon'); searchIcon.innerHTML = SEARCH; searchIcon.setAttribute('aria-hidden', 'true');
+    const search = el('input'); search.type = 'search'; search.id = 'cbb-search'; search.placeholder = '제목·대화 내용·턴 검색';
+    searchLabel.htmlFor = search.id; searchArea.append(searchLabel, searchIcon, search);
     const list = el('div'); list.id = 'cbb-list';
     const settingsPane = el('div'); settingsPane.id = 'cbb-settings'; settingsPane.hidden = true;
     const footer = el('footer', '', '버블 우측 위 책갈피를 눌러 저장');
@@ -236,7 +297,8 @@
         settingsPane.append(el('h3', '', '표시 설정'));
         for (const [key, label] of [['showUser', '유저 입력 버블 책갈피'], ['mirror', '책갈피 아이콘 좌우반전']]) {
             const toggle = button(label, '', () => { appearance[key] = !appearance[key]; applyAppearance(); saveAppearance(); });
-            toggle.className = 'cbb-toggle'; toggle.dataset.setting = key; toggle.setAttribute('role', 'switch'); settingsPane.append(toggle);
+            toggle.className = 'cbb-toggle'; toggle.dataset.setting = key; toggle.setAttribute('role', 'switch');
+            toggle.append(el('span', 'cbb-switch')); settingsPane.append(toggle);
         }
         settingsPane.append(el('p', '', '유저 버블을 OFF로 해도 저장한 북마크와 원문 이동은 유지돼요. 좌우반전은 버블·입력창 아이콘에 함께 적용돼요.'));
         settingsPane.append(el('h3', '', '입력창 · 새 책갈피 기본 색상'), el('p', '', '저장한 책갈피의 색은 목록에서 각 항목의 색상 버튼으로 바꿔요. 기본 색상을 바꿔도 기존 책갈피 색은 유지됩니다.'));
@@ -351,39 +413,86 @@
         return node instanceof HTMLElement && node.isConnected && node.getClientRects().length > 0
             && getComputedStyle(node).visibility !== 'hidden';
     }
-    function isMessageBody(node) {
-        const group = node.closest('[data-message-group-id]') || node.closest('[data-message-id]');
-        return !!group && !!(group.getAttribute('data-message-group-id') || group.getAttribute('data-message-id') || '').trim()
-            && !node.closest(`${EXCLUDED}, ${NON_MESSAGE}`) && visible(node);
+    // hidden·data 속성은 같은 값을 다시 써도 변경 기록이 생겨 이 스크립트와 다른 확장의 관찰자를 깨운다.
+    function setHidden(node, value) { if (node.hidden !== value) node.hidden = value; }
+    function setData(node, name, value) { if (node.dataset[name] !== value) node.dataset[name] = value; }
+    function setAttr(node, name, value) { if (node.getAttribute(name) !== value) node.setAttribute(name, value); }
+
+    // 제외 영역(다른 확장 팝업, 입력칸, 버튼 등) 검사. 버블 목록 컨테이너부터 위쪽은 모든 버블이 같으므로
+    // 한 번 수집하는 동안 컨테이너별로 한 번만 확인한다(memo는 수집 한 번에만 쓴다).
+    const EXCLUDED_ALL = `${EXCLUDED}, ${NON_MESSAGE}`;
+    function isExcluded(node, memo) {
+        const group = node.closest(GROUP);
+        if (!group || !memo) return !!node.closest(EXCLUDED_ALL);
+        for (let current = node; current && current !== group.parentElement; current = current.parentElement) {
+            if (current.matches(EXCLUDED_ALL)) return true;
+        }
+        const above = group.parentElement;
+        if (!above) return false;
+        if (!memo.has(above)) memo.set(above, !!above.closest(EXCLUDED_ALL));
+        return memo.get(above);
     }
-    function isPlainUserBody(node) {
-        if (!isMessageBody(node) || roleFor(node) !== 'user') return false;
+    function hasMessageGroup(node) {
+        const group = node.closest('[data-message-group-id]') || node.closest('[data-message-id]');
+        return !!group && !!(group.getAttribute('data-message-group-id') || group.getAttribute('data-message-id') || '').trim();
+    }
+    function isMessageBody(node, memo) {
+        return hasMessageGroup(node) && !isExcluded(node, memo) && visible(node);
+    }
+    function isPlainUserBody(node, memo) {
+        if (!isMessageBody(node, memo) || roleFor(node) !== 'user') return false;
         const group = node.closest(GROUP), surface = node.closest(USER_SURFACE);
         // break-all / whitespace-pre-wrap 은 이름에도 붙는다. 확인된 유저 말풍선 안에서만 보조 본문으로 허용.
         return !!surface && surface !== group && group.contains(surface);
     }
-    function isSearchBody(node) {
-        if (node.closest(`${EXCLUDED}, ${NON_MESSAGE}`) || !visible(node)) return false;
+    function isSearchBody(node, memo) {
+        if (isExcluded(node, memo) || !visible(node)) return false;
         // 과거 로그 로딩 중 ID가 아직 붙지 않은 실제 말풍선도 읽는다. 표시할 리본의 판정은 계속 엄격하게 유지.
-        return isMessageBody(node) || !!node.closest(SEARCH_SURFACE);
+        return hasMessageGroup(node) || !!node.closest(SEARCH_SURFACE);
     }
     function collectBodies(forSearch = false) {
         const root = document.querySelector('main') || document.body;
         const selector = forSearch ? `${BODY}, .prose, [class*="wrtn-markdown"]` : BODY;
-        const candidates = [...root.querySelectorAll(selector)].filter(node => (forSearch ? isSearchBody(node) : isMessageBody(node)) && !node.parentElement?.closest(selector));
+        const memo = new Map();
+        const candidates = [...root.querySelectorAll(selector)].filter(node => (forSearch ? isSearchBody(node, memo) : isMessageBody(node, memo)) && !node.parentElement?.closest(selector));
         // 마크다운이 없는 유저 말풍선만 보조 수집. 프로필 이름/제목에는 이 경로를 적용하지 않음.
         root.querySelectorAll(`${GROUP}`).forEach(group => {
             group.querySelectorAll('[class*="whitespace-pre-wrap"], [class*="break-all"]').forEach(node => {
-                if (!isPlainUserBody(node) || node.querySelector(BODY) || node.closest(BODY)) return;
+                if (!isPlainUserBody(node, memo) || node.querySelector(BODY) || node.closest(BODY)) return;
                 if (candidates.some(body => body.contains(node) || node.contains(body))) return;
                 if (normal(node.textContent)) candidates.push(node);
             });
         });
         if (forSearch) root.querySelectorAll(PLAIN_SEARCH_SURFACE).forEach(node => {
-            if (!isSearchBody(node) || node.querySelector(selector) || node.closest(selector) || !normal(node.textContent)) return;
+            if (!isSearchBody(node, memo) || node.querySelector(selector) || node.closest(selector) || !normal(node.textContent)) return;
             if (!candidates.some(body => body.contains(node) || node.contains(body))) candidates.push(node);
         });
         return candidates.sort((a, b) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+    }
+
+    // 본문 글자·턴·역할은 그 메시지 그룹 안이 바뀔 때만 다시 읽는다. 관찰자가 변경이 닿은
+    // 그룹의 버전을 올리고, 버전이 같으면 이전 결과를 쓴다(과거 로그가 수백 개 쌓여도 새로 온 그룹만 읽는다).
+    const groupVersions = new WeakMap(), factCache = new WeakMap(), textCache = new WeakMap();
+    function bumpGroups(node) {
+        for (let group = changedElement(node)?.closest(GROUP); group; group = group.parentElement?.closest(GROUP)) {
+            groupVersions.set(group, (groupVersions.get(group) || 0) + 1);
+        }
+    }
+    function versionOf(scope) { return scope ? groupVersions.get(scope) || 0 : null; }
+    function bodyFacts(body, scope) {
+        const version = versionOf(scope), cached = factCache.get(body);
+        if (cached && version !== null && cached.scope === scope && cached.version === version) return cached;
+        const facts = { scope, version, text: bodyText(body), turn: turnFor(body, scope), role: roleFor(body) };
+        if (version !== null) factCache.set(body, facts);
+        return facts;
+    }
+    function cachedBodyText(node) {
+        const scope = node.closest('[data-message-group-id]') || node.closest('[data-message-id]');
+        const version = versionOf(scope), cached = textCache.get(node);
+        if (cached && version !== null && cached.scope === scope && cached.version === version) return cached.text;
+        const text = bodyText(node);
+        if (version !== null) textCache.set(node, { scope, version, text });
+        return text;
     }
     function bodyText(body, legacy = false) {
         // DOM을 매번 복제하지 않고 텍스트만 읽는다. 형광펜 mark의 버튼 역할은 본문으로 보존.
@@ -506,10 +615,11 @@
         const all = source.map(body => {
             const group = body.closest('[data-message-group-id]'), message = body.closest('[data-message-id]');
             const family = message || group || body, parts = families.get(family) || [];
-            const data = { body, text: bodyText(body),
+            const facts = bodyFacts(body, group || message);
+            const data = { body, text: facts.text,
                 groupId: group?.getAttribute('data-message-group-id') || '', messageId: message?.getAttribute('data-message-id') || '',
-                bodyIndex: parts.length, turn: turnFor(body, group || message),
-                role: roleFor(body), family };
+                bodyIndex: parts.length, turn: facts.turn,
+                role: facts.role, family };
             parts.push(data); families.set(family, parts); return data;
         });
         return all.map((data, index) => {
@@ -525,9 +635,10 @@
         const root = document.querySelector('main') || document.body;
         const selector = '[data-message-group-id] [class*="break-all"], [data-message-id] [class*="break-all"], '
             + '[data-message-group-id] [class*="whitespace-pre-wrap"], [data-message-id] [class*="whitespace-pre-wrap"]';
+        const memo = new Map(), known = new Set(existing);
         const matches = [...root.querySelectorAll(selector)].filter(node => {
-            if (!isSearchBody(node) || existing.includes(node)) return false;
-            return wholeTextRelated(saved, textKey(bodyText(node)));
+            if (known.has(node) || !isSearchBody(node, memo)) return false;
+            return wholeTextRelated(saved, textKey(cachedBodyText(node)));
         });
         // 바깥 래퍼와 실제 본문이 함께 맞으면 더 안쪽의 실제 본문만 사용한다.
         return matches.filter(node => !matches.some(other => other !== node && node.contains(other)));
@@ -544,13 +655,16 @@
             // 가상 목록이 도착 직후 DOM을 교체해도 같은 원문에 남은 강조 시간을 이어준다.
             if (record && lastLocation && record.id === lastLocation.id && lastLocation.room === currentRoom) markTarget(body, lastLocation.until);
             const data = byBody.get(body);
-            btn.dataset.cbbGroup = data?.groupId || data?.messageId || '';
-            btn.dataset.cbbIndex = String(data?.bodyIndex || 0);
-            btn.setAttribute('aria-pressed', String(!!record));
-            if (record) btn.style.setProperty('--cbb-ribbon-color', validColor(record.color) ? record.color : appearance.color);
-            else btn.style.removeProperty('--cbb-ribbon-color');
-            btn.setAttribute('aria-label', record ? '이 버블 북마크 해제' : '이 버블 북마크');
-            btn.title = (record ? '북마크 해제' : '이 버블 북마크') + ' · 버블 우측 위 고정';
+            setData(btn, 'cbbGroup', data?.groupId || data?.messageId || '');
+            setData(btn, 'cbbIndex', String(data?.bodyIndex || 0));
+            setAttr(btn, 'aria-pressed', String(!!record));
+            const color = record ? (validColor(record.color) ? record.color : appearance.color) : '';
+            if (btn.style.getPropertyValue('--cbb-ribbon-color') !== color) {
+                if (color) btn.style.setProperty('--cbb-ribbon-color', color);
+                else btn.style.removeProperty('--cbb-ribbon-color');
+            }
+            setAttr(btn, 'aria-label', record ? '이 버블 북마크 해제' : '이 버블 북마크');
+            setAttr(btn, 'title', (record ? '북마크 해제' : '이 버블 북마크') + ' · 버블 우측 위 고정');
         });
     }
     function toggleBookmark(body) {
@@ -587,18 +701,34 @@
         if (!validColor(color)) return;
         changeRecords(items => items.map(record => record.id === id ? { ...record, color } : record));
     }
+    function savedLabel(createdAt) {
+        const date = new Date(createdAt);
+        if (!Number.isFinite(date.getTime())) return '북마크';
+        const now = new Date();
+        if (date.toDateString() === now.toDateString()) return '오늘 저장';
+        const day = `${date.getMonth() + 1}월 ${date.getDate()}일 저장`;
+        return date.getFullYear() === now.getFullYear() ? day : `${String(date.getFullYear()).slice(2)}년 ${day}`;
+    }
     function renderList() {
         if (panel.hidden) return;
         const scroll = list.scrollTop, query = normal(search.value).toLocaleLowerCase();
         list.replaceChildren();
         const filtered = records.filter(r => `${r.title} ${r.text} ${r.turn || ''}턴`.toLocaleLowerCase().includes(query)).sort((a, b) => b.createdAt - a.createdAt);
-        if (!filtered.length) list.append(el('div', 'cbb-empty', query ? '검색 결과가 없어요.' : '다시 읽고 싶은 대화를 모아보세요.\n버블 우측 위 책갈피를 누르면\n이곳에 3줄 미리보기로 쌓여요.'));
+        if (!filtered.length) {
+            const empty = el('div', 'cbb-empty'), emptyIcon = el('span', 'cbb-empty-icon');
+            emptyIcon.innerHTML = query ? SEARCH : BOOK; emptyIcon.setAttribute('aria-hidden', 'true');
+            empty.append(emptyIcon, el('span', '', query ? '검색 결과가 없어요.' : '다시 읽고 싶은 대화를 모아보세요.\n버블 우측 위 책갈피를 누르면\n이곳에 3줄 미리보기로 쌓여요.'));
+            list.append(empty);
+        }
         filtered.forEach(record => {
             const item = el('article', 'cbb-item'); item.dataset.bookmarkId = record.id;
             item.style.setProperty('--cbb-item-color', validColor(record.color) ? record.color : appearance.color);
             const jump = button(`${record.title}${record.turn ? `, ${record.turn}턴` : ''}, 원문으로 이동`, '', () => jumpTo(record));
             jump.className = 'cbb-jump'; jump.replaceChildren();
-            const top = el('span', 'cbb-item-header'); top.append(el('span', 'cbb-title', record.title));
+            // 자동 제목(본문 앞 40자)은 바로 아래 미리보기 첫 줄과 같아 두 번 보인다. 그때는 제목 대신 저장한 날을 둔다.
+            const autoTitle = record.title === normal(record.text).slice(0, 40);
+            const top = el('span', 'cbb-item-header');
+            top.append(autoTitle ? el('span', 'cbb-meta', savedLabel(record.createdAt)) : el('span', 'cbb-title', record.title));
             if (record.turn) top.append(el('span', 'cbb-turn', `${record.turn}턴`));
             jump.append(top, el('span', 'cbb-preview', record.text));
             const bottom = el('div', 'cbb-item-bottom'), actions = el('div');
@@ -607,7 +737,7 @@
             const colorButton = button('이 북마크 색상 변경', '', () => { colorEditingId = colorEditingId === record.id ? null : record.id; renderList(); });
             colorButton.className = 'cbb-record-color-toggle'; colorButton.textContent = ''; colorButton.setAttribute('aria-expanded', String(colorEditingId === record.id));
             const openLink = button('원문으로 이동', '', () => jumpTo(record));
-            openLink.className = 'cbb-open-label'; openLink.textContent = '원문 이동 ↗';
+            openLink.className = 'cbb-open-label'; openLink.textContent = '원문으로 이동'; openLink.insertAdjacentHTML('beforeend', ARROW);
             actions.append(colorButton, edit, remove); bottom.append(openLink, actions);
             item.append(jump, bottom);
             if (colorEditingId === record.id) {
@@ -692,23 +822,49 @@
             if (anchor) resizeObserver.observe(anchor);
         }
         if (toolbar.parentElement !== overlay) overlay.append(toolbar);
-        toolbar.hidden = !anchor;
+        setHidden(toolbar, !anchor);
         position();
+    }
+    // 버블 표면·모양·역할은 재스캔 때 한 번 구해 두고, 스크롤 프레임마다 다시 찾지 않는다.
+    function refreshRibbonInfo(info, body) {
+        const surface = bubbleSurface(body);
+        if (info.surface !== surface) {
+            if (info.surface) resizeObserver.unobserve(info.surface);
+            resizeObserver.observe(surface);
+            info.surface = surface;
+        }
+        info.kind = bubbleKind(surface);
+        info.role = roleFor(body);
+        setData(info.button, 'cbbKind', info.kind);
+    }
+    // 대화상자·메뉴 같은 가림 요소 검사는 문서 전체를 훑어 긴 대화에서 비싸다(프레임당 수 ms).
+    // DOM이 바뀌면 관찰자가 비우고, 스크롤만 이어질 때는 짧게 재사용한다.
+    let blockerCache = null;
+    function isBlocked() {
+        const now = performance.now();
+        if (blockerCache && now - blockerCache.at < 400) return blockerCache.blocked;
+        const blocked = document.documentElement.matches('.cmu-panel-open, .cmu-user-note-open, .cmu-mobile-room-panel-open')
+            || [...document.querySelectorAll(BLOCKERS)].some(node => !node.closest(OWN) && visible(node));
+        blockerCache = { at: now, blocked };
+        return blocked;
     }
     function viewport() {
         const v = window.visualViewport;
         return { left: v?.offsetLeft || 0, top: v?.offsetTop || 0, width: v?.width || innerWidth, height: v?.height || innerHeight };
     }
     function position() {
-        if (roomPath() !== currentRoom) { overlay.hidden = true; toolbar.hidden = true; panel.hidden = true; scheduleScan(); return; }
+        clipCache = new Map();
+        try { positionNow(); } finally { clipCache = null; }
+    }
+    function positionNow() {
+        if (roomPath() !== currentRoom) { setHidden(overlay, true); setHidden(toolbar, true); setHidden(panel, true); scheduleScan(); return; }
         if (!currentRoom) return;
         const view = viewport();
-        const blocked = document.documentElement.matches('.cmu-panel-open, .cmu-user-note-open, .cmu-mobile-room-panel-open')
-            || [...document.querySelectorAll(BLOCKERS)].some(node => !node.closest(OWN) && visible(node));
-        overlay.hidden = blocked;
+        const blocked = isBlocked();
+        setHidden(overlay, blocked);
         if (blocked && !panel.hidden) setOpen(false);
         if (blocked && navigationView) cancelNavigation();
-        if (navigationView) { overlay.hidden = true; return; }
+        if (navigationView) { setHidden(overlay, true); return; }
         const inputRect = composerAnchor?.isConnected ? composerAnchor.getBoundingClientRect() : null;
         if (!blocked) {
             const inputScope = composerAnchor?.closest('[data-sgb-input-host], [data-cmu-theme-input-host], form') || composerAnchor?.parentElement;
@@ -720,14 +876,14 @@
                     return { left: Math.max(r.left, clip.left), right: Math.min(r.right, clip.right), top: Math.max(r.top, clip.top), bottom: Math.min(r.bottom, clip.bottom) };
                 }).filter(r => r.right > r.left && r.bottom > r.top && inputRect && r.bottom > inputRect.top && r.top < inputRect.bottom);
             if (composerAnchor?.isConnected) placeRibbon(toolbar, composerAnchor, 'composer', view, obstacles);
-            else toolbar.hidden = true;
+            else setHidden(toolbar, true);
             ribbons.forEach((info, body) => {
-                if (!body.isConnected || (!appearance.showUser && roleFor(body) === 'user')) { info.button.hidden = true; return; }
-                const surface = bubbleSurface(body), kind = bubbleKind(surface);
-                if (info.surface !== surface) { if (info.surface) resizeObserver.unobserve(info.surface); resizeObserver.observe(surface); info.surface = surface; }
-                info.kind = kind; info.button.dataset.cbbKind = kind;
+                if (!body.isConnected) { setHidden(info.button, true); return; }
+                if (!info.surface?.isConnected || !info.surface.contains(body)) refreshRibbonInfo(info, body);
+                if (!appearance.showUser && info.role === 'user') { setHidden(info.button, true); return; }
+                const surface = info.surface, kind = info.kind;
                 const rect = surface.getBoundingClientRect();
-                if (rect.top < view.top - 50 || rect.top > view.top + view.height) { info.button.hidden = true; return; }
+                if (rect.top < view.top - 50 || rect.top > view.top + view.height) { setHidden(info.button, true); return; }
                 const group = body.closest(GROUP);
                 const metadata = [...group?.querySelectorAll('button, [role="button"], [data-turn-label], .turn-number, .cmu-message-badge, .cac-answer-cost, .cmi-model-slot, small, span') || []]
                     .filter(node => !node.closest(`${OWN}, ${BODY}`) && visible(node) && (node.matches('button, [role="button"], .cmu-message-badge, .cac-answer-cost, .cmi-model-slot') || parseTurn(node.textContent)))
@@ -747,20 +903,28 @@
         const height = panel.getBoundingClientRect().height;
         panel.style.top = `${pinned ? view.top + 8 + Math.max(0, view.height - height - 16) * pinned.y : Math.max(view.top + 8, Math.min(up ? anchor.top - height - 8 : anchor.bottom + 8, view.top + view.height - height - 8))}px`;
     }
+    // 버블들은 같은 스크롤 조상을 공유한다. 한 번 배치하는 동안 조상의 overflow·사각형을 다시 계산하지 않는다.
+    let clipCache = null;
     function clipRect(anchor, view) {
         const clip = { left: view.left, top: view.top, right: view.left + view.width, bottom: view.top + view.height };
         for (let node = anchor.parentElement; node && node !== document.body; node = node.parentElement) {
-            const style = getComputedStyle(node), rect = node.getBoundingClientRect();
-            if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) { clip.left = Math.max(clip.left, rect.left); clip.right = Math.min(clip.right, rect.right); }
-            if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) { clip.top = Math.max(clip.top, rect.top); clip.bottom = Math.min(clip.bottom, rect.bottom); }
+            let entry = clipCache?.get(node);
+            if (!entry) {
+                const style = getComputedStyle(node);
+                entry = { x: /(auto|scroll|hidden|clip)/.test(style.overflowX), y: /(auto|scroll|hidden|clip)/.test(style.overflowY), rect: null };
+                if (entry.x || entry.y) entry.rect = node.getBoundingClientRect();
+                clipCache?.set(node, entry);
+            }
+            if (entry.x) { clip.left = Math.max(clip.left, entry.rect.left); clip.right = Math.min(clip.right, entry.rect.right); }
+            if (entry.y) { clip.top = Math.max(clip.top, entry.rect.top); clip.bottom = Math.min(clip.bottom, entry.rect.bottom); }
         }
         return clip;
     }
     function placeRibbon(node, anchor, kind, view, obstacles) {
         const rect = anchor.getBoundingClientRect();
-        if (rect.top < view.top - 50 || rect.top > view.top + view.height || !rect.width || !rect.height) { node.hidden = true; return; }
+        if (rect.top < view.top - 50 || rect.top > view.top + view.height || !rect.width || !rect.height) { setHidden(node, true); return; }
         const clip = clipRect(anchor, view);
-        if (!rect.width || !rect.height || rect.top < clip.top - 2 || rect.top >= clip.bottom - 8 || rect.right <= clip.left || rect.left >= clip.right || !visible(anchor)) { node.hidden = true; return; }
+        if (!rect.width || !rect.height || rect.top < clip.top - 2 || rect.top >= clip.bottom - 8 || rect.right <= clip.left || rect.left >= clip.right || !visible(anchor)) { setHidden(node, true); return; }
         const composer = kind === 'composer';
         const inset = Math.max(64, Math.min(96, rect.width * .15));
         const base = { left: rect.right - inset - 22, top: rect.top - (kind === 'novel' ? 46 : 10) };
@@ -770,7 +934,7 @@
         const collides = (x, y) => obstacles.some(o => x + 44 > o.left && x < o.right && y + 48 > o.top && y < o.bottom);
         if (collides(left, top)) {
             // 버블 리본은 주변 UI가 나타나도 다른 위치로 튀지 않음. 겹칠 때만 잠깐 숨김.
-            if (!composer) { node.hidden = true; return; }
+            if (!composer) { setHidden(node, true); return; }
             // 높이는 입력 박스 테두리에 고정. 라디오존데/가드 위로 밀어 올리지 않는다.
             const minLeft = Math.max(view.left + 2, rect.left + rect.width * .35), maxLeft = Math.min(rect.right - 44, view.left + view.width - 46);
             const candidates = [left, maxLeft, ...obstacles.flatMap(o => [o.left - 48, o.right + 4])]
@@ -778,13 +942,13 @@
             left = candidates.find(x => !collides(x, top)) ?? left;
         }
         // 채팅 스크롤러 밖으로 떠다니거나 하단 입력창 위에 남는 리본은 숨김.
-        if (kind !== 'composer' && (top + 24 < clip.top || top > clip.bottom - 24)) { node.hidden = true; return; }
+        if (kind !== 'composer' && (top + 24 < clip.top || top > clip.bottom - 24)) { setHidden(node, true); return; }
         const pxLeft = `${Math.round(left)}px`, pxTop = `${Math.round(top)}px`;
         const clipPath = kind === 'composer' ? 'none' : `inset(${Math.max(0, clip.top - top)}px ${Math.max(0, left + 44 - clip.right)}px ${Math.max(0, top + 48 - clip.bottom)}px ${Math.max(0, clip.left - left)}px)`;
         if (node.style.left !== pxLeft) node.style.left = pxLeft;
         if (node.style.top !== pxTop) node.style.top = pxTop;
         if (node.style.clipPath !== clipPath) node.style.clipPath = clipPath;
-        node.hidden = false;
+        setHidden(node, false);
     }
     function schedulePosition() { if (!frame) frame = requestAnimationFrame(() => { frame = 0; position(); }); }
     function syncTheme() {
@@ -809,9 +973,15 @@
             if (!/(auto|scroll|overlay|hidden)/.test(style.overflowY) || node.scrollHeight <= node.clientHeight + 2) return;
             seen.add(node); found.push(node);
         };
+        // 버블들은 같은 조상을 공유한다. 이미 올라가 본 조상에서 멈추면 결과는 같고 스타일 계산은 한 번씩만 한다.
+        const visited = new Set();
         nodes.forEach(body => {
             const group = body?.closest(GROUP);
-            for (let node = (group || bubbleSurface(body) || body)?.parentElement; node && node !== document.body; node = node.parentElement) add(node);
+            for (let node = (group || bubbleSurface(body) || body)?.parentElement; node && node !== document.body; node = node.parentElement) {
+                if (visited.has(node)) break;
+                visited.add(node);
+                add(node);
+            }
         });
         const page = document.scrollingElement;
         if (page && page.scrollHeight > page.clientHeight + 2 && !seen.has(page)) { seen.add(page); found.push(page); }
@@ -924,12 +1094,40 @@
         } };
         position();
     }
+    // 긴 버블도 첫 부분이 보이게 대화 스크롤을 옮긴다.
+    function revealBody(target) {
+        const containers = conversationScrollers(target), fallback = scrollParent(target);
+        if (!containers.length && !fallback) return false;
+        for (const container of containers.length ? containers : [fallback]) {
+            const rect = target.getBoundingClientRect();
+            const viewportRect = container === document.scrollingElement ? { top: 0, height: innerHeight } : container.getBoundingClientRect();
+            const delta = rect.top - viewportRect.top - Math.max(24, (viewportRect.height - Math.min(rect.height, viewportRect.height - 48)) / 2);
+            setScroll(container, container.scrollTop + delta);
+        }
+        return true;
+    }
+    // 저장한 턴의 바로 앞(5턴 이내)과 바로 뒤가 모두 불려 있으면 그 사이 원문도 이미 불러온 것이다.
+    // 멀리 떨어진 턴 번호 하나로 판단하지 않도록 가까운 턴만 본다.
+    function missingAtTurn(record, all) {
+        const target = Number(record.turn);
+        if (!record.turn || !Number.isFinite(target)) return null;
+        let before = false, after = false, sameTurn = null;
+        for (const d of all) {
+            const turn = Number(d.turn);
+            if (!d.turn || !Number.isFinite(turn)) continue;
+            if (turn < target && turn >= target - 5) before = true;
+            else if (turn > target && turn <= target + 5) after = true;
+            else if (turn === target && !sameTurn && (!record.role || !d.role || d.role === record.role)) sameTurn = d.body;
+        }
+        return before && after ? { sameTurn } : null;
+    }
     async function jumpTo(record) {
         cancelNavigation(); setOpen(false);
         const controller = new AbortController(), signal = controller.signal, fromRoom = currentRoom;
         navigation = controller;
         const active = () => !signal.aborted && fromRoom === roomPath() && fromRoom === currentRoom;
         let scroller = null, scrollers = [], direction = -1, unchangedSince = 0, boundary = '', scan = false, directed = false, reached = false, extent = -1, lower = null, upper = null;
+        let missingChecks = 0;
         toast('북마크한 대화를 찾고 있어요…', '중단', cancelNavigation, true);
         try {
             // 대화 깊이·시간·반복 횟수로 종료하지 않는다. 찾기, 사용자 중단, 방 이동 또는 구조 오류만 종료 조건이다.
@@ -943,14 +1141,7 @@
                 if (found.ambiguous) { toast('같은 내용의 버블이 여러 개라 원문을 확정하지 못했어요.'); return; }
                 if (found.match) {
                     const target = found.match.body;
-                    const containers = conversationScrollers(target), fallback = scrollParent(target);
-                    if (!containers.length && !fallback) { toast('대화의 스크롤 영역을 찾지 못했어요.'); return; }
-                    for (const container of containers.length ? containers : [fallback]) {
-                        const rect = target.getBoundingClientRect();
-                        const viewportRect = container === document.scrollingElement ? { top: 0, height: innerHeight } : container.getBoundingClientRect();
-                        const delta = rect.top - viewportRect.top - Math.max(24, (viewportRect.height - Math.min(rect.height, viewportRect.height - 48)) / 2);
-                        setScroll(container, container.scrollTop + delta);
-                    }
+                    if (!revealBody(target)) { toast('대화의 스크롤 영역을 찾지 못했어요.'); return; }
                     reached = true; lastLocation = { room: currentRoom, id: record.id, turn: found.match.turn || record.turn, until: Date.now() + 2400 };
                     closeNavigationView(controller, false);
                     // 긴 버블도 첫 부분이 보이도록 이동하고 2.4초 동안 표시.
@@ -962,6 +1153,20 @@
                         if (!repaired) return; // 이동은 완료. 저장 오류 안내를 성공 안내로 덮지 않음.
                     }
                     toast('북마크한 대화로 이동했어요.'); return;
+                }
+                // 저장한 턴 바로 앞뒤까지 불러왔는데도 원문이 없으면 그 버블은 리롤·수정·삭제된 것이다.
+                // 턴을 모르는 북마크는 기존처럼 사용자가 멈출 때까지 계속 찾는다.
+                const missing = missingAtTurn(record, all);
+                missingChecks = missing ? missingChecks + 1 : 0;
+                if (missingChecks >= 2) {
+                    const sameTurn = missing.sameTurn;
+                    closeNavigationView(controller, true);
+                    reached = true;
+                    const turnLabel = `${record.turn}턴으로 이동`;
+                    toast('이 북마크의 원문이 지금 대화에 없어요. 리롤·수정·삭제되었을 수 있어요.',
+                        sameTurn ? turnLabel : null,
+                        sameTurn ? () => { if (sameTurn.isConnected && revealBody(sameTurn)) markTarget(sameTurn, Date.now() + 2400); } : null, true);
+                    return;
                 }
                 if (!searchBodies.length) {
                     noticeText.textContent = '과거 대화가 표시되기를 기다리는 중…';
@@ -998,7 +1203,7 @@
                     // 브라우저가 programmatic scroll 이벤트를 생략·지연해도 사이트의 지연 로더를 매번 깨운다.
                     candidate.dispatchEvent(new Event('scroll', { bubbles: false }));
                 });
-                const loadedTurns = all.map(item => Number(item.turn)).filter(Number.isFinite);
+                const loadedTurns = all.filter(item => item.turn).map(item => Number(item.turn)).filter(Number.isFinite);
                 const rangeText = loadedTurns.length ? ` · 현재 ${Math.min(...loadedTurns)}~${Math.max(...loadedTurns)}턴` : '';
                 noticeText.textContent = record.turn ? `${record.turn}턴 책갈피를 찾는 중${rangeText}…` : '북마크한 대화를 찾는 중…';
                 await waitForChange(signal, document.querySelector('main') || scroller);
@@ -1008,7 +1213,7 @@
                 const currentBodies = collectBodies(true);
                 const edge = direction < 0 ? currentBodies[0] : currentBodies[currentBodies.length - 1];
                 const currentScrollers = conversationScrollers(currentBodies), edgeScrollers = scan ? [scroller] : currentScrollers.length ? currentScrollers : scrollers;
-                const signature = `${edgeScrollers.map(node => `${node.scrollHeight}:${Math.round(node.scrollTop)}`).join(',')}|${currentBodies.length}|${edge?.closest(GROUP)?.getAttribute('data-message-group-id') || ''}|${edge ? normal(bodyText(edge)).slice(0, 120) : ''}`;
+                const signature = `${edgeScrollers.map(node => `${node.scrollHeight}:${Math.round(node.scrollTop)}`).join(',')}|${currentBodies.length}|${edge?.closest(GROUP)?.getAttribute('data-message-group-id') || ''}|${edge ? normal(cachedBodyText(edge)).slice(0, 120) : ''}`;
                 const atEdge = edgeScrollers.every(node => {
                     const latestRange = scrollRange(node);
                     return direction < 0 ? node.scrollTop <= latestRange.min + 2 : node.scrollTop >= latestRange.max - 2;
@@ -1050,7 +1255,7 @@
             ribbons.forEach(info => { info.button.remove(); if (info.surface) resizeObserver.unobserve(info.surface); }); ribbons.clear();
             loadRecords(); dirty = true;
         }
-        if (!currentRoom) { overlay.hidden = true; toolbar.hidden = true; panel.hidden = true; return; }
+        if (!currentRoom) { setHidden(overlay, true); setHidden(toolbar, true); setHidden(panel, true); return; }
         if (navigationView) return;
         if (dirty) {
             dirty = false; bodies = collectBodies();
@@ -1060,9 +1265,11 @@
             shown.forEach(body => {
                 if (ribbons.has(body)) return;
                 const ribbon = button('이 버블 북마크', RIBBON, () => toggleBookmark(body)); ribbon.className = 'cbb-ribbon cbb-bubble-ribbon';
-                const info = { button: ribbon, kind: bubbleKind(bubbleSurface(body)), surface: null };
+                const info = { button: ribbon, kind: 'chat', surface: null, role: '' };
                 attachFixedTap(ribbon); ribbons.set(body, info); overlay.append(ribbon);
             });
+            // 표면·모양은 클래스나 테마 속성이 바뀔 때도 달라지므로 재스캔마다 모든 리본을 다시 맞춘다.
+            ribbons.forEach((info, body) => refreshRibbonInfo(info, body));
             refreshButtons();
         }
         mountToolbar(); syncTheme();
@@ -1130,6 +1337,9 @@
         for (const mutation of mutations) {
             const target = changedElement(mutation.target);
             if (!target || target.closest(OWN)) continue;
+            // 가림 요소 캐시는 우리 UI가 아닌 DOM이 바뀌면 비우고, 바뀐 메시지 그룹은 다시 읽게 표시한다.
+            blockerCache = null;
+            bumpGroups(target);
 
             if (mutation.type === 'characterData') {
                 if (target.closest(`${GROUP}, ${BODY}`)) needsContentScan = true;
@@ -1187,9 +1397,10 @@
         else if (needsContentScan) scheduleContentScan();
         if (needsPosition) schedulePosition();
     });
+    // aria-hidden·aria-label은 본문 글자와 턴 판정에 쓰여, 캐시가 오래된 값을 쓰지 않도록 같이 본다.
     observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true,
-        attributeFilter: ['data-message-group-id', 'data-message-id', 'data-message-role', 'data-role', 'data-turn', 'data-turn-number', 'data-theme', 'data-sgb-bubble', 'data-cmu-theme-bubble', 'data-sgb-input-box', 'data-cmu-theme-input-box', 'data-cmu-theme-input-host', 'class', 'style', 'hidden'] });
-    const themeObserver = new MutationObserver(syncTheme);
+        attributeFilter: ['data-message-group-id', 'data-message-id', 'data-message-role', 'data-role', 'data-turn', 'data-turn-number', 'data-theme', 'data-sgb-bubble', 'data-cmu-theme-bubble', 'data-sgb-input-box', 'data-cmu-theme-input-box', 'data-cmu-theme-input-host', 'class', 'style', 'hidden', 'aria-hidden', 'aria-label'] });
+    const themeObserver = new MutationObserver(() => { blockerCache = null; syncTheme(); });
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'data-sgb-theme', 'data-cmu-theme'] });
     themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme'] });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncTheme);
