@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.2
+// @version      2.4.0.3
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -1260,6 +1260,11 @@ async function fetchSummaries(options) {
         return 'Crack API ' + match[1] + ' · ' + detail.replace(/\s+/g, ' ').slice(0, 160);
     }
 
+    // 카드 하나의 요청 오류(400·403·404·409·422)는 그 카드만 실패로 두고 계속한다. 429·5xx·네트워크 오류는 멈춘다.
+    function isItemScopedMemoryError(error) {
+        return /^Crack API (400|403|404|409|422)\b/.test(String(error && error.message || ''));
+    }
+
     function assertMemoryMutationResponse(response) {
         if (!response || response.success === false || /^(?:FAIL|FAILED|FAILURE|ERROR)$/i.test(String(response.result || ''))) {
             throw new Error('서버가 장기기억 변경을 확인하지 않았습니다.');
@@ -1332,10 +1337,15 @@ async function fetchSummaries(options) {
         return result;
     }
 
+    // 크랙 요약 메모리 창(장기 기억·단기 기억 탭이 있는 창)만 고른다. 다른 대화상자나 이 확장의 창은 건드리지 않는다.
+    function findNativeMemoryDialog() {
+        return Array.from(document.querySelectorAll('[role="dialog"]')).find(function(el) {
+            return !el.closest('.crack-ext-ai-overlay, .crack-ext-ui-dialog-overlay') && !!findNativeMemoryTab(el, '장기 기억');
+        }) || null;
+    }
+
     function refreshNativeMemoryDialog() {
-        var dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(function(el) {
-            return !el.closest('.crack-ext-ai-overlay, .crack-ext-ui-dialog-overlay');
-        });
+        var dialog = findNativeMemoryDialog();
         if (dialog) refreshCurrentTab(dialog);
     }
 
@@ -1547,6 +1557,25 @@ async function fetchRecentMessages(limit) {
             });
         });
         return parts.join('\n').trim();
+    }
+
+    // 응답이 끊긴 요청은 끝나지 않아 자동 정리가 '작업 중'에 갇히고 다른 탭 잠금까지 계속 쥐고 있었다.
+    // Vertex·Firebase처럼 시간 제한을 두되, 추론이 긴 요약도 끝낼 수 있게 넉넉히 잡는다. 본문을 다 받을 때까지 센다.
+    var AI_REQUEST_TIMEOUT_MS = 180000;
+    async function fetchAiWithTimeout(url, init, label) {
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timer = controller ? setTimeout(function() { controller.abort(); }, AI_REQUEST_TIMEOUT_MS) : 0;
+        try {
+            var response = await fetch(url, controller ? Object.assign({}, init, { signal:controller.signal }) : init);
+            var body = await response.text();
+            var nullBody = [101, 204, 205, 304].indexOf(response.status) !== -1;
+            return new Response(nullBody ? null : body, { status:response.status, statusText:response.statusText, headers:response.headers });
+        } catch (err) {
+            if (controller && controller.signal.aborted) throw new Error(label + ' 응답이 3분 동안 없어 중단했습니다. 잠시 후 다시 시도해주세요.');
+            throw err;
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     }
 
     async function readApiError(response, fallback) {
@@ -2455,11 +2484,11 @@ try {
                 contents: [{ role:'user', parts:[{ text:reinforcedPrompt }] }],
                 generationConfig:generationConfig
             };
-            const response = await fetch(url, {
+            const response = await fetchAiWithTimeout(url, {
                 method:'POST',
                 headers:{ 'Content-Type':'application/json' },
                 body:JSON.stringify(payload)
-            });
+            }, 'Gemini API');
             if (!response.ok) throw new Error(await readApiError(response, 'Gemini API 에러'));
             const data = await response.json();
             const text = extractGeminiResponseText(data);
@@ -2529,11 +2558,11 @@ try {
                 payload.thinking = { type:'enabled' };
                 payload.reasoning_effort = reasoningValue;
             }
-            const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+            const response = await fetchAiWithTimeout('https://api.deepseek.com/v1/chat/completions', {
                 method:'POST',
                 headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + config.apiKey },
                 body:JSON.stringify(payload)
-            });
+            }, 'DeepSeek API');
             if (!response.ok) throw new Error(await readApiError(response, 'DeepSeek API 에러'));
             const data = await response.json();
             const text = data && data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : '';
@@ -2557,14 +2586,14 @@ try {
                 input:reinforcedPrompt
             };
             if (reasoningValue && reasoningValue !== 'auto') payload.reasoning = { effort:reasoningValue };
-            const response = await fetch('https://api.openai.com/v1/responses', {
+            const response = await fetchAiWithTimeout('https://api.openai.com/v1/responses', {
                 method:'POST',
                 headers:{
                     'Content-Type':'application/json',
                     'Authorization':'Bearer ' + config.apiKey
                 },
                 body:JSON.stringify(payload)
-            });
+            }, 'OpenAI API');
             if (!response.ok) throw new Error(await readApiError(response, 'OpenAI API 에러'));
             const data = await response.json();
             if (data && data.error) throw new Error(data.error.message || 'OpenAI API 에러');
@@ -3698,20 +3727,43 @@ margin-bottom:12px;
         setTimeout(function() { toast.style.opacity = '0'; toast.style.transform = 'translateX(-50%) translateY(-10px)'; setTimeout(function() { if (toast.isConnected) toast.remove(); }, 300); }, 3000);
     }
 
+    var NATIVE_MEMORY_TABS = ['장기 기억', '단기 기억', '관계도', '목표'];
+
+    function findNativeMemoryTab(dialog, label) {
+        return Array.prototype.find.call(dialog.querySelectorAll('button'), function(button) {
+            return button.textContent.trim() === label;
+        }) || null;
+    }
+
+    function getNativeMemoryTabs(dialog) {
+        return NATIVE_MEMORY_TABS.map(function(label) { return findNativeMemoryTab(dialog, label); }).filter(Boolean);
+    }
+
+    // 선택된 탭은 bg-primary 클래스를 가진다(다크 모드에서는 밝은 배경). 예전처럼 "어두운 배경 = 선택"으로 보면
+    // 다크 모드에서 단기 기억을 선택된 탭으로 읽어, 저장 뒤 창이 단기 기억으로 넘어갔다.
+    function isActiveNativeMemoryTab(button, tabs) {
+        var marked = tabs.filter(function(tab) { return tab.classList.contains('bg-primary'); });
+        if (marked.length) return marked.length === 1 && marked[0] === button;
+        // 클래스 이름이 바뀌었으면 배경색이 혼자 다른 탭을 선택된 탭으로 본다.
+        var colors = tabs.map(function(tab) { return getComputedStyle(tab).backgroundColor; });
+        var mine = colors[tabs.indexOf(button)];
+        return tabs.length > 2 && colors.filter(function(color) { return color === mine; }).length === 1;
+    }
+
+    // 이 확장은 장기 기억만 바꾸므로 장기 기억 탭이 열려 있을 때만 다른 탭을 눌렀다 돌아와 목록을 다시 받게 한다.
+    // 선택된 장기 기억 탭은 정렬 메뉴 버튼이라 그대로 click()하면 목록이 새로 오지 않는다.
     function refreshCurrentTab(dialog) {
-        var btns = dialog.querySelectorAll('button'), activeBtn = null, otherBtn = null;
-        for (var i = 0; i < btns.length; i++) {
-            var txt = btns[i].textContent.trim();
-            if (txt === '단기 기억' || txt === '장기 기억') {
-                var bg = getComputedStyle(btns[i]).backgroundColor;
-                var m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)\)/);
-                if (m && (parseInt(m[1]) + parseInt(m[2]) + parseInt(m[3])) / 3 < 128) activeBtn = btns[i];
-                else if (txt === '장기 기억') otherBtn = btns[i];
-            }
-        }
-        if (!activeBtn) return;
-        if (otherBtn) { otherBtn.click(); setTimeout(() => { activeBtn.click(); }, 150); }
-        else { activeBtn.click(); }
+        var tabs = getNativeMemoryTabs(dialog);
+        var longTab = findNativeMemoryTab(dialog, '장기 기억');
+        if (!longTab || !isActiveNativeMemoryTab(longTab, tabs)) return;
+        var otherTab = tabs.find(function(tab) { return tab !== longTab; });
+        if (!otherTab) return;
+        otherTab.click();
+        setTimeout(function() {
+            if (!dialog.isConnected) return;
+            var nextLongTab = findNativeMemoryTab(dialog, '장기 기억');
+            if (nextLongTab && !isActiveNativeMemoryTab(nextLongTab, getNativeMemoryTabs(dialog))) nextLongTab.click();
+        }, 150);
     }
 
     function updateModelOptions(provider) {
@@ -6577,10 +6629,10 @@ margin-bottom:12px;
                 saveBtn.innerHTML = UI_ICONS.save + '<span>저장 중... (' + (i + 1) + '/' + targets.length + ')</span>';
                 try {
                     if (item.deletePending) {
-                        await deleteExistingSummary(item.raw);
+                        await deleteExistingSummary(item.raw, { strict:true, silent:true });
                         item.savedDeleted = true;
                     } else {
-                        await updateExistingSummary(item.raw, item.title.trim(), item.summary.trim());
+                        await updateExistingSummary(item.raw, item.title.trim(), item.summary.trim(), { strict:true, silent:true });
                     }
                     success++;
                     item.selected = false;
@@ -6592,7 +6644,13 @@ margin-bottom:12px;
                         item.changed = false;
                     }
                 } catch (err) {
-                    failed.push((item.originalTitle || '제목 없음') + ': ' + err.message);
+                    failed.push((item.originalTitle || '제목 없음') + ': ' + memoryErrorText(err));
+                    if (!isItemScopedMemoryError(err)) {
+                        // 429·5xx·네트워크 오류면 남은 항목은 보내지 않는다. 저장하지 않은 수정은 편집창에 그대로 남는다.
+                        var skipped = targets.length - i - 1;
+                        if (skipped) failed.push('서버 오류로 남은 ' + skipped + '개는 저장하지 않았습니다. 잠시 뒤 다시 저장해주세요.');
+                        break;
+                    }
                 }
             }
             if (success) {
@@ -6612,8 +6670,7 @@ margin-bottom:12px;
                 });
                 totalEl.textContent = '총 ' + items.length + '개';
                 render();
-                var dialogEl = document.querySelector('[role="dialog"]');
-                if (dialogEl) refreshCurrentTab(dialogEl);
+                refreshNativeMemoryDialog();
             } else {
                 render();
             }
@@ -7889,29 +7946,52 @@ if (mainModel && mainProvider) {
                 await showUiAlert('빈 항목이 있거나 저장 한도(제목 ' + GENERATED_TITLE_MAX + '자, 내용 ' + GENERATED_SUMMARY_MAX + '자)를 초과한 항목이 있습니다.', '저장 한도 확인', { tone:'warning' });
                 return;
             }
+            // 창을 연 뒤 다른 방으로 옮겼으면 이 요약을 지금 방에 넣지 않는다.
+            if (!modalChatId || getChatId() !== modalChatId) {
+                await showUiAlert('요약을 만든 채팅방이 아닙니다. 해당 방으로 돌아가 다시 추가해주세요.', '채팅방 확인', { tone:'warning' });
+                return;
+            }
             btnSave.disabled = true;
             btnXClose.disabled = true;
             var successCount = 0;
             var addFailures = [];
+            var failedCards = [];
             for (var j = 0; j < parsedCards.length; j++) {
                 btnSave.innerHTML = UI_ICONS.plus + '<span>추가 중... (' + (j + 1) + '/' + parsedCards.length + ')</span>';
-                var res = await apiCall('POST', '/summaries', { type:'longTerm', title:parsedCards[j].title, summary:parsedCards[j].summary });
-                if (res) successCount++;
-                else addFailures.push('[' + parsedCards[j].title + '] 추가 실패');
+                if (j) await pauseMs(MEMORY_WRITE_GAP_MS);
+                try {
+                    await addMemoryCard(modalChatId, parsedCards[j]);
+                    successCount++;
+                } catch (err) {
+                    failedCards.push(parsedCards[j]);
+                    addFailures.push('[' + parsedCards[j].title + '] ' + memoryErrorText(err));
+                    if (!isItemScopedMemoryError(err)) {
+                        // 429·5xx·네트워크 오류면 남은 카드는 보내지 않는다.
+                        failedCards = failedCards.concat(parsedCards.slice(j + 1));
+                        if (j < parsedCards.length - 1) addFailures.push('서버 오류로 남은 ' + (parsedCards.length - j - 1) + '개는 보내지 않았습니다.');
+                        break;
+                    }
+                }
             }
-            if (addFailures.length) await showUiAlert(addFailures.join('\n'), '일부 요약 추가 실패', { tone:'danger' });
             if (successCount > 0) {
-                clearAiResultDraft();
                 showToast(successCount + '개의 요약이 장기 기억에 추가되었습니다.');
-                releaseVertexSessionSecrets();
-                overlay.remove();
-                var dialogEl = document.querySelector('[role="dialog"]');
-                if (dialogEl) refreshCurrentTab(dialogEl);
-            } else {
+                refreshNativeMemoryDialog();
+            }
+            if (failedCards.length) {
+                // 실패한 카드만 결과 칸에 남긴다. 예전에는 하나라도 성공하면 창을 닫아 실패한 카드 내용이 사라졌다.
+                txtResult.value = failedCards.map(function(card) { return '[' + card.title + ']\n' + card.summary; }).join('\n\n');
+                saveAiResultDraft(txtResult.value, resultMode);
+                currentCardIndex = 0;
+                flushPreviewUpdate();
                 btnSave.innerHTML = UI_ICONS.plus + '<span>추가하기</span>';
                 btnSave.disabled = false;
                 btnXClose.disabled = false;
+                await showUiAlert(addFailures.join('\n') + '\n\n추가하지 못한 카드는 결과 칸에 남겨 두었습니다.', successCount ? '일부 요약 추가 실패' : '요약 추가 실패', { tone:'danger' });
+                return;
             }
+            clearAiResultDraft();
+            releaseVertexSessionSecrets();
+            overlay.remove();
         };
 
         if (prefillText) {
@@ -7935,6 +8015,8 @@ if (mainModel && mainProvider) {
     var ceSidebarMenu = null;
     var ceSidebarHost = null;
     var ceSidebarAnchor = null;
+    var ceSidebarWatch = null;
+    var ceAncestorChangedAt = 0;
     var ceLayoutTimer = 0;
     var ceLayoutDueAt = 0;
     var ceRetryTimer = 0;
@@ -8189,11 +8271,15 @@ if (mainModel && mainProvider) {
         var rect = element.getBoundingClientRect();
         return rect.right > 0 && rect.bottom > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
     }
-    function findAiSummarySidebarAnchor() {
+    // includeHidden: 접힌 오른쪽 패널처럼 화면 밖에 있는 기준점도 찾는다(메뉴를 넣지는 않고 펴지는 순간을 감시할 때만 쓴다).
+    function findAiSummarySidebarAnchor(includeHidden) {
+        var usable = includeHidden
+            ? function(element) { return !!(element && element.isConnected && element.parentElement && !element.closest('.wrtn-markdown,[data-message-group-id],.crack-ext-ai-overlay')); }
+            : isVisibleAiSummarySidebarAnchor;
         // Retain a valid native anchor even when another addon is installed later.
-        if (isVisibleAiSummarySidebarAnchor(ceSidebarAnchor)) return ceSidebarAnchor;
+        if (usable(ceSidebarAnchor)) return ceSidebarAnchor;
         var translator = document.getElementById('trans-menu-btn');
-        if (isVisibleAiSummarySidebarAnchor(translator)) return translator;
+        if (usable(translator)) return translator;
         var candidates = document.querySelectorAll('.px-2\\.5');
         for (var i = 0; i < candidates.length; i++) {
             var element = candidates[i];
@@ -8205,7 +8291,7 @@ if (mainModel && mainProvider) {
             for (var j = 0; j < inner.length && !hasInner; j++) {
                 hasInner = inner[j].id !== AI_SUMMARY_SIDEBAR_MENU_ID && String(inner[j].textContent || '').indexOf('키보드 단축키') !== -1;
             }
-            if (!hasInner && isVisibleAiSummarySidebarAnchor(element)) return element;
+            if (!hasInner && usable(element)) return element;
         }
         return null;
     }
@@ -8234,13 +8320,30 @@ if (mainModel && mainProvider) {
             menus.forEach(function(menu) { menu.remove(); });
             ceSidebarAnchor = null;
             ceSidebarHost = null;
+            ceSidebarWatch = null;
             ceWatchLayoutAncestors();
             return;
         }
         var anchor = findAiSummarySidebarAnchor();
         if (!ceSidebarMenu && menus.length) ceSidebarMenu = menus[0];
         menus.forEach(function(menu) { if (menu !== ceSidebarMenu) menu.remove(); });
-        if (!anchor) return;
+        if (!anchor) {
+            // 오른쪽 패널이 접혀 있으면 기준점이 화면 밖에 있다. 패널을 펴는 class 변경을 감시해 바로 붙인다.
+            // 예전에는 10초 점검을 기다려 패널을 연 뒤 메뉴가 최대 10초 늦게 나타났다.
+            var hiddenAnchor = ceSidebarMenu && ceSidebarMenu.isConnected ? null : findAiSummarySidebarAnchor(true);
+            var watchNode = hiddenAnchor ? hiddenAnchor.parentElement : null;
+            if (ceSidebarWatch !== watchNode) {
+                ceSidebarWatch = watchNode;
+                ceWatchLayoutAncestors();
+            }
+            // 패널이 펴지는 중(방금 조상 class가 바뀜)이면 움직임이 끝날 때까지 잠깐 더 확인한다.
+            if (watchNode && Date.now() - ceAncestorChangedAt < 1000) ceScheduleLayout(200);
+            return;
+        }
+        if (ceSidebarWatch) {
+            ceSidebarWatch = null;
+            ceWatchLayoutAncestors();
+        }
         ceSidebarAnchor = anchor;
         var host = anchor.parentElement;
         if (!ceSidebarMenu) ceSidebarMenu = createAiSummarySidebarMenu();
@@ -8254,7 +8357,7 @@ if (mainModel && mainProvider) {
     function ceWatchLayoutAncestors() {
         if (!ceLayoutObserver) return;
         var nodes = [];
-        [ceHeaderRecord && ceHeaderRecord.host, ceSidebarHost].forEach(function(startNode) {
+        [ceHeaderRecord && ceHeaderRecord.host, ceSidebarHost, ceSidebarWatch].forEach(function(startNode) {
             for (var node = startNode; node && node.nodeType === 1; node = node.parentElement) {
                 if (nodes.indexOf(node) === -1) nodes.push(node);
             }
@@ -8326,7 +8429,10 @@ if (mainModel && mainProvider) {
         ceUiStarted = true;
         refreshUsdKrwRate(false);
         ceUiRoute = getChatId() || location.pathname || 'current';
-        ceLayoutObserver = new MutationObserver(function() { ceScheduleLayout(120); });
+        ceLayoutObserver = new MutationObserver(function() {
+            ceAncestorChangedAt = Date.now();
+            ceScheduleLayout(120);
+        });
         // Text changes still wake automatic summarisation, but do not rescan the header.
         // Global class/style observation is replaced by the narrow ancestor observer above.
         var bodyObserver = new MutationObserver(function(mutations) {
