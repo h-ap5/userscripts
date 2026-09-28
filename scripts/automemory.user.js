@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.3
+// @version      2.4.0.4
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -3582,6 +3582,21 @@ margin-bottom:12px;
 @media(prefers-reduced-motion:reduce){
 .crack-ext-ai-modal,.crack-ext-prompt-heading-main::before,#ce-ai-generate:disabled::after{animation:none!important;transition:none!important}
 }
+/* 2.4.0.4: 스크롤할 때 위에 붙는 제목줄은 불투명해야 뒤로 지나가는 카드가 비치지 않는다 */
+.crack-ext-ai-modal-header{background:var(--ce-panel)!important}
+/* 2.4.0.4: 자동 정리 제목은 한 줄로 두고 상태는 제목 아래 한 줄 미리보기(긴 오류가 제목을 한 글자씩 세로로 밀어내던 문제) */
+.crack-ext-auto-summary-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:4px}
+.crack-ext-auto-summary-title{white-space:nowrap}
+.crack-ext-auto-summary-status{display:block!important;margin-left:0!important;max-width:100%;line-height:1.4}
+.crack-ext-auto-summary-status:empty{display:none!important}
+.crack-ext-auto-status{flex:1 1 100%!important;word-break:keep-all!important;overflow-wrap:anywhere}
+.crack-ext-auto-error{margin-top:8px;color:var(--ce-ink-faint);font-size:var(--ce-fs-sub)}
+.crack-ext-auto-error[hidden]{display:none!important}
+.crack-ext-auto-error>summary{width:fit-content;cursor:pointer;list-style:none;color:var(--ce-ink-dim);font-weight:600}
+.crack-ext-auto-error>summary::-webkit-details-marker{display:none}
+.crack-ext-auto-error>summary::before{content:"▸ "}
+.crack-ext-auto-error[open]>summary::before{content:"▾ "}
+.crack-ext-auto-error-text{margin-top:6px;max-height:160px;overflow:auto;padding:8px 10px;border-radius:8px;background:var(--ce-panel-2);color:var(--ce-ink-dim);line-height:1.5;white-space:pre-wrap;word-break:break-all}
 `;
         document.head.appendChild(s);
     }
@@ -4831,18 +4846,33 @@ margin-bottom:12px;
         return turns.slice(startIndex, cutoffIndex + 1);
     }
 
+    // AI 오류 원문(요청 주소·안내 링크 포함)은 길어서 제목 줄을 밀어낸다. 화면에는 한 줄 원인만 쓰고,
+    // 원문은 자동 정리 칸의 '오류 원문'에서 펼쳐 본다.
+    function shortAutoError(msg) {
+        var raw = String(msg || '').trim();
+        if (!raw) return '알 수 없음';
+        var codeMatch = raw.match(/\[\s*(\d{3})\s*\]|\bHTTP\s*(\d{3})\b|\((\d{3})\)/i);
+        var code = codeMatch ? (codeMatch[1] || codeMatch[2] || codeMatch[3]) : '';
+        if (/\b429\b|resource.?exhausted|rate.?limit|too many requests|요청 한도|사용량/i.test(raw)) return 'AI 요청 한도 초과(429) · 잠시 후 다시 시도';
+        if (/\b40[13]\b|permission.?denied|unauthori[sz]ed|unauthenticated|api key not valid|인증 실패/i.test(raw)) return 'AI 인증 실패' + (code ? '(' + code + ')' : '') + ' · 키·권한 확인';
+        if (/\b50[0234]\b|unavailable|overloaded|internal error/i.test(raw)) return 'AI 서버 오류' + (code ? '(' + code + ')' : '') + ' · 잠시 후 다시 시도';
+        if (/timed? ?out|시간 초과/i.test(raw)) return 'AI 응답 시간 초과';
+        var s = raw.replace(/error fetching from\s*/i, '').replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').replace(/\s+([:.,)])/g, '$1').trim();
+        return s.length > 80 ? s.slice(0, 79) + '…' : (s || '알 수 없음');
+    }
+
     function getAutoMemoryStatusText(chatId) {
         if (!chatId) return '채팅방에서만 작동함';
         var settings = getAutoMemorySettings(chatId);
         if (!settings.enabled) return '꺼짐 · 수동 요약은 기존대로 사용 가능';
         var state = getAutoMemoryState(chatId);
-        if (state.autoPaused) return '3회 오류 누적 · 자동 일시정지 · 원인: ' + (state.lastError || '알 수 없음') + ' (설정 저장 또는 지금 실행으로 재개)';
+        if (state.autoPaused) return '3회 오류 누적 · 자동 일시정지 · 원인: ' + shortAutoError(state.lastError) + ' (설정 저장 또는 지금 실행으로 재개)';
         if (state.retryAfter > Date.now()) {
             var retryMinutes = Math.max(1, Math.ceil((state.retryAfter - Date.now()) / 60000));
-            return retryMinutes + '분 후 자동 재시도 · ' + (state.lastError || state.lastStatus || '오류');
+            return retryMinutes + '분 후 자동 재시도 · ' + (state.lastError ? shortAutoError(state.lastError) : (state.lastStatus || '오류'));
         }
-        if (state.pendingApply) return '미완료 슬롯 저장 재개 대기 · ' + (state.lastError || state.lastStatus || '검증 중');
-        if (state.lastError) return '오류 · ' + state.lastError;
+        if (state.pendingApply) return '미완료 슬롯 저장 재개 대기 · ' + (state.lastError ? shortAutoError(state.lastError) : (state.lastStatus || '검증 중'));
+        if (state.lastError) return '오류 · ' + shortAutoError(state.lastError);
         if (!state.initialized) return '첫 확인 대기 중';
         if (state.pendingCutoffTurnKey) return '요약 대기/처리 중 · ' + (state.lastStatus || '슬롯 확인 중');
         var remaining = Math.max(0, settings.intervalTurns - (state.observedNewTurns || 0));
@@ -6910,7 +6940,7 @@ if (mainModel && mainProvider) {
         html += '</div>';
 
         html += '<details class="crack-ext-auto-panel" id="ce-auto-panel"' + (autoSettings.enabled ? ' open' : '') + '>';
-        html += '<summary><span>자동 장기기억 정리</span><span class="crack-ext-auto-summary-status" id="ce-auto-summary-status">' + escapeHtml(getAutoMemoryStatusText(modalChatId)) + '</span></summary>';
+        html += '<summary><span class="crack-ext-auto-summary-main"><span class="crack-ext-auto-summary-title">자동 장기기억 정리</span><span class="crack-ext-auto-summary-status" id="ce-auto-summary-status">' + escapeHtml(getAutoMemoryStatusText(modalChatId)) + '</span></span></summary>';
         html += '<div class="crack-ext-auto-body">';
         function autoCheck(id, label, checked, tip) {
             return '<span class="crack-ext-check-wrap"><label class="crack-ext-auto-check"><input type="checkbox" id="' + id + '"' + (checked ? ' checked' : '') + '><span>' + label + '</span></label>' +
@@ -6940,6 +6970,7 @@ if (mainModel && mainProvider) {
             '<li>숫자를 크게 잡을수록 AI 입력량과 비용이 늘어납니다.</li>' +
             '</ul>';
         html += '<div class="crack-ext-auto-actions"><button class="crack-ext-ai-mbtn" id="ce-auto-save-settings">설정 저장</button><button class="crack-ext-ai-mbtn" id="ce-auto-run">지금 실행</button><button class="crack-ext-ai-mbtn" id="ce-auto-reset">기준점 초기화</button><span class="crack-ext-auto-status" id="ce-auto-status"></span></div>';
+        html += '<details class="crack-ext-auto-error" id="ce-auto-error" hidden><summary>오류 원문</summary><div class="crack-ext-auto-error-text" id="ce-auto-error-text"></div></details>';
         html += '<div class="crack-ext-auto-usage" id="ce-auto-usage"></div>';
         html += '</div></details>';
 
@@ -7031,6 +7062,8 @@ if (mainModel && mainProvider) {
         var autoTarget = overlay.querySelector('#ce-auto-target');
         var autoStatus = overlay.querySelector('#ce-auto-status');
         var autoSummaryStatus = overlay.querySelector('#ce-auto-summary-status');
+        var autoError = overlay.querySelector('#ce-auto-error');
+        var autoErrorText = overlay.querySelector('#ce-auto-error-text');
         var autoUsage = overlay.querySelector('#ce-auto-usage');
         var btnAutoSaveSettings = overlay.querySelector('#ce-auto-save-settings');
         var btnAutoRun = overlay.querySelector('#ce-auto-run');
@@ -7344,6 +7377,12 @@ if (mainModel && mainProvider) {
             if (routeChanged) text = '다른 채팅방으로 이동함 · 이 창을 닫고 다시 열어주세요';
             autoStatus.textContent = text;
             autoSummaryStatus.textContent = text;
+            autoSummaryStatus.title = text;
+            var rawError = !routeChanged && state.lastError ? String(state.lastError) : '';
+            if (autoError && autoErrorText) {
+                autoError.hidden = !rawError;
+                if (autoErrorText.textContent !== rawError) autoErrorText.textContent = rawError;
+            }
             autoUsage.textContent = formatAutoMemoryUsage(state);
             autoUsage.title = getAutoMemoryUsageTooltip(state);
             btnAutoRun.disabled = AUTO_MEMORY_BUSY || !modalChatId || routeChanged;
