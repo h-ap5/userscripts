@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.1.8
+// @version      4.1.9
 // @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -2024,6 +2024,7 @@ ${TRANSLATION_ONLY_RULE}`;
         messageId: activeMsgId,
         bubbleId: activeBubbleMsgId,
         bubbleElement: activeBubbleElement,
+        cacheKey: activeBubbleCacheKey,
         sourceContent: activeSourceContent || activeOriginalText,
         serverContent: activeServerContent || activeSourceContent || activeOriginalText,
         originalText: activeOriginalText,
@@ -2057,10 +2058,15 @@ ${TRANSLATION_ONLY_RULE}`;
           expectedContent: saveContext.serverContent,
           sourceContent: saveContext.sourceContent,
         });
+        // 서버 답변은 이제 방금 넣은 글이다. 이 결과창에서 다른 결과로 다시 교체할 때 이 글과 비교해야
+        // '서버의 원문이 변경되었습니다'로 막히지 않는다.
+        const savedResult = bubbleResultCache.get(saveContext.cacheKey);
+        if (savedResult?.msgId === saveContext.messageId) savedResult.serverContent = newContent;
         const stillSameResult = saveContext.sessionId === transSessionId
           && saveContext.chatId === activeChatId
           && saveContext.messageId === activeMsgId;
         if (stillSameResult) {
+          activeServerContent = newContent;
           if (displayResult === 'visible') {
             applyStatus.textContent = '서버 저장 및 말풍선 표시 완료';
             liveStatus.textContent = '말풍선 표시 완료';
@@ -2101,7 +2107,7 @@ ${TRANSLATION_ONLY_RULE}`;
     retryLiveBtn.addEventListener('click', () => {
       const patchKey = retryLiveBtn.dataset.patchKey || '';
       const record = liveMessagePatches.get(patchKey);
-      const result = record ? applyLiveMessagePatch(record) : 'offscreen';
+      const result = record ? applyLiveMessagePatch(record) : 'released';
       if (result === 'visible' || result === 'native') {
         applyStatus.textContent = '말풍선 표시 완료';
         liveStatus.textContent = '말풍선 표시 완료';
@@ -2109,7 +2115,10 @@ ${TRANSLATION_ONLY_RULE}`;
         retryLiveBtn.hidden = true;
         showNudge('말풍선에 번역문을 표시했습니다.', 'ok');
       } else {
-        applyStatus.textContent = '말풍선 표시 실패 · 화면에 답변이 보이는지 확인해주세요.';
+        // released: 말풍선이 이미 다른 내용으로 다시 그려져 교체 기록을 놓았다. 다시 눌러도 같은 결과다.
+        applyStatus.textContent = result === 'released'
+          ? '말풍선 내용이 이미 바뀌었습니다. 번역문이 보이지 않으면 새로고침해주세요.'
+          : '말풍선 표시 실패 · 화면에 답변이 보이는지 확인해주세요.';
         liveStatus.textContent = '말풍선 표시 실패';
         applyStatus.className = 'err';
       }
@@ -3115,6 +3124,15 @@ ${TRANSLATION_ONLY_RULE}`;
     return String(raw || '');
   }
 
+  // 크랙은 코드블록(상태창 등) 위에 언어 이름 머리글을 그린다(언어가 없으면 info). 서버 원문에는 없는 글자라
+  // 말풍선 글에 섞이면 원문이 바뀐 것으로 보여, 교체한 번역문을 말풍선에 띄우지 못했다.
+  function removeCodeBlockHeaders(root) {
+    root.querySelectorAll('.wrtn-codeblock').forEach(codeBlock => {
+      const header = codeBlock.firstElementChild;
+      if (header && !header.querySelector('pre, code')) header.remove();
+    });
+  }
+
   function getBubbleVisibleText(messageBlock) {
     if (!messageBlock) return '';
     const allMarkdown = Array.from(messageBlock.querySelectorAll('.wrtn-markdown:not(.trans-live-content)'));
@@ -3125,6 +3143,7 @@ ${TRANSLATION_ONLY_RULE}`;
     markdownNodes.forEach(markdown => {
       const clone = markdown.cloneNode(true);
       clone.querySelectorAll('button, [role="button"], [aria-hidden="true"], .trans-live-applied-label').forEach(control => control.remove());
+      removeCodeBlockHeaders(clone);
       const text = (clone.innerText || clone.textContent || '').trim();
       const key = normalizeForMessageMatch(text);
       if (text && key && !chunkKeys.has(key)) {
@@ -3141,6 +3160,7 @@ ${TRANSLATION_ONLY_RULE}`;
         'svg', 'script', 'style', 'input', 'textarea',
         '.trans-bubble-btn', '.trans-live-content', '.trans-live-applied-label'
       ].join(',')).forEach(control => control.remove());
+      removeCodeBlockHeaders(clone);
       const fallbackText = (clone.innerText || clone.textContent || '').trim();
       const fallbackKey = normalizeForMessageMatch(fallbackText);
       if (fallbackText && fallbackKey) chunks.push(fallbackText);
@@ -3893,21 +3913,38 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     return record.norms;
   }
 
+  // 말풍선 글(정규화)이 교체 전 답변인지. 서버 원문 말고도 교체 직전 말풍선에 보이던 글이면 같은 답변으로 본다.
+  function isLiveSourceNorm(record, norm) {
+    return norm === getLivePatchNorms(record).source || Boolean(record.shownSourceNorms?.includes(norm));
+  }
+
   function findLivePatchBubble(record) {
-    if (record.bubbleElement?.isConnected && record.bubbleElement.ownerDocument === document) {
-      return record.bubbleElement;
+    const ids = new Set([record.bubbleId, record.messageId].filter(Boolean).map(String));
+    const element = record.bubbleElement;
+    const elementConnected = Boolean(element?.isConnected && element.ownerDocument === document);
+    // 같은 자리에 다른 답변(리롤 버전 등)이 그려지면 ID가 바뀐다. 그동안은 이 말풍선에 번역문을 덮지 않는다.
+    if (elementConnected) {
+      const groupId = element.getAttribute('data-message-group-id');
+      if (!groupId || ids.has(groupId)) return element;
     }
 
     const blocks = Array.from(document.querySelectorAll('[data-message-group-id]'));
-    const ids = new Set([record.bubbleId, record.messageId].filter(Boolean).map(String));
     const byId = blocks.filter(block => ids.has(String(block.getAttribute('data-message-group-id') || '')));
-    const sourceNorm = getLivePatchNorms(record).source;
-    const matchingById = byId.filter(block => normalizeForMessageMatch(getBubbleVisibleText(block)) === sourceNorm);
+    const showsSource = block => isLiveSourceNorm(record, normalizeForMessageMatch(getBubbleVisibleText(block)));
+    const matchingById = byId.filter(showsSource);
     if (matchingById.length === 1) return matchingById[0];
     if (byId.length === 1) return byId[0];
+    if (elementConnected) return null;
 
-    const byContent = blocks.filter(block => normalizeForMessageMatch(getBubbleVisibleText(block)) === sourceNorm);
+    const byContent = blocks.filter(showsSource);
     return byContent.length === 1 ? byContent[0] : null;
+  }
+
+  // 기록한 답변의 말풍선에 지금 보이는 글(정규화). 말풍선을 못 찾으면 빈 글.
+  function readLiveBubbleNorm(record) {
+    if (parsePath() !== String(record.chatId)) return '';
+    const block = findLivePatchBubble(record);
+    return block ? normalizeForMessageMatch(getBubbleVisibleText(block)) : '';
   }
 
   function applyLiveMessagePatch(record) {
@@ -3926,7 +3963,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       releaseLiveMessagePatch(patchKey);
       return 'native';
     }
-    if (nativeNorm && sourceNorm && nativeNorm !== sourceNorm) {
+    if (nativeNorm && sourceNorm && !isLiveSourceNorm(record, nativeNorm)) {
       releaseLiveMessagePatch(patchKey);
       return 'released';
     }
@@ -4010,7 +4047,6 @@ if(__exports != exports)module.exports = exports;return module.exports}));
         throw new Error('서버의 원문이 변경되었습니다. 새 답변을 다시 열어주세요.');
       }
 
-      await patchMessage(chatId, messageId, content);
       const previousPatch = liveMessagePatches.get(patchKey);
       const previousSource = originalMessageSources.get(patchKey);
       const preservedSource = previousSource?.sourceContent
@@ -4025,6 +4061,15 @@ if(__exports != exports)module.exports = exports;return module.exports}));
         lastContent: String(content || ''),
         sourceContent: preservedSource,
       };
+      // 교체 직전 말풍선 글도 원문으로 기억한다. 크랙이 원문과 글자를 다르게 그리거나(수식, 이름 치환 등)
+      // 브라우저 번역·다른 확장이 말풍선 글을 바꿔 두어도, 그 글 그대로면 아직 교체 전 답변이다.
+      record.shownSourceNorms = [...new Set([
+        ...(previousSource?.shownSourceNorms ?? previousPatch?.shownSourceNorms ?? []),
+        normalizeForMessageMatch(expectedContent),
+        readLiveBubbleNorm(record),
+      ].filter(Boolean))];
+
+      await patchMessage(chatId, messageId, content);
       liveMessagePatches.set(patchKey, record);
       originalMessageSources.set(patchKey, { ...record });
       if (originalMessageSources.size > 500) {
@@ -4032,7 +4077,9 @@ if(__exports != exports)module.exports = exports;return module.exports}));
         if (oldestKey) originalMessageSources.delete(oldestKey);
       }
       const displayResult = applyLiveMessagePatch(record);
-      return displayResult === 'hidden' ? 'hidden' : displayResult === 'visible' ? 'visible' : 'offscreen';
+      // native는 크랙이 이미 말풍선을 번역문으로 다시 그린 경우다. 실패로 알리지 않는다.
+      if (displayResult === 'visible' || displayResult === 'native') return 'visible';
+      return displayResult === 'hidden' ? 'hidden' : 'offscreen';
     } finally {
       pendingMessageSaves.delete(patchKey);
     }
