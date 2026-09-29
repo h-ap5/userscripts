@@ -281,7 +281,8 @@ AI 요약 창 아래의 **이식·백업·복사** 버튼을 누르면 따로 �
 | **설정 열기** | 설치 직후 크랙을 한 번 새로고침하고, 채팅방 오른쪽 사이드바의 **초월 번역 설정**을 누릅니다. |
 
 <p align="center">
-  <img width="247" height="238" alt="image" src="https://github.com/user-attachments/assets/b2bdeb83-c379-4802-a96f-c78dc851d229" />
+  <img src="images/autotrans/01-sidebar-menu.png" width="256" alt="사이드바의 초월 번역 설정 버튼"><br>
+  <sub>▲ 채팅방 오른쪽 사이드바의 초월 번역 설정 버튼</sub>
 </p>
 
 ### 2. 처음 한 번 설정하기
@@ -289,6 +290,11 @@ AI 요약 창 아래의 **이식·백업·복사** 버튼을 누르면 따로 �
 #### API와 모델
 
 설정창에서 사용할 번역 API와 모델을 고르고 키를 입력합니다. 빠르고 저렴하게 쓰려면 보통 Flash 계열을 고르면 됩니다.
+
+<p align="center">
+  <img src="images/autotrans/02-settings-top.png" width="616" alt="초월 번역 설정창 위쪽"><br>
+  <sub>▲ 제공자 · API Key · 모델 · 추론 레벨 설정</sub>
+</p>
 
 | 항목 | 설명 |
 |---|---|
@@ -300,10 +306,20 @@ AI 요약 창 아래의 **이식·백업·복사** 버튼을 누르면 따로 �
 
 기본 번역 방식은 **한글 전용**과 **영문 혼용**입니다. 원하는 방식으로 번역시키려면 커스텀 슬롯을 만듭니다.
 
+<p align="center">
+  <img src="images/autotrans/03-translation-slots.png" width="605" alt="번역 방식과 커스텀 슬롯 설정"><br>
+  <sub>▲ 번역 방식 · 커스텀 슬롯 · 즉시 교체 · 번역 지침 설정</sub>
+</p>
+
 1. **＋ 추가**를 누르면 현재 지침을 복사한 새 슬롯이 생깁니다.
 2. 제목을 알맞게 정합니다.
 3. 아래 번역 지침을 원하는 내용으로 고칩니다.
 4. 제목·지침·마지막으로 고른 슬롯은 로컬에 자동 저장되고, 설정창과 결과창에서 바로 바꿀 수 있습니다.
+
+<p align="center">
+  <img src="images/autotrans/04-settings-bottom.png" width="615" alt="초월 번역 설정창 아래쪽"><br>
+  <sub>▲ OOC 자동 주입 · 키워드 치환 슬롯 등 나머지 설정</sub>
+</p>
 
 > [!NOTE]
 > 번역 지침을 완전히 비우면 번역을 시작하지 않습니다. 필요 없는 슬롯은 지울 수 있고, 실수로 지웠다면 바로 나타나는 **되돌리기**로 복구합니다.
@@ -315,12 +331,13 @@ AI 요약 창 아래의 **이식·백업·복사** 버튼을 누르면 따로 �
 3. 이름·용어를 한꺼번에 바꾸려면 **키워드 전체 교체**를 씁니다.
 4. **이 결과로 교체하기**를 누르면 서버에 저장되고, 현재 말풍선도 바로 한국어로 바뀝니다.
 
+<p align="center">
+  <img src="images/autotrans/05-translate-icon.png" width="62" alt="영문 답변 아래의 번역 아이콘"><br>
+  <sub>▲ 영문 답변 아래에 생기는 A 모양 번역 아이콘</sub>
+</p>
+
 > [!TIP]
 > 설정의 **말풍선 클릭 시 즉시 교체**를 켜면 결과창 없이 번역과 교체가 한 번에 끝납니다. 번역이 길이 제한에 걸려 잘렸거나 결과가 비어 있으면 교체하지 않고 원문을 그대로 둡니다. 번역을 직접 확인하거나 고치고 싶다면 꺼 두세요.
-
-<p align="center">
-  <img width="311" height="95" alt="image" src="https://github.com/user-attachments/assets/89a998a6-3c92-41aa-88a2-42f0c7e59b95" />
-</p>
 
 ### 4. 교체 후 꼭 알아둘 것
 
@@ -436,17 +453,10 @@ AI 요약 창 아래의 **이식·백업·복사** 버튼을 누르면 따로 �
 > [!NOTE]
 > 목표·허용 오차·감시 켜기/끄기 설정은 브라우저별로 저장돼 자동 동기화되지 않습니다. 대신 사용량은 계정의 서버 내역 기준이라, 폰이나 다른 PC에서 쓴 크래커도 다음 갱신 때 같이 합산됩니다.
 
-### 4. 함께 쓰는 확장
+### 4. 다른 확장과 함께 쓸 때
 
-순정 · 순정+라디오존데 · 테마 · 테마+라디오존데 조합을 지원합니다. 같이 켰을 때 자리와 테마가 깨지지 않는다는 뜻입니다.
-
-- [라존데 팝업 확프](https://gist.github.com/chyoyam-alt/d40ec765dc822b96a8d4b93342a264f4/raw/Radiosonde.user.js)
-- [이미지배경&테마 확프 (삽화확프 연동)](https://gist.github.com/chyoyam-alt/4391ea2abe3340aa838c832ffb27fe58/raw/GeneratedImageBackground.user.js)
-- [이미지배경&테마 확프](https://gist.github.com/chyoyam-alt/ec8db5ac1369e738dfbe7c7fc450abdc/raw/ImageBackground.user.js)
-- [INFO Game HUD (다마고치)](https://gist.github.com/chyoyam-alt/e7370c75740314a4a34e4c1d2d4ed9d2/raw/INFOGameHUD.user.js)
-
-> [!NOTE]
-> 클린리롤·믹서를 같이 켜는 것 자체는 괜찮습니다. 다만 그 확장들이 자체 버튼이나 특수 제스처로 직접 돌리는 리롤은 가드가 막지 못할 수 있습니다. 크랙 기본 **다시 생성/리롤** 버튼은 **재생성도 막기**를 켜면 막습니다.
+- 순정 · 순정+라디오존데 · 테마 · 테마+라디오존데 조합을 지원합니다. 같이 켰을 때 자리와 테마가 깨지지 않는다는 뜻입니다.
+- 크랙 기본 **다시 생성/리롤** 버튼은 **재생성도 막기**를 켜면 막습니다. 다른 확장이 자체 버튼이나 특수 제스처로 직접 돌리는 리롤은 가드가 막지 못할 수 있습니다.
 
 ### 알아두기
 
