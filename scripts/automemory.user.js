@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.4
+// @version      2.4.0.5
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -7257,6 +7257,13 @@ if (mainModel && mainProvider) {
         });
         bindAutoSave(inputVertexLocation, function() { saveVisibleCredentials('vertex'); });
         bindAutoSave(inputVertexProject, function() { saveVisibleCredentials('vertex'); });
+        // 턴 수도 다른 설정처럼 바꾸는 즉시 저장한다. 예전에는 요약 생성을 눌러야만 저장돼서
+        // 값만 바꾸고 창이나 탭을 닫으면 다음에 마지막으로 생성했던 값으로 돌아갔다. 비었거나 잘못된 값은 저장하지 않는다.
+        bindAutoSave(inputTurns, function() {
+            var turns = nonNegativeSafeInteger(inputTurns.value, null);
+            if (turns == null) return;
+            if (localStorage.getItem('crack_ext_turn_count') !== String(turns)) localStorage.setItem('crack_ext_turn_count', String(turns));
+        });
 
         selProvider.onchange = async function() {
             var requestedProvider = selProvider.value;
