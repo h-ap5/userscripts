@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.5
+// @version      2.4.0.6
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -110,7 +110,7 @@ This automatic run is append-first, not a global rewrite.
 - OPEN TAIL may be updated only when NEW DIALOGUE directly continues, corrects, or concludes that same causal event. Otherwise keep it unchanged.
 - Independent new event arcs must become separate newCards in chronological order. Do not merge independent arcs merely to fit capacity.
 - FRESH assistant slots are empty storage containers. Ignore their old title/body as facts.
-- RECOVERY MEMORIES contain facts from a managed card whose live slot changed or disappeared. Preserve every still-valid fact in an updated tail or new card.
+- RECOVERY MEMORIES contain facts from a managed card whose live slot changed or disappeared. Preserve every still-valid fact in an updated OPEN TAIL (only when one exists) or in newCards.
 - If all essential independent arcs cannot fit in FRESH SLOT CAPACITY, return WAIT_FOR_SLOT. Never partially save or omit later facts.
 - Batch endings are artificial. Do not invent closure.
 
@@ -119,7 +119,7 @@ Return exactly one JSON object and no markdown fence, commentary, or surrounding
 {"version":1,"decision":"APPLY","tail":{"action":"KEEP","title":"","summary":""},"newCards":[{"title":"...","summary":"..."}]}
 decision is APPLY or WAIT_FOR_SLOT.
 tail.action is KEEP or UPDATE. KEEP requires empty title and summary. UPDATE requires the complete replacement title and summary for OPEN TAIL.
-If there is no OPEN TAIL, tail.action must be KEEP.
+If there is no OPEN TAIL, tail.action must be KEEP and any continuation goes into newCards.
 WAIT_FOR_SLOT requires KEEP with empty fields and an empty newCards array.
 Each JSON title value is raw title text without "[" or "]". Brackets requested by the user prompt are presentation delimiters only; omit them inside JSON. Each title is 1–20 characters. Each summary is one physical line, 1–300 characters, with no carriage return or line feed. Do not start a summary with "[".
 For APPLY, return at least one real UPDATE or one newCards entry.`;
@@ -4240,7 +4240,9 @@ margin-bottom:12px;
 
     function buildAutoAppendInput(plan, dialogueTurns) {
         return '[SEALED MEMORIES — CONTEXT ONLY]\n' + formatMemoryCardsForPrompt(plan.protectedContext) + '\n\n' +
-            '[OPEN TAIL — UPDATE ONLY FOR A DIRECT CONTINUATION]\n' + formatMemoryCardsForPrompt(plan.openTail ? [plan.openTail] : []) + '\n\n' +
+            '[OPEN TAIL — UPDATE ONLY FOR A DIRECT CONTINUATION]\n' + (plan.openTail
+                ? formatMemoryCardsForPrompt([plan.openTail])
+                : '(none — this run has no OPEN TAIL. tail.action must be KEEP. Write every event, including a continuation of an older memory, as newCards.)') + '\n\n' +
             '[RECOVERY MEMORIES — PRESERVE ALL STILL-VALID FACTS]\n' + formatMemoryCardsForPrompt(plan.recoveryContext) + '\n\n' +
             '[FRESH SLOT CAPACITY]\n' + plan.freshSlots.length + ' existing assistant storage slot(s) are available for newCards. Their old contents are not facts.\n\n' +
             '[NEW DIALOGUE]\n' + formatDialogueTurns(dialogueTurns) + '\n\n' +
@@ -4298,13 +4300,21 @@ margin-bottom:12px;
         }
         if (parsed.decision !== 'APPLY') throw new Error('decision은 APPLY 또는 WAIT_FOR_SLOT이어야 합니다.');
         var tailCard = null;
+        var orphanTailCard = null;
         if (action === 'UPDATE') {
-            if (!plan.openTail) throw new Error('OPEN TAIL이 없는데 UPDATE를 요청했습니다.');
             tailCard = validateAutoCardData({ title:parsed.tail.title, summary:parsed.tail.summary }, 'OPEN TAIL');
-            var openTailId = String(getSummaryId(plan.openTail) || '');
-            if (hashText(tailCard.title + '\n' + tailCard.summary) === String(plan.slotFingerprints[openTailId] || '')) {
+            if (!plan.openTail) {
+                // 이어 쓸 꼬리 카드가 없는 실행인데 AI가 UPDATE를 골랐다. 오류로 멈추지 않고 그 카드를
+                // 새 카드로 받아 빈 슬롯에 저장한다. AI가 처음부터 newCards로 답한 것과 같은 결과다.
+                orphanTailCard = tailCard;
                 tailCard = null;
                 action = 'KEEP';
+            } else {
+                var openTailId = String(getSummaryId(plan.openTail) || '');
+                if (hashText(tailCard.title + '\n' + tailCard.summary) === String(plan.slotFingerprints[openTailId] || '')) {
+                    tailCard = null;
+                    action = 'KEEP';
+                }
             }
         } else if (parsed.tail.title !== '' || parsed.tail.summary !== '') {
             throw new Error('tail.action KEEP일 때 title과 summary는 빈 문자열이어야 합니다.');
@@ -4313,10 +4323,18 @@ margin-bottom:12px;
             return { waiting:true, tailAction:'KEEP', tailCard:null, newCards:[] };
         }
         var newCards = parsed.newCards.map(function(card, index) { return validateAutoCardData(card, '새 ' + (index + 1) + '번'); });
+        function cardSignature(card) {
+            return card.title.toLowerCase() + '\n' + card.summary.replace(/\s+/g, ' ').toLowerCase();
+        }
+        if (orphanTailCard && !newCards.some(function(card) { return cardSignature(card) === cardSignature(orphanTailCard); })) {
+            // 꼬리 카드 자리에 쓴 내용은 새 사건보다 앞선 흐름이므로 맨 앞에 둔다. 빈 슬롯이 모자라면 일부만 저장하지 않고 기다린다.
+            if (newCards.length + 1 > plan.freshSlots.length) return { waiting:true, tailAction:'KEEP', tailCard:null, newCards:[] };
+            newCards.unshift(orphanTailCard);
+        }
         if (!tailCard && !newCards.length) throw new Error('APPLY 결과에 실제 UPDATE 또는 새 카드가 없습니다.');
         var signatures = new Set();
         (tailCard ? [tailCard] : []).concat(newCards).forEach(function(card) {
-            var signature = card.title.toLowerCase() + '\n' + card.summary.replace(/\s+/g, ' ').toLowerCase();
+            var signature = cardSignature(card);
             if (signatures.has(signature)) throw new Error('중복된 자동 누적 카드가 있습니다: ' + card.title);
             signatures.add(signature);
         });
