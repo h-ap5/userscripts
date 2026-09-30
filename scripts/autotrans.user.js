@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.1.9
-// @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
+// @version      4.2.0
+// @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 번역 버튼 꾹 눌러 빠른 설정, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -392,70 +392,1368 @@ ${TRANSLATION_ONLY_RULE}`;
   function addStyles() {
     const style = document.createElement('style');
     style.textContent = `
-#trans-setting-panel,
-#trans-result-modal,
-#trans-nudge,
-#trans-dialog {
-  --t-bg: #ffffff;
-  --t-surface: #f7f7f5;
-  --t-raised: #ffffff;
-  --t-border: #d9d7cf;
-  --t-accent: #6a3de8;
-  --t-accent2: #7c5cfc;
-  --t-danger: #d92d20;
-  --t-success: #07845f;
-  --t-warn: #9a6700;
-  --t-tx1: #1a1918;
-  --t-tx2: #62605a;
-  --t-tx3: #85837d;
-  --t-shadow: 0 24px 60px rgba(20, 20, 20, .22), 0 4px 16px rgba(20, 20, 20, .14);
-  --t-font: "Noto Sans KR", "Apple SD Gothic Neo", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+/* ===== 4.2.0 화면: 크랙 색 토큰·Pretendard에 맞춘다. 크랙 토큰이 없을 때만 괄호 안 값이 쓰인다. ===== */
+.trans-ui {
+  --t-page: var(--bg_screen, #141413);
+  --t-pop: var(--bg_elevated_primary, #242321);
+  --t-elev2: var(--surface_tertiary, #2E2D2B);
+  --t-field: var(--bg_screen, #141413);
+  --t-pbg: var(--surface_primary, #FCFCFA);
+  --t-pfg: var(--text_ivory, #0D0D0C);
+  --t-t1: var(--text_primary, #F0EFEB);
+  --t-t2: var(--text_secondary, #A8A69D);
+  --t-t3: var(--text_tertiary, #85837D);
+  --t-line: var(--divider_secondary, #42413D);
+  --t-fline: var(--divider_secondary, #42413D);
+  --t-brand: var(--text_brand, #FF6352);
+  --t-brandfill: var(--surface_brand_primary, #FF4432);
+  --t-ok: var(--alert_success, #2CAA00);
+  --t-warn: var(--alert_warning, #FFAA00);
+  --t-dialog: #0A0A0A;
+  --t-border: rgba(255, 255, 255, .15);
+  --t-hover: rgba(255, 255, 255, .08);
+  --t-shadow: 0 18px 48px rgba(0, 0, 0, .55);
+  --t-dim: rgba(0, 0, 0, .62);
+  --t-font: Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: var(--t-font);
+  color: var(--t-t1);
+  -webkit-font-smoothing: antialiased;
 }
 
-#trans-setting-panel.trans-theme-dark,
-#trans-result-modal.trans-theme-dark,
-#trans-nudge.trans-theme-dark,
-#trans-dialog.trans-theme-dark {
-  --t-bg: #111113;
-  --t-surface: #18181c;
-  --t-raised: #202026;
-  --t-border: #2e2e38;
-  --t-accent: #8b6ffc;
-  --t-accent2: #b4a0ff;
-  --t-danger: #f87171;
-  --t-success: #34d399;
-  --t-warn: #fbbf24;
-  --t-tx1: #eeedf2;
-  --t-tx2: #aaa7b8;
-  --t-tx3: #777486;
-  --t-shadow: 0 24px 60px rgba(0, 0, 0, .72), 0 4px 12px rgba(0, 0, 0, .5);
+.trans-ui.trans-theme-light {
+  --t-page: var(--bg_screen, #FFFFFF);
+  --t-pop: var(--bg_elevated_primary, #FFFFFF);
+  --t-elev2: var(--surface_tertiary, #F7F7F5);
+  --t-field: var(--bg_screen, #FFFFFF);
+  --t-pbg: var(--surface_primary, #0D0D0C);
+  --t-pfg: var(--text_ivory, #FCFCFA);
+  --t-t1: var(--text_primary, #1A1918);
+  --t-t2: var(--text_secondary, #61605A);
+  --t-t3: var(--text_tertiary, #85837D);
+  --t-line: var(--divider_secondary, #DBDAD5);
+  --t-fline: var(--divider_primary, #C7C5BD);
+  --t-brand: var(--text_brand, #FF4432);
+  --t-dialog: #FFFFFF;
+  --t-border: #E6E6E6;
+  --t-hover: rgba(0, 0, 0, .05);
+  --t-shadow: 0 18px 48px rgba(0, 0, 0, .16);
+  --t-dim: rgba(20, 20, 19, .38);
 }
 
-.trans-logo-icon {
-  display: inline-block;
-  width: 15.5px;
-  height: 15.5px;
+.trans-ui *,
+.trans-ui *::before,
+.trans-ui *::after {
+  box-sizing: border-box;
+}
+
+.trans-ui button,
+.trans-ui input,
+.trans-ui select,
+.trans-ui textarea {
+  font-family: inherit;
+  letter-spacing: normal;
+}
+
+.trans-ui [hidden] {
+  display: none !important;
+}
+
+/* 아이콘 옆 한글이 한쪽으로 치우치지 않게 글자 상자를 대문자 높이~기준선으로 잘라 가운데를 맞춘다 */
+.t-tx {
+  text-box: trim-both cap alphabetic;
+}
+
+.t-ico {
+  display: block;
   flex: 0 0 auto;
-  vertical-align: -2px;
-  color: currentColor;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.trans-bubble-btn .trans-logo-icon {
-  width: 15px;
-  height: 15px;
-  opacity: .62;
-  transition: opacity .15s, transform .15s;
+@keyframes t-spin {
+  to { transform: rotate(360deg); }
 }
 
-.trans-bubble-btn:hover .trans-logo-icon {
-  opacity: .95;
-  transform: scale(1.04);
+.t-spin-ico {
+  animation: t-spin .8s linear infinite;
 }
 
-.trans-bubble-btn.trans-has-result .trans-logo-icon {
+/* ----- 배경 ----- */
+#trans-settings-backdrop,
+#trans-result-overlay,
+#trans-quick-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483645 !important;
+  display: none;
+  background: var(--t-dim);
+}
+
+#trans-settings-backdrop.is-open,
+#trans-quick-backdrop.is-open {
+  display: block;
+}
+
+/* ----- 창 공통 ----- */
+#trans-setting-panel,
+#trans-result-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2147483646 !important;
+  display: none;
+  flex-direction: column;
+  background: var(--t-dialog);
+  border: 1px solid var(--t-border);
+  border-radius: 16px;
+  box-shadow: var(--t-shadow);
+  overflow: hidden;
+}
+
+#trans-setting-panel.is-open {
+  display: flex;
+}
+
+.t-head {
+  height: 64px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 0 24px;
+}
+
+.t-head-logo {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  display: flex;
+  color: var(--t-t1);
+}
+
+.t-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--t-t1);
+  white-space: nowrap;
+}
+
+.t-head-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.t-back {
+  display: none !important;
+}
+
+/* 자동 저장 표시: 평소엔 흐리게, 바꾸면 '저장 중…' → 초록 '저장됨' → 다시 흐리게 */
+.t-save-state {
+  height: 24px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  color: var(--t-t3);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background-color .2s, color .2s;
+}
+
+.t-save-state .t-save-spin {
+  display: none;
+}
+
+.t-save-state[data-state="saving"] {
+  color: var(--t-t2);
+}
+
+.t-save-state[data-state="saving"] .t-save-check {
+  display: none;
+}
+
+.t-save-state[data-state="saving"] .t-save-spin {
+  display: block;
+  animation: t-spin .8s linear infinite;
+}
+
+.t-save-state[data-state="saved"] {
+  color: var(--t-ok);
+  background: color-mix(in srgb, var(--t-ok) 14%, transparent);
+}
+
+.t-save-state[data-state="error"] {
+  color: var(--t-brand);
+  background: color-mix(in srgb, var(--t-brand) 14%, transparent);
+}
+
+/* ----- 버튼 ----- */
+.t-pri,
+.t-sec,
+.t-ghost,
+.t-icon-btn,
+.t-info,
+.t-pill,
+.t-chip,
+.t-round-add,
+.t-nav-item,
+.t-q-link {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.t-pri,
+.t-sec,
+.t-ghost {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: background-color .15s, opacity .15s, transform .08s;
+}
+
+.t-pri {
+  height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--t-pbg);
+  color: var(--t-pfg);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.t-sec {
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--t-line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--t-t1);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.t-ghost {
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--t-t2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.t-sec:hover,
+.t-ghost:hover,
+.t-icon-btn:hover,
+.t-q-link:hover,
+.t-nav-item:hover {
+  background: var(--t-hover);
+}
+
+.t-ghost[aria-pressed="true"] {
+  background: var(--t-hover);
+  color: var(--t-t1);
+}
+
+.t-pri:active,
+.t-sec:active {
+  transform: scale(.98);
+}
+
+.t-pri:disabled,
+.t-sec:disabled,
+.t-ghost:disabled,
+.t-icon-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.t-icon-btn {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--t-t1);
+}
+
+.t-icon-btn.t-bordered {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--t-line);
+}
+
+.t-icon-btn.is-busy .t-ico {
+  animation: t-spin .8s linear infinite;
+}
+
+.t-info {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--t-t3);
+}
+
+.t-info:hover {
+  color: var(--t-t1);
+}
+
+.t-pri:focus-visible,
+.t-sec:focus-visible,
+.t-ghost:focus-visible,
+.t-icon-btn:focus-visible,
+.t-info:focus-visible,
+.t-pill:focus-visible,
+.t-chip:focus-visible,
+.t-nav-item:focus-visible,
+.t-q-link:focus-visible,
+.t-seg button:focus-visible,
+.t-switch:focus-visible {
+  outline: 2px solid var(--t-t1);
+  outline-offset: 2px;
+}
+
+/* ----- 입력 ----- */
+.t-group {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.t-label {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--t-t2);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.t-label label {
+  cursor: default;
+}
+
+.t-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.t-grow {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.t-cols {
+  display: flex;
+  gap: 12px;
+}
+
+.t-cols > .t-group:first-child {
+  flex: 2 1 0;
+}
+
+.t-cols > .t-group + .t-group {
+  flex: 1 1 0;
+}
+
+#trans-thinking-container:empty {
+  display: none;
+}
+
+.trans-ui input[type="text"],
+.trans-ui input[type="password"],
+.trans-ui input[type="number"],
+.trans-ui textarea,
+.t-select select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--t-fline);
+  border-radius: 8px;
+  background: var(--t-field);
+  color: var(--t-t1);
+  font-size: 13px;
+  font-weight: 500;
+  outline: none;
+  box-shadow: none;
+}
+
+.trans-ui textarea {
+  height: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  resize: vertical;
+}
+
+.trans-ui input::placeholder,
+.trans-ui textarea::placeholder {
+  color: var(--t-t3);
+}
+
+.trans-ui input[type="text"]:focus,
+.trans-ui input[type="password"]:focus,
+.trans-ui input[type="number"]:focus,
+.trans-ui textarea:focus,
+.t-select select:focus {
+  border-color: var(--t-t3);
+  box-shadow: 0 0 0 3px var(--t-hover);
+}
+
+.trans-ui input[aria-invalid="true"] {
+  border-color: var(--t-brand);
+}
+
+.t-select {
+  position: relative;
+  min-width: 0;
+}
+
+.t-select select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 34px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.t-select > .t-ico {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  transform: translateY(-50%);
+  color: var(--t-t3);
+  pointer-events: none;
+}
+
+.t-select select option,
+.t-select select optgroup {
+  background: var(--t-pop);
+  color: var(--t-t1);
+}
+
+.t-num {
+  width: 88px !important;
+  flex: 0 0 auto;
+}
+
+.t-helper {
+  color: var(--t-t3);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+/* 스위치: 크랙 순정 스위치와 같은 36×20 */
+.t-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--t-line);
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  transition: background-color .15s;
+}
+
+.t-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #FFFFFF;
+  transition: transform .15s, background-color .15s;
+}
+
+.t-switch:checked {
+  background: var(--t-pbg);
+}
+
+.t-switch:checked::after {
+  transform: translateX(16px);
+  background: var(--t-dialog);
+}
+
+.t-toggle {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.t-toggle.t-card {
+  padding: 10px 14px;
+  border: 1px solid var(--t-line);
+  border-radius: 10px;
+}
+
+.t-toggle.t-bare {
+  min-height: 44px;
+}
+
+.t-toggle-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.t-toggle-title {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--t-t1);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.t-toggle-sub {
+  overflow: hidden;
+  color: var(--t-t3);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ----- 알약·칩·구획 ----- */
+.t-pills {
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+}
+
+.t-pill {
+  height: 32px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 14px;
+  border: 1px solid var(--t-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--t-t2);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.t-pill[aria-selected="true"] {
+  border-color: transparent;
+  background: var(--t-pbg);
+  color: var(--t-pfg);
+}
+
+.t-round-add {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px dashed var(--t-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--t-t2);
+}
+
+.t-scroll-x {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.t-scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
+.t-seg {
+  height: 36px;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--t-elev2);
+}
+
+.t-seg button {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--t-t2);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.t-seg button[aria-checked="true"] {
+  background: var(--t-dialog);
+  color: var(--t-t1);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+}
+
+.t-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.t-chip {
+  height: 30px;
+  max-width: 100%;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid var(--t-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--t-t1);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.t-chip:hover {
+  background: var(--t-hover);
+}
+
+.t-chip .t-chip-arrow {
+  color: var(--t-t3);
+}
+
+.t-chip.has-x {
+  padding-right: 4px;
+}
+
+.t-chip-x {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--t-t3);
+  cursor: pointer;
+}
+
+.t-chip-x:hover {
+  background: var(--t-hover);
+  color: var(--t-t1);
+}
+
+.t-chip-add {
+  border-style: dashed;
+  color: var(--t-t2);
+}
+
+.t-slot-empty {
+  color: var(--t-t3);
+  font-size: 12px;
+  line-height: 30px;
+}
+
+.t-status-chip {
+  height: 26px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--t-elev2);
+  color: var(--t-t2);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.t-status-chip::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--t-ok);
+}
+
+.t-status-chip[data-tone="warn"]::before {
+  background: var(--t-warn);
+}
+
+/* ----- 전체 설정 (B안: 왼쪽 목록 + 오른쪽 내용) ----- */
+#trans-setting-panel {
+  width: min(880px, calc(100vw - 32px));
+  height: min(600px, calc(100vh - 32px));
+  height: min(600px, calc(100dvh - 32px));
+}
+
+#trans-setting-panel > .t-head {
+  border-bottom: 1px solid var(--t-line);
+}
+
+.t-set-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+}
+
+.t-nav {
+  width: 248px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border-right: 1px solid var(--t-line);
+  overflow-y: auto;
+}
+
+.t-nav-item {
+  width: 100%;
+  height: 52px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--t-t1);
+  text-align: left;
+}
+
+.t-nav-item[aria-current="page"] {
+  background: var(--t-hover);
+}
+
+.t-tile {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--t-elev2);
+  color: var(--t-t2);
+}
+
+.t-nav-item[aria-current="page"] .t-tile {
+  color: var(--t-t1);
+}
+
+.t-nav-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.t-nav-name {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.t-nav-item[aria-current="page"] .t-nav-name {
+  font-weight: 700;
+}
+
+.t-nav-sum {
+  overflow: hidden;
+  color: var(--t-t3);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.t-nav-chev {
+  display: none;
+  color: var(--t-t3);
+}
+
+.t-panes {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.t-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 28px 28px;
+}
+
+.t-pane-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.t-pane-head h3 {
+  margin: 0;
+  color: var(--t-t1);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 22px;
+}
+
+#trans-custom-prompt {
+  min-height: 200px;
+}
+
+#trans-ooc-text {
+  min-height: 84px;
+}
+
+#trans-firebase-script {
+  min-height: 110px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.t-guide-foot {
+  justify-content: space-between;
+}
+
+/* ----- 빠른 설정 (말풍선 번역 버튼을 꾹 누르면) ----- */
+#trans-quick {
+  position: fixed;
+  z-index: 2147483646 !important;
+  display: none;
+  flex-direction: column;
+  width: 340px;
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  border: 1px solid var(--t-line);
+  border-radius: 14px;
+  background: var(--t-pop);
+  box-shadow: var(--t-shadow);
+  overscroll-behavior: contain;
+}
+
+#trans-quick.is-open {
+  display: flex;
+}
+
+.t-q-head {
+  height: 48px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 16px;
+}
+
+.t-q-title {
+  color: var(--t-t1);
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+#trans-quick .t-save-state[data-state="idle"] {
+  display: none;
+}
+
+.t-q-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 16px 16px;
+}
+
+.t-q-section {
+  padding: 6px 16px;
+  border-top: 1px solid var(--t-line);
+}
+
+.t-q-links {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  border-top: 1px solid var(--t-line);
+}
+
+.t-q-link {
+  width: 100%;
+  height: 40px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--t-t1);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.t-q-link > .t-ico:first-child {
+  color: var(--t-t2);
+}
+
+.t-q-link .t-q-link-text {
+  flex: 1 1 auto;
+}
+
+.t-q-link .t-q-link-tail {
+  color: var(--t-t3);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.t-q-link > .t-ico:last-child {
+  color: var(--t-t3);
+}
+
+.t-q-foot {
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--t-line);
+}
+
+.t-q-foot .t-pri {
+  width: 100%;
+}
+
+/* ----- 번역 결과 (A안: 번역문 중심) ----- */
+#trans-result-overlay {
+  z-index: 2147483645 !important;
+}
+
+#trans-result-modal {
+  width: min(760px, calc(100vw - 32px));
+  height: min(680px, calc(100vh - 32px));
+  height: min(680px, calc(100dvh - 32px));
+}
+
+.t-res-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px 16px;
+}
+
+.t-res-top {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#trans-history-pills {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.t-reroll-group {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.t-reroll-group .t-select:first-child {
+  width: 132px;
+}
+
+.t-reroll-group .t-select:nth-child(2) {
+  width: 124px;
+}
+
+.t-modal-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 24px 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+#trans-result-content {
+  min-height: 200px;
+  flex: 1 1 auto;
+  font-size: 15px;
+  resize: none;
+}
+
+.t-orig {
+  min-height: 200px;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--t-elev2);
+  color: var(--t-t2);
+  font-size: 15px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.t-replace {
+  height: 30px;
+  min-width: 0;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.t-replace.is-disabled,
+.t-replace-form.is-disabled {
+  opacity: .4;
+  pointer-events: none;
+}
+
+.t-replace-label {
+  height: 20px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--t-t2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#trans-modal-slot-list {
+  min-width: 0;
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
+}
+
+.t-replace-form {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.t-meta {
+  height: 20px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--t-t3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+#trans-apply-status,
+#trans-live-status {
+  color: var(--t-t2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#trans-apply-status:empty,
+#trans-live-status:empty {
+  display: none;
+}
+
+#trans-apply-status.ok {
+  color: var(--t-ok);
+}
+
+#trans-apply-status.err {
+  color: var(--t-brand);
+}
+
+#trans-retry-live {
+  align-self: flex-start;
+}
+
+.t-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 24px 16px;
+  border-top: 1px solid var(--t-line);
+}
+
+.t-foot-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.t-only-mobile {
+  display: none !important;
+}
+
+/* ----- 설명 팝업 (i 버튼) ----- */
+#trans-popover {
+  position: fixed;
+  z-index: 2147483647 !important;
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  width: 300px;
+  max-width: calc(100vw - 24px);
+  padding: 12px 14px 14px;
+  border: 1px solid var(--t-line);
+  border-radius: 12px;
+  background: var(--t-pop);
+  box-shadow: var(--t-shadow);
+}
+
+#trans-popover.is-open {
+  display: flex;
+}
+
+.t-pop-head {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.t-pop-title {
+  color: var(--t-t1);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.t-pop-text {
+  margin: 0;
+  color: var(--t-t2);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+/* ----- 알림 ----- */
+#trans-nudge {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 2147483647 !important;
+  min-height: 44px;
+  max-width: min(520px, calc(100vw - 24px));
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 18px 10px 14px;
+  border: 1px solid var(--t-line);
+  border-radius: 22px;
+  background: var(--t-pop);
+  box-shadow: var(--t-shadow);
+  color: var(--t-t1);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  opacity: 0;
+  transform: translate(-50%, 14px);
+  transition: opacity .18s, transform .18s;
+  pointer-events: none;
+}
+
+#trans-nudge.active {
   opacity: 1;
+  transform: translate(-50%, 0);
 }
 
+#trans-nudge.has-action {
+  padding-right: 7px;
+  pointer-events: auto;
+}
+
+.t-nudge-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#trans-nudge.ok .t-nudge-icon {
+  color: var(--t-ok);
+}
+
+#trans-nudge.err .t-nudge-icon {
+  color: var(--t-brand);
+}
+
+.t-nudge-text {
+  min-width: 0;
+}
+
+.t-nudge-action {
+  height: 30px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 3px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--t-elev2);
+  color: var(--t-t1);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ----- 확인 창 ----- */
+#trans-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--t-dim);
+}
+
+.t-dialog-card {
+  width: min(400px, 100%);
+  padding: 20px;
+  border: 1px solid var(--t-border);
+  border-radius: 16px;
+  background: var(--t-dialog);
+  box-shadow: var(--t-shadow);
+  color: var(--t-t1);
+}
+
+.t-dialog-title {
+  margin: 0 0 8px;
+  color: var(--t-t1);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 24px;
+}
+
+.t-dialog-message {
+  max-height: min(50vh, 360px);
+  overflow-y: auto;
+  color: var(--t-t2);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.t-dialog-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.t-btn {
+  height: 44px;
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.t-btn-ghost {
+  border: 1px solid var(--t-line);
+  background: transparent;
+  color: var(--t-t1);
+  font-weight: 600;
+}
+
+.t-btn-primary {
+  border: 0;
+  background: var(--t-pbg);
+  color: var(--t-pfg);
+}
+
+.t-btn-danger {
+  border: 0;
+  background: var(--t-brandfill);
+  color: #FFFFFF;
+}
+
+.t-dialog-actions .t-btn:focus-visible {
+  outline: 2px solid var(--t-t1);
+  outline-offset: 2px;
+}
+
+/* ----- 사이드바 메뉴 ----- */
 #trans-menu-btn .trans-sidebar-logo-icon {
   display: block;
   width: 24px;
@@ -466,8 +1764,7 @@ ${TRANSLATION_ONLY_RULE}`;
   stroke: var(--icon_secondary) !important;
 }
 
-/* 크랙 기본 메뉴의 [&_svg]:fill-icon_tertiary가
-   선형 번역 로고 내부를 채우지 못하게 강제한다. */
+/* 크랙 기본 메뉴의 [&_svg]:fill-icon_tertiary가 선형 번역 로고 내부를 채우지 못하게 강제한다. */
 #trans-menu-btn .trans-sidebar-logo-icon rect,
 #trans-menu-btn .trans-sidebar-logo-icon path {
   fill: none !important;
@@ -478,610 +1775,135 @@ ${TRANSLATION_ONLY_RULE}`;
   color: var(--text_primary);
 }
 
-#trans-direct-apply-btn .trans-logo-icon,
-.t-modal-title .trans-logo-icon,
-.t-check-title .trans-logo-icon {
-  margin-right: 5px;
-}
-
-#trans-setting-panel {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 2147483647 !important;
-  display: none;
-  width: 370px;
-  max-width: calc(100vw - 28px);
-  max-height: 75vh;
-  overflow-y: auto;
-  background: var(--t-bg);
-  border: 1px solid var(--t-border);
-  border-radius: 14px;
-  box-shadow: var(--t-shadow);
-  font-family: var(--t-font);
-  color: var(--t-tx1);
-}
-
-#trans-panel-header {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: var(--t-bg);
-  border-bottom: 1px solid var(--t-border);
-  padding: 16px 18px 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-#trans-panel-header h4 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--t-tx1);
-}
-
-.trans-window-close-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
+/* ----- 말풍선 번역 버튼 ----- */
+.trans-bubble-btn {
+  position: relative;
   padding: 0;
-  border-radius: 8px;
-  border: 1px solid var(--t-border);
-  background: var(--t-raised);
-  color: var(--t-tx2);
-  cursor: pointer;
-  font-family: var(--t-font);
-  font-size: 13px;
-  line-height: 1;
-  transition: background .15s, border-color .15s, color .15s, transform .08s;
-}
-
-.trans-window-close-btn:hover {
-  border-color: color-mix(in srgb, var(--t-tx3) 45%, var(--t-border));
-  background: var(--t-surface);
-  color: var(--t-tx1);
-}
-
-.trans-window-close-btn:active {
-  transform: scale(.94);
-}
-
-.trans-window-close-btn:focus-visible {
-  outline: 2px solid var(--t-accent);
-  outline-offset: 2px;
-}
-
-#trans-panel-body {
-  padding: 16px 18px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.t-section {
-  background: var(--t-surface);
-  border: 1px solid var(--t-border);
-  border-radius: 10px;
-  padding: 13px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.t-section-title {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--t-tx3);
-}
-
-.t-field {
-  display: flex;
-  flex-direction: column;
-}
-
-.trans-label {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--t-tx2);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-#trans-api-provider,
-#trans-api-key,
-#trans-firebase-script,
-#trans-model-select,
-#trans-mode-select,
-#trans-modal-mode,
-#trans-prompt-title,
-#trans-custom-prompt,
-#trans-replace-find,
-#trans-replace-with,
-#trans-slot-find,
-#trans-slot-with,
-#g-think-val,
-#trans-modal-model,
-#trans-history-select,
-#trans-ooc-text,
-#trans-ooc-turns {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 8px 10px;
-  background: var(--t-raised);
-  border: 1px solid var(--t-border);
-  border-radius: 8px;
-  color: var(--t-tx1);
-  font-family: var(--t-font);
-  font-size: 13px;
-  outline: none;
-}
-
-#trans-api-provider:focus,
-#trans-api-key:focus,
-#trans-firebase-script:focus,
-#trans-model-select:focus,
-#trans-mode-select:focus,
-#trans-modal-mode:focus,
-#trans-prompt-title:focus,
-#trans-custom-prompt:focus,
-#g-think-val:focus,
-#trans-modal-model:focus,
-#trans-history-select:focus,
-#trans-ooc-text:focus,
-#trans-ooc-turns:focus {
-  border-color: var(--t-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--t-accent) 20%, transparent);
-}
-
-.t-select-arrow {
-  appearance: none;
-  -webkit-appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, var(--t-tx2) 50%), linear-gradient(135deg, var(--t-tx2) 50%, transparent 50%);
-  background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%;
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
-  padding-right: 30px !important;
-}
-
-#trans-custom-prompt,
-#trans-firebase-script,
-#trans-ooc-text {
-  resize: vertical;
-  min-height: 76px;
-  line-height: 1.55;
-}
-
-#trans-custom-prompt {
-  min-height: 118px;
-}
-
-.t-check-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px;
-  border: 1px solid var(--t-border);
-  border-radius: 8px;
-  background: var(--t-raised);
-  color: var(--t-tx1);
-  cursor: pointer;
-  user-select: none;
-}
-
-.t-check-row input {
-  width: 16px;
-  height: 16px;
-  margin-top: 2px;
-  accent-color: var(--t-accent);
-}
-
-.t-check-title {
-  display: block;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.t-check-desc {
-  display: block;
-  margin-top: 2px;
-  color: var(--t-tx3);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.t-prompt-slot-editor {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
-  gap: 7px;
-  align-items: center;
-}
-
-#trans-prompt-title[aria-invalid="true"] {
-  border-color: var(--t-danger);
-}
-
-#trans-prompt-title:disabled {
-  opacity: .66;
-  cursor: not-allowed;
-}
-
-#trans-undo-prompt-slot[hidden] {
-  display: none;
-}
-
-.t-inline-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-  gap: 7px;
-  align-items: center;
-}
-
-.t-mini-btn {
-  min-height: 35px;
-  padding: 7px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--t-border);
-  background: var(--t-raised);
-  color: var(--t-tx1);
-  cursor: pointer;
-  font-family: var(--t-font);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.t-mini-btn.primary {
-  background: var(--t-accent);
-  border-color: var(--t-accent);
-  color: #fff;
-}
-
-.t-slot-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-height: 28px;
-}
-
-.t-slot-empty {
-  color: var(--t-tx3);
-  font-size: 12px;
-  line-height: 28px;
-}
-
-.t-slot-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  min-height: 28px;
-  padding: 5px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--t-border);
-  background: var(--t-raised);
-  color: var(--t-tx1);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.t-slot-chip button {
-  border: none;
+  border: 0;
   background: transparent;
-  color: var(--t-tx3);
   cursor: pointer;
-  font-size: 12px;
-  padding: 0;
+  overflow: visible !important;
+  color: var(--text_primary, currentColor);
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
 }
 
-.t-replace-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--t-border);
-  border-radius: 10px;
-  background: var(--t-surface);
+/* 크랙 메시지 줄의 svg 채우기 규칙이 선형 아이콘 안을 칠하지 못하게 한다 */
+.trans-bubble-btn .t-ico {
+  fill: none !important;
+  stroke: currentColor !important;
 }
 
-.t-replace-panel-title {
-  color: var(--t-tx2);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.t-modal-slots {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.t-apply-slot {
-  max-width: 100%;
-  padding: 6px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--t-border);
-  background: var(--t-raised);
-  color: var(--t-tx1);
-  cursor: pointer;
-  font-family: var(--t-font);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.t-btn-row {
-  display: flex;
-  gap: 8px;
-}
-
-.t-btn,
-#trans-direct-apply-btn,
-#trans-close-modal,
-#trans-patch-modal,
-#trans-reroll-btn,
-.trans-nav-btn {
-  font-family: var(--t-font);
-  transition: opacity .15s, transform .08s, background .15s, border-color .15s;
-}
-
-.t-btn {
-  flex: 1;
-  padding: 9px 13px;
-  border-radius: 8px;
-  border: 1px solid var(--t-border);
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.t-btn:active,
-#trans-direct-apply-btn:active,
-#trans-patch-modal:active {
-  transform: scale(.98);
-}
-
-.t-btn:disabled,
-#trans-direct-apply-btn:disabled,
-#trans-patch-modal:disabled,
-#trans-reroll-btn:disabled,
-.trans-nav-btn:disabled {
-  opacity: .45;
-  cursor: not-allowed;
-}
-
-.t-btn-ghost {
-  background: var(--t-raised);
-  color: var(--t-tx2);
-}
-
-.t-btn-primary,
-#trans-direct-apply-btn,
-#trans-patch-modal {
-  background: var(--t-accent);
-  border: 1px solid var(--t-accent);
-  color: #fff;
-}
-
-#trans-direct-apply-btn {
-  width: 100%;
-  padding: 11px 13px;
-  border-radius: 10px;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 800;
-}
-
-#trans-status-box {
+.trans-bubble-btn .t-bb {
   display: none;
-  padding: 10px 12px;
-  border-radius: 8px;
-  font-size: 12px;
-  line-height: 1.5;
-  word-break: break-word;
-  background: var(--t-raised);
-  border: 1px solid var(--t-border);
-  color: var(--t-tx2);
+  width: 15px;
+  height: 15px;
+  pointer-events: none;
 }
 
-#trans-status-box.active {
+.trans-bubble-btn .t-bb-logo {
+  display: block;
+  opacity: .62;
+  transition: opacity .15s, transform .15s;
+}
+
+.trans-bubble-btn:hover .t-bb-logo {
+  opacity: .95;
+  transform: scale(1.04);
+}
+
+.trans-bubble-btn.trans-has-result .t-bb-logo,
+.trans-bubble-btn.is-open .t-bb-logo,
+.trans-bubble-btn.is-hold .t-bb-logo {
+  opacity: 1;
+}
+
+.trans-bubble-btn .t-bb-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  display: none;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--bg_screen, #141413);
+  border-radius: 50%;
+  background: var(--surface_brand_primary, #FF4432);
+  pointer-events: none;
+}
+
+.trans-bubble-btn.trans-has-result .t-bb-dot {
   display: block;
 }
 
-#trans-status-box.ok {
-  border-color: color-mix(in srgb, var(--t-success) 45%, var(--t-border));
-  color: var(--t-success);
-}
-
-#trans-status-box.err {
-  border-color: color-mix(in srgb, var(--t-danger) 45%, var(--t-border));
-  color: var(--t-danger);
-}
-
-#trans-status-box.info {
-  border-color: color-mix(in srgb, var(--t-accent) 45%, var(--t-border));
-  color: var(--t-accent2);
-}
-
-#trans-result-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 2147483646 !important;
-  display: none;
-  background: rgba(0, 0, 0, .42);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-}
-
-#trans-result-overlay.trans-theme-dark {
-  background: rgba(0, 0, 0, .65);
-}
-
-#trans-result-modal {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 2147483647 !important;
-  display: none;
-  flex-direction: column;
-  width: min(680px, calc(100vw - 28px));
-  box-sizing: border-box;
-  max-height: calc(100vh - 28px);
-  max-height: calc(100dvh - 28px);
-  background: var(--t-bg);
-  border: 1px solid var(--t-border);
-  border-radius: 14px;
-  box-shadow: var(--t-shadow);
-  font-family: var(--t-font);
-  color: var(--t-tx1);
-  overflow: hidden;
-}
-
-.t-modal-header,
-.t-modal-footer {
-  flex: 0 0 auto;
-  background: var(--t-surface);
-  border-color: var(--t-border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.t-modal-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 30px;
-  grid-template-areas: "title reroll close";
-  padding: 15px 18px;
-  border-bottom: 1px solid var(--t-border);
-}
-
-.t-modal-title {
-  grid-area: title;
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 8px;
-  font-size: 15px;
-  font-weight: 800;
-  color: var(--t-tx1);
-}
-
-.t-modal-title-badge {
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--t-accent) 30%, var(--t-border));
-  color: var(--t-accent2);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.t-reroll-group {
-  grid-area: reroll;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-#trans-modal-model,
-#trans-modal-mode {
-  width: 150px;
-  font-size: 12px;
-}
-
-#trans-modal-mode {
-  width: 145px;
-}
-
-#trans-reroll-btn {
-  padding: 8px 12px;
-  border: 1px solid var(--t-border);
-  border-radius: 8px;
-  background: var(--t-raised);
-  color: var(--t-tx1);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-#trans-close-result-btn {
-  grid-area: close;
-}
-
-.t-modal-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  padding: 16px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-#trans-result-content {
-  width: 100%;
-  box-sizing: border-box;
-  height: 38vh;
-  min-height: 180px;
-  resize: vertical;
-  padding: 13px 15px;
-  background: var(--t-surface);
-  border: 1px solid var(--t-border);
-  border-radius: 10px;
-  color: var(--t-tx1);
-  font-family: var(--t-font);
-  font-size: 14px;
-  line-height: 1.72;
-  outline: none;
-}
-
-#trans-result-content:focus {
-  border-color: var(--t-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--t-accent) 18%, transparent);
-}
-
-#trans-cost-info {
-  min-height: 16px;
-  color: var(--t-tx3);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-#trans-cost-info:not(:empty) {
-  color: var(--t-warn);
-}
-
-#trans-apply-status,
-#trans-live-status {
-  min-height: 18px;
-  color: var(--t-tx2);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-#trans-apply-status.ok {
-  color: var(--t-success);
-}
-
-#trans-apply-status.err {
-  color: var(--t-danger);
-}
-
-#trans-live-status:empty {
+.trans-bubble-btn.is-busy .t-bb-logo,
+.trans-bubble-btn.is-done .t-bb-logo,
+.trans-bubble-btn.is-fail .t-bb-logo,
+.trans-bubble-btn.is-busy .t-bb-dot,
+.trans-bubble-btn.is-done .t-bb-dot,
+.trans-bubble-btn.is-fail .t-bb-dot {
   display: none;
 }
 
-#trans-retry-live {
-  align-self: flex-start;
+.trans-bubble-btn.is-busy .t-bb-spin {
+  display: block;
+  animation: t-spin .8s linear infinite;
 }
 
+.trans-bubble-btn.is-done .t-bb-check {
+  display: block;
+  color: var(--alert_success, #2CAA00);
+}
+
+.trans-bubble-btn.is-fail .t-bb-alert {
+  display: block;
+  color: var(--text_brand, #FF6352);
+}
+
+.trans-bubble-btn.is-open,
+.trans-bubble-btn.is-hold {
+  background: var(--state_hover, rgba(127, 127, 127, .16));
+}
+
+.trans-bubble-btn .t-bb-ring {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.trans-bubble-btn .t-bb-ring circle {
+  fill: none;
+  stroke-width: 2;
+}
+
+.trans-bubble-btn .t-bb-ring .t-ring-track {
+  stroke: var(--divider_secondary, rgba(127, 127, 127, .4));
+}
+
+.trans-bubble-btn .t-bb-ring .t-ring-fill {
+  stroke: var(--text_primary, currentColor);
+  stroke-linecap: round;
+  stroke-dasharray: 91.1;
+  stroke-dashoffset: 91.1;
+  transform: rotate(-90deg);
+  transform-origin: 16px 16px;
+}
+
+.trans-bubble-btn.is-hold .t-bb-ring {
+  opacity: 1;
+}
+
+.trans-bubble-btn.is-hold .t-bb-ring .t-ring-fill {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 420ms linear;
+}
+
+/* ----- 말풍선 안 번역문 ----- */
 .trans-live-source {
   display: none !important;
 }
@@ -1109,476 +1931,1229 @@ ${TRANSLATION_ONLY_RULE}`;
   margin-bottom: 8px;
   padding: 2px 7px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--t-accent, #6a3de8) 12%, transparent);
-  color: var(--t-accent, #6a3de8);
+  background: color-mix(in srgb, var(--text_brand, #FF4432) 12%, transparent);
+  color: var(--text_brand, #FF4432);
   font-size: 10px;
   font-weight: 800;
 }
 
-.t-modal-footer {
-  padding: 13px 18px max(13px, env(safe-area-inset-bottom, 0px));
-  border-top: 1px solid var(--t-border);
-  flex-wrap: wrap;
-}
-
-.t-history-nav,
-.t-modal-action-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.trans-nav-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  border: 1px solid var(--t-border);
-  background: var(--t-raised);
-  color: var(--t-tx2);
-  cursor: pointer;
-}
-
-#trans-history-count {
-  min-width: 44px;
-  text-align: center;
-  color: var(--t-tx2);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-#trans-history-select {
-  width: auto;
-  min-width: 170px;
-  max-width: min(280px, 42vw);
-  height: 32px;
-  padding-top: 5px;
-  padding-bottom: 5px;
-  font-size: 12px;
-}
-
-#trans-close-modal,
-#trans-patch-modal {
-  padding: 9px 15px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 800;
-}
-
-#trans-close-modal {
-  border: 1px solid var(--t-border);
-  background: var(--t-raised);
-  color: var(--t-tx2);
-}
-
-#trans-nudge {
-  position: fixed;
-  left: 50%;
-  bottom: 28px;
-  transform: translate(-50%, 14px);
-  z-index: 2147483647 !important;
-  max-width: min(460px, calc(100vw - 28px));
-  padding: 11px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--t-border);
-  background: var(--t-bg);
-  box-shadow: var(--t-shadow);
-  color: var(--t-tx1);
-  font-family: var(--t-font);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.45;
-  opacity: 0;
-  pointer-events: none;
-}
-
-#trans-nudge.active {
-  opacity: 1;
-  transform: translate(-50%, 0);
-}
-
-#trans-nudge.info {
-  border-color: color-mix(in srgb, var(--t-accent) 45%, var(--t-border));
-  color: var(--t-accent2);
-}
-
-#trans-nudge.ok {
-  border-color: color-mix(in srgb, var(--t-success) 45%, var(--t-border));
-  color: var(--t-success);
-}
-
-#trans-nudge.err {
-  border-color: color-mix(in srgb, var(--t-danger) 45%, var(--t-border));
-  color: var(--t-danger);
-}
-
-#trans-dialog {
-  position: fixed;
-  inset: 0;
-  z-index: 2147483647 !important;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  box-sizing: border-box;
-  background: rgba(0, 0, 0, .42);
-  font-family: var(--t-font);
-}
-
-#trans-dialog.trans-theme-dark {
-  background: rgba(0, 0, 0, .65);
-}
-
-.t-dialog-card {
-  width: min(400px, 100%);
-  box-sizing: border-box;
-  padding: 20px;
-  border: 1px solid var(--t-border);
-  border-radius: 14px;
-  background: var(--t-bg);
-  box-shadow: var(--t-shadow);
-  color: var(--t-tx1);
-}
-
-.t-dialog-title {
-  margin: 0 0 8px;
-  font-size: 15px;
-  font-weight: 800;
-  line-height: 1.4;
-}
-
-.t-dialog-message {
-  max-height: min(50vh, 360px);
-  overflow-y: auto;
-  color: var(--t-tx2);
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.t-dialog-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 18px;
-}
-
-.t-dialog-actions .t-btn:focus-visible {
-  outline: 2px solid var(--t-accent);
-  outline-offset: 2px;
-}
-
-.t-btn-danger {
-  background: var(--t-danger);
-  border-color: var(--t-danger);
-  color: #fff;
-}
-
-@media (min-width: 768px) {
-  #trans-setting-panel {
-    width: clamp(620px, 62vw, 860px);
-    max-width: calc(100vw - 64px);
-    max-height: 82vh;
-  }
-
+/* ----- 넓은 화면 ----- */
+@media (min-width: 1100px) {
   #trans-result-modal {
-    width: clamp(760px, 82vw, 1200px);
-    max-width: calc(100vw - 64px);
-  }
-
-  #trans-result-content {
-    height: min(50vh, 600px);
+    width: min(820px, calc(100vw - 64px));
   }
 }
 
+/* ----- 폰: 아래에서 올라오는 시트 ----- */
 @media (max-width: 560px) {
-  #trans-setting-panel {
-    box-sizing: border-box;
-    max-height: calc(100vh - 16px);
-    max-height: calc(100dvh - 16px);
-  }
-
+  #trans-setting-panel,
   #trans-result-modal {
-    top: calc(8px + env(safe-area-inset-top, 0px));
-    left: 8px;
-    width: calc(100vw - 16px);
-    height: calc(100vh - 16px);
-    height: calc(100dvh - 16px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-    max-height: none;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100vw;
+    height: calc(100vh - 44px);
+    height: calc(100dvh - 44px);
     transform: none;
-    border-radius: 12px;
+    border: 0;
+    border-top: 1px solid var(--t-border);
+    border-radius: 20px 20px 0 0;
   }
 
-  .t-modal-header {
-    grid-template-columns: minmax(0, 1fr) 44px;
-    grid-template-areas:
-      "title close"
-      "reroll reroll";
-    align-items: center;
-    padding: 11px 12px;
-    gap: 9px;
+  #trans-setting-panel::before,
+  #trans-result-modal::before,
+  #trans-quick::before {
+    content: "";
+    width: 36px;
+    height: 4px;
+    flex: 0 0 auto;
+    margin: 8px auto 0;
+    border-radius: 999px;
+    background: var(--t-line);
   }
 
-  .t-modal-footer {
-    align-items: stretch;
-    flex-direction: column;
-    padding: 11px 12px;
+  .t-head {
+    height: 52px;
+    padding: 0 8px 0 20px;
   }
 
-  .t-reroll-group,
-  .t-modal-action-row,
-  .t-history-nav {
-    width: 100%;
+  .t-head .t-icon-btn {
+    width: 44px;
+    height: 44px;
   }
 
-  .t-history-nav {
-    justify-content: space-between;
+  #trans-setting-panel > .t-head {
+    border-bottom: 0;
   }
 
-  .t-modal-body {
-    padding: 12px;
+  #trans-setting-panel[data-view="detail"] > .t-head {
+    gap: 4px;
+    padding-left: 4px;
   }
 
-  .t-modal-title-badge {
+  #trans-setting-panel[data-view="detail"] .t-back {
+    display: inline-flex !important;
+  }
+
+  #trans-setting-panel[data-view="detail"] .t-head-logo {
     display: none;
   }
 
-  .trans-window-close-btn {
+  .t-set-body {
+    flex-direction: column;
+  }
+
+  .t-nav {
+    width: auto;
+    gap: 2px;
+    padding: 4px 12px;
+    border-right: 0;
+  }
+
+  #trans-setting-panel[data-view="detail"] .t-nav {
+    display: none;
+  }
+
+  #trans-setting-panel[data-view="list"] .t-panes {
+    display: none;
+  }
+
+  .t-nav-item {
+    height: 64px;
+    padding: 0 8px;
+  }
+
+  .t-nav-item[aria-current="page"] {
+    background: transparent;
+  }
+
+  .t-nav-item .t-tile {
+    color: var(--t-t1);
+  }
+
+  .t-nav-chev {
+    display: block;
+  }
+
+  .t-pane {
+    padding: 4px 16px 24px;
+  }
+
+  .t-pane-head {
+    display: none;
+  }
+
+  .t-cols {
+    gap: 8px;
+  }
+
+  .trans-ui input[type="text"],
+  .trans-ui input[type="password"],
+  .trans-ui input[type="number"],
+  .t-select select {
+    height: 44px;
+    font-size: 16px;
+  }
+
+  .trans-ui textarea {
+    font-size: 16px;
+  }
+
+  .t-seg {
+    height: 44px;
+  }
+
+  .t-pill,
+  .t-round-add {
+    height: 36px;
+  }
+
+  .t-round-add {
+    width: 36px;
+  }
+
+  .t-chip {
+    height: 36px;
+  }
+
+  .t-ghost {
+    height: 44px;
+  }
+
+  .t-icon-btn.t-bordered {
     width: 44px;
     height: 44px;
   }
 
-  #trans-modal-model,
-  #trans-reroll-btn,
-  #trans-close-modal,
-  #trans-patch-modal,
-  #trans-history-select {
-    flex: 1;
-    min-width: 0;
-    min-height: 44px;
+  /* 빠른 설정 */
+  #trans-quick {
+    top: auto !important;
+    right: 0;
+    bottom: 0;
+    left: 0 !important;
+    width: 100vw;
+    max-height: calc(100dvh - 44px);
+    border: 0;
+    border-top: 1px solid var(--t-border);
+    border-radius: 20px 20px 0 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
-  #trans-history-select {
-    max-width: none;
-    height: 44px;
+  .t-q-head {
+    height: 52px;
   }
 
-  .trans-nav-btn {
+  .t-q-link {
+    height: 48px;
+  }
+
+  .t-q-foot .t-pri {
+    height: 48px;
+  }
+
+  /* 번역 결과: 목록 줄 → 번역문 → 지침·모델·다시 번역 → 치환 칩 → 비용 → 버튼 순서 */
+  #trans-result-modal {
+    overflow-y: auto;
+  }
+
+  #trans-result-modal > .t-head {
+    border-bottom: 0;
+  }
+
+  .t-res-bar,
+  .t-modal-body {
+    display: contents;
+  }
+
+  .t-res-top {
+    order: 1;
+    flex: 0 0 auto;
+    padding: 0 12px 0 16px;
+  }
+
+  #trans-result-content,
+  .t-orig {
+    order: 2;
+    width: auto;
+    align-self: stretch;
+    height: min(46dvh, 330px);
+    min-height: 160px;
+    flex: 0 0 auto;
+    margin: 16px 16px 0;
+  }
+
+  .t-reroll-group {
+    order: 3;
+    margin: 16px 16px 0;
+  }
+
+  .t-reroll-group .t-select:first-child,
+  .t-reroll-group .t-select:nth-child(2) {
+    width: auto;
+    flex: 1 1 0;
+  }
+
+  .t-reroll-group .t-icon-btn.t-bordered {
     width: 44px;
     height: 44px;
-    flex: 0 0 44px;
   }
 
-  #trans-result-content {
-    height: min(40dvh, 320px);
-    min-height: 140px;
-    resize: none;
+  .t-replace {
+    order: 4;
+    height: 36px;
+    margin: 16px 16px 0;
   }
 
+  .t-replace-label {
+    display: none;
+  }
+
+  #trans-modal-slot-list {
+    -webkit-mask-image: linear-gradient(to right, #000 82%, transparent);
+    mask-image: linear-gradient(to right, #000 82%, transparent);
+  }
+
+  .t-replace-form {
+    order: 5;
+    flex-wrap: wrap;
+    margin: 8px 16px 0;
+  }
+
+  .t-meta {
+    order: 6;
+    margin: 16px 16px 0;
+  }
+
+  #trans-apply-status,
+  #trans-live-status,
+  #trans-retry-live {
+    order: 7;
+    margin: 8px 16px 0;
+  }
+
+  .t-foot {
+    order: 9;
+    position: sticky;
+    bottom: 0;
+    margin-top: auto;
+    padding: 14px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    background: var(--t-dialog);
+  }
+
+  .t-foot-actions {
+    flex: 1 1 auto;
+    margin-left: 0;
+  }
+
+  .t-foot-actions > * {
+    height: 48px;
+    flex: 1 1 0;
+  }
+
+  .t-only-pc {
+    display: none !important;
+  }
+
+  .t-only-mobile {
+    display: inline-flex !important;
+  }
+
+  /* 폰에서는 알림이 시트의 버튼을 가리지 않게 화면 위쪽에 띄운다 */
   #trans-nudge {
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    top: calc(8px + env(safe-area-inset-top, 0px));
+    bottom: auto;
+    transform: translate(-50%, -14px);
   }
 
-  .t-dialog-actions .t-btn {
-    min-height: 44px;
+  #trans-nudge.active {
+    transform: translate(-50%, 0);
   }
-
-  .t-inline-form {
-    grid-template-columns: 1fr;
-  }
-
-  .t-prompt-slot-editor {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  #trans-prompt-title {
-    grid-column: 1 / -1;
-  }
-}`;
+}
+`;
     document.head.appendChild(style);
   }
 
+  // --- 4.2.0 화면 조각 ---
+  const svgIcon = (body, size = 16, extra = '') => `<svg class="t-ico${extra ? ' ' + extra : ''}" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
+  const UI_PATHS = {
+    logo: '<rect x="3.5" y="3.5" width="17" height="17" rx="4"/><path d="M8 16.5 12 7.5l4 9"/><path d="M9.6 13.4h4.8"/>',
+    x: '<path d="M6 6l12 12M18 6L6 18"/>',
+    chev: '<path d="M6 9l6 6 6-6"/>',
+    chevR: '<path d="M9 6l6 6-6 6"/>',
+    back: '<path d="M15 5l-7 7 7 7"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    pencil: '<path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3z"/>',
+    trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12.5a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5L18 7M9 7V4.5h6V7"/>',
+    reroll: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.2h-4.2"/>',
+    info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.2"/><path d="M12 7.9v.2"/>',
+    alert: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.6v5.2"/><path d="M12 16.2v.2"/>',
+    book: '<path d="M5 5.5a2 2 0 0 1 2-2h11.5V17H7a2 2 0 0 0-2 2z"/><path d="M5 19a2 2 0 0 0 2 2h11.5v-4"/>',
+    chat: '<path d="M4.5 5.5h15v10.5h-8.5L6.5 19.5V16h-2z"/>',
+    swap: '<path d="M4 8h14l-3.5-3.5M20 16H6l3.5 3.5"/>',
+    plug: '<path d="M9 3.5V8M15 3.5V8M6.5 8h11v2.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 16v4.5"/>',
+    eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>',
+    arrowR: '<path d="M5 12h13M13 7l5 5-5 5"/>',
+    gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+    spin: '<circle cx="12" cy="12" r="8.5" style="opacity:.25"/><path d="M12 3.5a8.5 8.5 0 0 1 8.5 8.5"/>',
+  };
+  const UI_ICON = name => svgIcon(UI_PATHS[name], name === 'x' ? 20 : 16);
+  const uiIcon = (name, size, extra) => svgIcon(UI_PATHS[name], size, extra);
+  const SETTINGS_SECTIONS = [
+    { key: 'trans', icon: 'logo', name: '번역', desc: '말풍선 번역 버튼을 누를 때 쓰는 설정' },
+    { key: 'guide', icon: 'book', name: '지침', desc: '슬롯마다 번역 지침을 따로 둬요' },
+    { key: 'ooc', icon: 'chat', name: 'OOC 자동 주입', desc: '내가 보내는 채팅 끝에 붙는 문구' },
+    { key: 'slots', icon: 'swap', name: '키워드 치환', desc: '번역 결과에서 바로 바꿀 단어' },
+    { key: 'api', icon: 'plug', name: 'API 연결', desc: '번역에 쓸 AI 서비스와 키' },
+  ];
+  const MODEL_OPTIONS = [
+    ['gemini-3.8-flash', 'Gemini 3.8 Flash', '3.8 Flash'],
+    ['gemini-3.7-flash', 'Gemini 3.7 Flash', '3.7 Flash'],
+    ['gemini-3.6-flash', 'Gemini 3.6 Flash', '3.6 Flash'],
+    ['gemini-3.1-pro-preview', 'Gemini 3.1 Pro Preview', '3.1 Pro'],
+    ['gemini-3.1-flash-lite-preview', 'Gemini 3.1 Flash Lite Preview', '3.1 Flash Lite'],
+    ['gemini-3-flash-preview', 'Gemini 3 Flash Preview', '3 Flash'],
+    ['gemini-3.5-flash', 'Gemini 3.5 Flash', '3.5 Flash'],
+    ['gemini-2.5-pro', 'Gemini 2.5 Pro', '2.5 Pro'],
+    ['gemini-2.5-flash', 'Gemini 2.5 Flash', '2.5 Flash'],
+    ['deepseek-v4-flash', 'DeepSeek V4 Flash', 'DeepSeek V4 Flash'],
+    ['deepseek-v4-pro', 'DeepSeek V4 Pro', 'DeepSeek V4 Pro'],
+  ];
+  const selectWrap = (inner, extra = '') => `<div class="t-select${extra ? ' ' + extra : ''}">${inner}${UI_ICON('chev')}</div>`;
+  const infoButton = (key, name) => `<button type="button" class="t-info" data-info="${key}" aria-label="${name} 설명">${UI_ICON('info')}</button>`;
+  const saveStateMarkup = () => `<span class="t-save-state" data-state="idle" role="status" aria-live="polite">${uiIcon('check', 14, 't-save-check')}${uiIcon('spin', 14, 't-save-spin')}<span class="t-tx t-save-label">자동 저장</span></span>`;
+
   function createUI() {
+    const backdrop = document.createElement('div');
+    backdrop.id = 'trans-settings-backdrop';
+    backdrop.className = 'trans-ui';
+    document.body.appendChild(backdrop);
+
     const panel = document.createElement('div');
     panel.id = 'trans-setting-panel';
+    panel.className = 'trans-ui';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-labelledby', 'trans-settings-title');
+    panel.dataset.view = 'detail';
+    panel.dataset.section = 'trans';
+    const navItems = SETTINGS_SECTIONS.map(s => `<button type="button" class="t-nav-item" data-section="${s.key}" aria-current="false">
+        <span class="t-tile">${uiIcon(s.icon, 17)}</span>
+        <span class="t-nav-text"><span class="t-nav-name">${s.name}</span><span class="t-nav-sum" data-sum="${s.key}"></span></span>
+        <span class="t-nav-chev">${uiIcon('chevR', 18)}</span>
+      </button>`).join('');
+    const paneHead = key => {
+      const s = SETTINGS_SECTIONS.find(item => item.key === key);
+      return `<div class="t-pane-head"><h3>${s.name}</h3><span class="t-helper">${s.desc}</span></div>`;
+    };
     panel.innerHTML = `
-<div id="trans-panel-header">
-  <h4>초월 번역 설정</h4>
-  <button id="trans-close-settings-btn" class="trans-window-close-btn" type="button" aria-label="설정 닫기" title="닫기">✕</button>
+<div class="t-head">
+  <button type="button" class="t-icon-btn t-back" id="trans-settings-back" aria-label="설정 목록으로">${uiIcon('back', 22)}</button>
+  <span class="t-head-logo">${uiIcon('logo', 20)}</span>
+  <h2 id="trans-settings-title" class="t-title t-tx">초월 번역 설정</h2>
+  <div class="t-head-right">
+    ${saveStateMarkup()}
+    <button id="trans-close-settings-btn" class="t-icon-btn" type="button" aria-label="설정 닫기" title="닫기">${UI_ICON('x')}</button>
+  </div>
 </div>
-<div id="trans-panel-body">
-  <div class="t-section">
-    <div class="t-section-title">API 설정</div>
-    <div class="t-field">
-      <label class="trans-label" for="trans-api-provider">제공자</label>
-      <select id="trans-api-provider" class="t-select-arrow">
-        <option value="google">Google API</option>
-        <option value="firebase">Firebase</option>
-        <option value="deepseek">DeepSeek</option>
-      </select>
-    </div>
-    <div class="t-field">
-      <label class="trans-label" id="trans-key-label" for="trans-api-key">API Key</label>
-      <input type="password" id="trans-api-key" placeholder="API Key를 입력하세요">
-      <textarea id="trans-firebase-script" placeholder="Firebase Config 코드를 붙여넣으세요" style="display:none;"></textarea>
-    </div>
-  </div>
-
-  <div class="t-section">
-    <div class="t-section-title">모델 & 추론</div>
-    <div class="t-field">
-      <label class="trans-label" for="trans-model-select">모델 선택</label>
-      <select id="trans-model-select" class="t-select-arrow">
-        <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
-        <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
-        <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-        <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
-        <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite Preview</option>
-        <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-        <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
-        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
-      </select>
-    </div>
-    <div id="trans-thinking-container" data-current-model=""></div>
-  </div>
-
-  <div class="t-section">
-    <div class="t-section-title">번역 설정</div>
-    <div class="t-field">
-      <label class="trans-label" for="trans-mode-select">번역 방식</label>
-      <select id="trans-mode-select" class="t-select-arrow">
-        <option value="ko">한글 전용 (기본)</option>
-        <option value="en">영문 혼용</option>
-      </select>
-    </div>
-    <div class="t-field">
-      <label class="trans-label" for="trans-prompt-title">커스텀 슬롯 제목</label>
-      <div class="t-prompt-slot-editor">
-        <input id="trans-prompt-title" type="text" maxlength="60" placeholder="커스텀 슬롯을 추가하면 제목을 정할 수 있어요" disabled>
-        <button class="t-mini-btn primary" id="trans-add-prompt-slot" type="button">＋ 추가</button>
-        <button class="t-mini-btn" id="trans-delete-prompt-slot" type="button" disabled>삭제</button>
-        <button class="t-mini-btn" id="trans-undo-prompt-slot" type="button" hidden>되돌리기</button>
+<div class="t-set-body">
+  <nav class="t-nav" aria-label="설정 목록">${navItems}</nav>
+  <div class="t-panes">
+    <section class="t-pane" data-pane="trans" aria-label="번역">
+      ${paneHead('trans')}
+      <div class="t-cols">
+        <div class="t-group">
+          <div class="t-label"><label class="t-tx" for="trans-model-select">모델</label></div>
+          ${selectWrap(`<select id="trans-model-select">${MODEL_OPTIONS.map(([id, label]) => `<option value="${id}">${label}</option>`).join('')}</select>`)}
+        </div>
+        <div id="trans-thinking-container" class="t-group" data-current-model=""></div>
       </div>
-    </div>
-    <label class="t-check-row" for="trans-instant-apply">
-      <input id="trans-instant-apply" type="checkbox">
-      <span>
-        <span class="t-check-title">${TRANSLATOR_ICON_SVG}말풍선 클릭 시 즉시 교체</span>
-        <span class="t-check-desc">체크하면 결과 팝업 없이 최신 메시지를 바로 패치하고 예상 금액을 nudge로 보여줍니다.</span>
-      </span>
-    </label>
-    <div class="t-field">
-      <label class="trans-label" for="trans-custom-prompt">번역 지침서</label>
-      <textarea id="trans-custom-prompt" rows="6"></textarea>
-    </div>
+      <div class="t-group">
+        <div class="t-label"><label class="t-tx" for="trans-mode-select">번역 지침</label></div>
+        <div class="t-row">
+          ${selectWrap('<select id="trans-mode-select"></select>', 't-grow')}
+          <button type="button" class="t-ghost" data-go="guide">${UI_ICON('pencil')}<span class="t-tx">지침 편집</span></button>
+        </div>
+      </div>
+      <div class="t-toggle t-card">
+        <div class="t-toggle-text">
+          <div class="t-toggle-title"><label class="t-tx" for="trans-instant-apply">말풍선 누르면 바로 교체</label>${infoButton('instant', '말풍선 누르면 바로 교체')}</div>
+          <div class="t-toggle-sub">결과 창 없이 최신 답변을 바로 바꿔요</div>
+        </div>
+        <input id="trans-instant-apply" class="t-switch" type="checkbox" role="switch">
+      </div>
+    </section>
+    <section class="t-pane" data-pane="guide" aria-label="지침" hidden>
+      ${paneHead('guide')}
+      <div class="t-row">
+        <div id="trans-guide-pills" class="t-pills t-scroll-x" role="tablist" aria-label="지침 슬롯"></div>
+        <button type="button" class="t-round-add" id="trans-add-prompt-slot" aria-label="지침 슬롯 추가" title="지침 슬롯 추가">${UI_ICON('plus')}</button>
+        <button type="button" class="t-ghost" id="trans-undo-prompt-slot" hidden>${UI_ICON('reroll')}<span class="t-tx">되돌리기</span></button>
+      </div>
+      <div class="t-group" id="trans-slot-name-group">
+        <div class="t-label"><label class="t-tx" for="trans-prompt-title">이름</label></div>
+        <div class="t-row">
+          <input id="trans-prompt-title" type="text" maxlength="60" placeholder="지침 슬롯 이름">
+          <button type="button" class="t-ghost" id="trans-delete-prompt-slot">${UI_ICON('trash')}<span class="t-tx">삭제</span></button>
+        </div>
+      </div>
+      <div class="t-group">
+        <div class="t-label"><label class="t-tx" for="trans-custom-prompt">지침 내용</label></div>
+        <textarea id="trans-custom-prompt" rows="9"></textarea>
+      </div>
+      <div class="t-row t-guide-foot">
+        <button type="button" class="t-ghost" id="trans-reset-btn">${UI_ICON('reroll')}<span class="t-tx" id="trans-reset-label">기본 지침으로</span></button>
+        <span class="t-helper" id="trans-guide-count"></span>
+      </div>
+    </section>
+    <section class="t-pane" data-pane="ooc" aria-label="OOC 자동 주입" hidden>
+      ${paneHead('ooc')}
+      <div class="t-toggle t-card">
+        <div class="t-toggle-text">
+          <div class="t-toggle-title"><label class="t-tx" for="trans-ooc-apply">내 채팅에 OOC 붙이기</label></div>
+          <div class="t-toggle-sub">보낼 때만 붙이고, 지난 턴에서는 지워요</div>
+        </div>
+        <input id="trans-ooc-apply" class="t-switch" type="checkbox" role="switch">
+      </div>
+      <div class="t-group">
+        <div class="t-label"><label class="t-tx" for="trans-ooc-text">OOC 문구</label></div>
+        <textarea id="trans-ooc-text" rows="3" placeholder="예: Please answer in English OOC."></textarea>
+      </div>
+      <div class="t-group">
+        <div class="t-label"><label class="t-tx" for="trans-ooc-turns">유지할 턴</label>${infoButton('ooc-turns', '유지할 턴')}</div>
+        <div class="t-row"><input type="number" id="trans-ooc-turns" class="t-num" min="1" value="10"><span class="t-helper">턴 지나면 기록에서 빠짐</span></div>
+      </div>
+    </section>
+    <section class="t-pane" data-pane="slots" aria-label="키워드 치환" hidden>
+      ${paneHead('slots')}
+      <div class="t-group">
+        <div class="t-label"><label class="t-tx" for="trans-slot-find">새 치환</label></div>
+        <div class="t-row">
+          <input id="trans-slot-find" type="text" placeholder="찾을 말">
+          <span class="t-chip-arrow" style="color: var(--t-t3)">${UI_ICON('arrowR')}</span>
+          <input id="trans-slot-with" type="text" placeholder="바꿀 말">
+          <button class="t-sec" id="trans-add-slot-btn" type="button" style="height: 36px"><span class="t-tx">추가</span></button>
+        </div>
+      </div>
+      <div class="t-group">
+        <div class="t-label"><span class="t-tx" id="trans-slot-count-label">저장한 치환</span>${infoButton('slots', '저장한 치환')}</div>
+        <div class="t-chips" id="trans-slot-list"></div>
+      </div>
+    </section>
+    <section class="t-pane" data-pane="api" aria-label="API 연결" hidden>
+      ${paneHead('api')}
+      <div class="t-group">
+        <div class="t-label"><span class="t-tx">제공자</span></div>
+        <div class="t-seg" id="trans-provider-seg" role="radiogroup" aria-label="제공자">
+          <button type="button" role="radio" data-provider="google" aria-checked="false"><span class="t-tx">Google</span></button>
+          <button type="button" role="radio" data-provider="firebase" aria-checked="false"><span class="t-tx">Firebase</span></button>
+          <button type="button" role="radio" data-provider="deepseek" aria-checked="false"><span class="t-tx">DeepSeek</span></button>
+        </div>
+        <select id="trans-api-provider" hidden>
+          <option value="google">Google API</option>
+          <option value="firebase">Firebase</option>
+          <option value="deepseek">DeepSeek</option>
+        </select>
+      </div>
+      <div class="t-group">
+        <div class="t-label"><label class="t-tx" id="trans-key-label" for="trans-api-key">API Key</label></div>
+        <div class="t-row" id="trans-key-row">
+          <input type="password" id="trans-api-key" placeholder="API 키를 넣어 주세요" autocomplete="off" spellcheck="false">
+          <button type="button" class="t-icon-btn t-bordered" id="trans-key-eye" aria-label="키 보기" aria-pressed="false">${uiIcon('eye', 18)}</button>
+        </div>
+        <textarea id="trans-firebase-script" placeholder="Firebase 설정(firebaseConfig) 코드를 붙여넣으세요" spellcheck="false" style="display:none;"></textarea>
+      </div>
+      <div class="t-row">
+        <span class="t-status-chip" id="trans-key-status"><span class="t-tx">키 저장됨</span></span>
+        <span class="t-helper">키는 탬퍼몽키 저장소에만 있어요</span>
+      </div>
+    </section>
   </div>
-
-  <div class="t-section">
-    <div class="t-section-title">OOC 자동 주입 (휘발성)</div>
-    <label class="t-check-row" for="trans-ooc-apply">
-      <input id="trans-ooc-apply" type="checkbox">
-      <span>
-        <span class="t-check-title">내 채팅에 OOC 문구 자동 삽입</span>
-        <span class="t-check-desc">지정한 턴이 지나면 과거 대화 기록에서 쥐도새도 모르게 지워집니다.</span>
-      </span>
-    </label>
-    <div class="t-field">
-      <label class="trans-label" for="trans-ooc-text">OOC 문구 내용</label>
-      <textarea id="trans-ooc-text" rows="3" placeholder="예: Please answer in English OOC."></textarea>
-    </div>
-    <div class="t-field">
-      <label class="trans-label" for="trans-ooc-turns">유지할 턴 수</label>
-      <input type="number" id="trans-ooc-turns" min="1" value="10">
-    </div>
-  </div>
-
-  <div class="t-section">
-    <div class="t-section-title">키워드 치환 슬롯</div>
-    <div class="t-inline-form">
-      <input id="trans-slot-find" type="text" placeholder="찾을 말">
-      <input id="trans-slot-with" type="text" placeholder="바꿀 말">
-      <button class="t-mini-btn primary" id="trans-add-slot-btn" type="button">추가</button>
-    </div>
-    <div class="t-slot-list" id="trans-slot-list"></div>
-  </div>
-
-  <div class="t-btn-row">
-    <button class="t-btn t-btn-ghost" id="trans-reset-btn" type="button">↺ 초기화</button>
-    <button class="t-btn t-btn-primary" id="trans-save-btn" type="button">저장</button>
-  </div>
-
-  <button id="trans-direct-apply-btn" type="button" style="display: none;">${TRANSLATOR_ICON_SVG}최신 답변 바로 번역 (팝업 없이)</button>
+</div>
+<div hidden>
+  <button id="trans-save-btn" type="button">저장</button>
+  <button id="trans-direct-apply-btn" type="button">최신 답변 바로 번역</button>
   <div id="trans-status-box"></div>
 </div>`;
     document.body.appendChild(panel);
 
     const overlay = document.createElement('div');
     overlay.id = 'trans-result-overlay';
+    overlay.className = 'trans-ui';
     document.body.appendChild(overlay);
 
     const resultModal = document.createElement('div');
     resultModal.id = 'trans-result-modal';
+    resultModal.className = 'trans-ui';
+    resultModal.setAttribute('role', 'dialog');
+    resultModal.setAttribute('aria-modal', 'true');
+    resultModal.setAttribute('aria-labelledby', 'trans-result-title');
     resultModal.innerHTML = `
-<div class="t-modal-header">
-  <div class="t-modal-title">${TRANSLATOR_ICON_SVG}번역 결과 <span class="t-modal-title-badge">초월 번역</span></div>
-  <div class="t-reroll-group">
-    <select id="trans-modal-mode" class="t-select-arrow" aria-label="번역 방식 빠른 전환"></select>
-    <select id="trans-modal-model" class="t-select-arrow">
-      <option value="gemini-3.8-flash">3.8 Flash</option>
-      <option value="gemini-3.7-flash">3.7 Flash</option>
-      <option value="gemini-3.6-flash">3.6 Flash</option>
-      <option value="gemini-3.1-pro-preview">3.1 Pro</option>
-      <option value="gemini-3.1-flash-lite-preview">3.1 Flash Lite</option>
-      <option value="gemini-3-flash-preview">3 Flash</option>
-      <option value="gemini-3.5-flash">3.5 Flash</option>
-      <option value="gemini-2.5-pro">2.5 Pro</option>
-      <option value="gemini-2.5-flash">2.5 Flash</option>
-      <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
-      <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
-    </select>
-    <button id="trans-reroll-btn" type="button">↻ 다시 돌리기</button>
+<div class="t-head">
+  <span class="t-head-logo">${uiIcon('logo', 20)}</span>
+  <h2 id="trans-result-title" class="t-title t-tx">번역 결과</h2>
+  <div class="t-head-right">
+    <button id="trans-close-result-btn" class="t-icon-btn" type="button" aria-label="번역 결과 닫기" title="닫기">${UI_ICON('x')}</button>
   </div>
-  <button id="trans-close-result-btn" class="trans-window-close-btn" type="button" aria-label="번역 결과 닫기" title="닫기">✕</button>
+</div>
+<div class="t-res-bar">
+  <div class="t-res-top">
+    <div id="trans-history-pills" class="t-pills t-scroll-x" role="tablist" aria-label="번역 결과 목록"></div>
+    <button type="button" class="t-ghost t-orig-toggle t-only-mobile" data-orig-toggle aria-pressed="false" style="margin-left: auto">${UI_ICON('eye')}<span class="t-tx">원문 보기</span></button>
+  </div>
+  <div class="t-reroll-group">
+    ${selectWrap('<select id="trans-modal-mode" aria-label="번역 지침"></select>')}
+    ${selectWrap(`<select id="trans-modal-model" aria-label="모델">${MODEL_OPTIONS.map(([id, , short]) => `<option value="${id}">${short}</option>`).join('')}</select>`)}
+    <button id="trans-reroll-btn" class="t-icon-btn t-bordered" type="button" aria-label="다시 번역" title="다시 번역">${uiIcon('reroll', 18)}</button>
+  </div>
 </div>
 <div class="t-modal-body">
-  <textarea id="trans-result-content" placeholder="번역 결과가 여기에 표시됩니다..."></textarea>
-  <div class="t-replace-panel">
-    <div class="t-replace-panel-title">키워드 전체 교체</div>
-    <div class="t-inline-form">
-      <input id="trans-replace-find" type="text" placeholder="찾을 말">
-      <input id="trans-replace-with" type="text" placeholder="바꿀 말">
-      <button class="t-mini-btn primary" id="trans-apply-replace-btn" type="button">전체 교체</button>
-    </div>
-    <div class="t-modal-slots" id="trans-modal-slot-list"></div>
+  <textarea id="trans-result-content" aria-label="번역 결과" placeholder="번역 결과가 여기에 표시됩니다..."></textarea>
+  <div id="trans-orig-view" class="t-orig" aria-label="원문" hidden></div>
+  <div class="t-replace">
+    <span class="t-replace-label">${uiIcon('swap', 15)}<span class="t-tx">치환</span></span>
+    <div class="t-chips t-scroll-x" id="trans-modal-slot-list"></div>
+    <button type="button" class="t-chip t-chip-add" id="trans-replace-toggle" aria-expanded="false">${uiIcon('plus', 13)}<span class="t-tx">직접</span></button>
   </div>
-  <div id="trans-cost-info"></div>
+  <div class="t-replace-form" id="trans-replace-form" hidden>
+    <input id="trans-replace-find" type="text" placeholder="찾을 말">
+    <span style="color: var(--t-t3)">${UI_ICON('arrowR')}</span>
+    <input id="trans-replace-with" type="text" placeholder="바꿀 말">
+    <button class="t-sec" id="trans-apply-replace-btn" type="button" style="height: 36px"><span class="t-tx">전체 교체</span></button>
+  </div>
+  <div class="t-meta" id="trans-cost-info"></div>
   <div id="trans-apply-status" aria-live="polite"></div>
   <div id="trans-live-status" aria-live="polite"></div>
-  <button class="t-mini-btn" id="trans-retry-live" type="button" hidden>화면 표시 다시 시도</button>
+  <button class="t-ghost" id="trans-retry-live" type="button" hidden>${UI_ICON('reroll')}<span class="t-tx">화면 표시 다시 시도</span></button>
 </div>
-<div class="t-modal-footer">
-  <div class="t-history-nav">
+<div class="t-foot">
+  <button type="button" class="t-ghost t-orig-toggle t-only-pc" data-orig-toggle aria-pressed="false">${UI_ICON('eye')}<span class="t-tx">원문 보기</span></button>
+  <div hidden>
     <button class="trans-nav-btn" id="trans-prev-btn" type="button" aria-label="이전">◀</button>
-    <select id="trans-history-select" class="t-select-arrow" aria-label="번역 결과 선택" title="보존된 번역 결과 선택"></select>
-    <span id="trans-history-count" aria-live="polite">1 / 1</span>
+    <select id="trans-history-select" aria-label="번역 결과 선택"></select>
+    <span id="trans-history-count">1 / 1</span>
     <button class="trans-nav-btn" id="trans-next-btn" type="button" aria-label="다음">▶</button>
   </div>
-  <div class="t-modal-action-row">
-    <button id="trans-close-modal" type="button">닫기</button>
-    <button id="trans-patch-modal" type="button">이 결과로 교체하기</button>
+  <div class="t-foot-actions">
+    <button id="trans-close-modal" class="t-sec" type="button">닫기</button>
+    <button id="trans-patch-modal" class="t-pri" type="button">이 결과로 교체</button>
   </div>
 </div>`;
     document.body.appendChild(resultModal);
 
+    const quickBackdrop = document.createElement('div');
+    quickBackdrop.id = 'trans-quick-backdrop';
+    quickBackdrop.className = 'trans-ui';
+    document.body.appendChild(quickBackdrop);
+
+    const quick = document.createElement('div');
+    quick.id = 'trans-quick';
+    quick.className = 'trans-ui';
+    quick.setAttribute('role', 'dialog');
+    quick.setAttribute('aria-label', '초월 번역 빠른 설정');
+    quick.tabIndex = -1;
+    document.body.appendChild(quick);
+
+    const popover = document.createElement('div');
+    popover.id = 'trans-popover';
+    popover.className = 'trans-ui';
+    popover.setAttribute('role', 'dialog');
+    popover.innerHTML = `<div class="t-pop-head"><span class="t-pop-title t-tx"></span><button type="button" class="t-icon-btn t-pop-close" aria-label="설명 닫기" style="width: 24px; height: 24px; color: var(--t-t2)">${uiIcon('x', 14)}</button></div><p class="t-pop-text"></p>`;
+    document.body.appendChild(popover);
+
     const nudge = document.createElement('div');
     nudge.id = 'trans-nudge';
+    nudge.className = 'trans-ui';
+    nudge.setAttribute('role', 'status');
+    nudge.setAttribute('aria-live', 'polite');
     document.body.appendChild(nudge);
 
     syncTranslatorTheme();
     bindUIEvents();
+  }
+
+  // --- 4.2.0 화면 동작: 전체 설정(목록형)·빠른 설정(말풍선 버튼 꾹 누르기)·자동 저장 표시·설명 팝업 ---
+  const uiHooks = {};
+  const isMobileLayout = () => Boolean(window.matchMedia?.('(max-width: 560px)').matches);
+  const escapeHtmlText = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  const BUBBLE_TITLE_IDLE = '초월 번역 · 꾹 누르면 빠른 설정';
+  const BUBBLE_TITLE_SAVED = '번역 결과 다시 열기 · 꾹 누르면 빠른 설정';
+  const BUBBLE_BUTTON_INNER = `${uiIcon('logo', 15, 't-bb t-bb-logo')}${uiIcon('spin', 15, 't-bb t-bb-spin')}${uiIcon('check', 15, 't-bb t-bb-check')}${uiIcon('alert', 15, 't-bb t-bb-alert')}<span class="t-bb-dot"></span><svg class="t-bb-ring" viewBox="0 0 32 32" aria-hidden="true"><circle class="t-ring-track" cx="16" cy="16" r="14.5"/><circle class="t-ring-fill" cx="16" cy="16" r="14.5"/></svg>`;
+  const HOLD_RING_MS = 130;
+  const HOLD_OPEN_MS = 550;
+  const INFO_TEXT = {
+    instant: ['말풍선 누르면 바로 교체', '번역이 끝나면 결과 창을 띄우지 않고 최신 답변을 바로 교체해요. 든 비용은 아래 알림에 잠깐 떠요.'],
+    think: ['추론', 'Gemini 3 계열은 추론 단계를, 2.5 계열은 추론 토큰 예산(128 이상)을 정해요. 높을수록 느려지고 비용이 늘어요.'],
+    'ooc-turns': ['유지할 턴', '정한 턴이 지나면 지난 대화 기록에서 OOC 문구를 지워요.'],
+    slots: ['저장한 치환', '번역 결과 창의 치환 칩을 누르면 번역문에서 찾을 말을 바꿀 말로 한 번에 바꿔요.'],
+  };
+
+  // ----- 설명 팝업 (i 버튼) -----
+  let popoverAnchor = null;
+  function openInfoPopover(anchor) {
+    const pop = document.getElementById('trans-popover');
+    if (!pop || !anchor) return;
+    if (popoverAnchor === anchor && pop.classList.contains('is-open')) {
+      closeInfoPopover();
+      return;
+    }
+    const preset = anchor.dataset.info ? INFO_TEXT[anchor.dataset.info] : null;
+    const title = preset ? preset[0] : (anchor.dataset.infoTitle || '');
+    const text = preset ? preset[1] : (anchor.dataset.infoText || '');
+    if (!text) return;
+    pop.querySelector('.t-pop-title').textContent = title;
+    pop.querySelector('.t-pop-text').textContent = text;
+    syncTranslatorTheme(true);
+    pop.classList.add('is-open');
+    popoverAnchor = anchor;
+    const rect = anchor.getBoundingClientRect();
+    const width = pop.offsetWidth;
+    const height = pop.offsetHeight;
+    const left = Math.min(Math.max(8, rect.left - 12), window.innerWidth - width - 8);
+    let top = rect.bottom + 8;
+    if (top + height > window.innerHeight - 8) top = Math.max(8, rect.top - height - 8);
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  }
+
+  function closeInfoPopover() {
+    document.getElementById('trans-popover')?.classList.remove('is-open');
+    popoverAnchor = null;
+  }
+
+  // ----- 자동 저장 표시 -----
+  let autoSaveTimer = 0;
+  let saveFlashTimer = 0;
+  const SAVE_LABELS = { idle: '자동 저장', saving: '저장 중…', saved: '저장됨', error: '저장 안 됨' };
+  function setSaveState(state) {
+    document.querySelectorAll('.t-save-state').forEach(el => {
+      if (el.dataset.state !== state) el.dataset.state = state;
+      const label = el.querySelector('.t-save-label');
+      if (label && label.textContent !== SAVE_LABELS[state]) label.textContent = SAVE_LABELS[state];
+    });
+  }
+
+  function flashSaved() {
+    clearTimeout(saveFlashTimer);
+    setSaveState('saved');
+    saveFlashTimer = setTimeout(() => setSaveState('idle'), 1800);
+    refreshSettingsSummaries();
+  }
+
+  // 설정 창·빠른 설정에서 값을 바꾸면 잠깐 모았다가 저장한다. 저장하는 동안과 끝난 뒤를 제목 줄 오른쪽에 보여 준다.
+  function scheduleAutoSave() {
+    clearTimeout(autoSaveTimer);
+    clearTimeout(saveFlashTimer);
+    setSaveState('saving');
+    autoSaveTimer = setTimeout(() => {
+      try {
+        uiHooks.saveNow?.();
+        flashSaved();
+      } catch (error) {
+        console.warn('[Crack Translator] 자동 저장 실패', error);
+        setSaveState('error');
+      }
+    }, 350);
+  }
+
+  // ----- 전체 설정 -----
+  const byId = id => document.getElementById(id);
+  function hasApiKey() {
+    const provider = byId('trans-api-provider')?.value || 'google';
+    return provider === 'firebase'
+      ? Boolean(byId('trans-firebase-script')?.value.trim())
+      : Boolean(byId('trans-api-key')?.value.trim());
+  }
+
+  function setSummary(key, text) {
+    const el = document.querySelector(`#trans-setting-panel [data-sum="${key}"]`);
+    if (el && el.textContent !== text) el.textContent = text;
+  }
+
+  function refreshSettingsSummaries() {
+    const model = byId('trans-model-select');
+    const think = byId('g-think-val');
+    const mode = byId('trans-mode-select');
+    if (!model || !mode) return;
+    const thinkLabel = !think ? '' : think.tagName === 'SELECT' ? (think.selectedOptions[0]?.textContent || '') : `예산 ${think.value}`;
+    setSummary('trans', [model.selectedOptions[0]?.textContent || '', thinkLabel].filter(Boolean).join(' · '));
+    const promptLength = (byId('trans-custom-prompt')?.value || '').length;
+    setSummary('guide', `${(mode.selectedOptions[0]?.textContent || '').replace(' (기본)', '')} · ${promptLength.toLocaleString('ko-KR')}자`);
+    setSummary('ooc', byId('trans-ooc-apply')?.checked ? `켜짐 · ${byId('trans-ooc-turns')?.value || '10'}턴` : '꺼짐');
+    setSummary('slots', replacementSlots.length ? `${replacementSlots.length}개` : '없음');
+    const provider = byId('trans-api-provider')?.value || 'google';
+    const providerName = { google: 'Google', firebase: 'Firebase', deepseek: 'DeepSeek' }[provider] || provider;
+    setSummary('api', `${providerName} · ${hasApiKey() ? '키 저장됨' : '키 없음'}`);
+  }
+
+  function refreshKeyStatus() {
+    const chip = byId('trans-key-status');
+    if (!chip) return;
+    const ok = hasApiKey();
+    const tone = ok ? 'ok' : 'warn';
+    if (chip.dataset.tone !== tone) chip.dataset.tone = tone;
+    const label = chip.querySelector('.t-tx');
+    const text = ok ? '키 저장됨' : '키 없음';
+    if (label && label.textContent !== text) label.textContent = text;
+  }
+
+  function refreshProviderSeg() {
+    const provider = byId('trans-api-provider')?.value || 'google';
+    document.querySelectorAll('#trans-provider-seg [data-provider]').forEach(button => {
+      button.setAttribute('aria-checked', String(button.dataset.provider === provider));
+    });
+    const keyRow = byId('trans-key-row');
+    if (keyRow) keyRow.hidden = provider === 'firebase';
+    refreshKeyStatus();
+  }
+
+  function refreshGuideCount() {
+    const count = byId('trans-guide-count');
+    if (count) count.textContent = `${(byId('trans-custom-prompt')?.value || '').length.toLocaleString('ko-KR')}자`;
+  }
+
+  function refreshGuideUI() {
+    const modeSelect = byId('trans-mode-select');
+    const wrap = byId('trans-guide-pills');
+    if (!modeSelect || !wrap) return;
+    const current = modeSelect.value;
+    wrap.replaceChildren(...Array.from(modeSelect.options).map(option => {
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 't-pill';
+      pill.setAttribute('role', 'tab');
+      pill.setAttribute('aria-selected', String(option.value === current));
+      const label = document.createElement('span');
+      label.className = 't-tx';
+      label.textContent = option.textContent.replace(' (기본)', '');
+      pill.append(label);
+      pill.addEventListener('click', () => {
+        if (modeSelect.value === option.value) return;
+        modeSelect.value = option.value;
+        modeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      return pill;
+    }));
+    const isCustom = current.startsWith('custom-');
+    const nameGroup = byId('trans-slot-name-group');
+    if (nameGroup) nameGroup.hidden = !isCustom;
+    const resetLabel = byId('trans-reset-label');
+    if (resetLabel) resetLabel.textContent = isCustom ? '지침 비우기' : '기본 지침으로';
+    refreshGuideCount();
+  }
+
+  function showSettingsSection(key, { detail = true } = {}) {
+    const panel = byId('trans-setting-panel');
+    if (!panel) return;
+    const section = SETTINGS_SECTIONS.some(item => item.key === key) ? key : 'trans';
+    panel.dataset.section = section;
+    panel.querySelectorAll('.t-pane').forEach(pane => { pane.hidden = pane.dataset.pane !== section; });
+    panel.querySelectorAll('.t-nav-item').forEach(item => {
+      item.setAttribute('aria-current', item.dataset.section === section ? 'page' : 'false');
+    });
+    if (detail) panel.dataset.view = 'detail';
+    const title = byId('trans-settings-title');
+    const next = isMobileLayout() && panel.dataset.view === 'detail'
+      ? SETTINGS_SECTIONS.find(item => item.key === section).name
+      : '초월 번역 설정';
+    if (title && title.textContent !== next) title.textContent = next;
+    const panes = panel.querySelector('.t-panes');
+    if (panes) panes.scrollTop = 0;
+    closeInfoPopover();
+  }
+
+  function openSettingsPanel(section = '') {
+    const panel = byId('trans-setting-panel');
+    const backdrop = byId('trans-settings-backdrop');
+    if (!panel) return;
+    closeQuickPanel();
+    uiHooks.refreshSettings?.();
+    if (isMobileLayout() && !section) {
+      panel.dataset.view = 'list';
+      showSettingsSection(panel.dataset.section || 'trans', { detail: false });
+    } else {
+      showSettingsSection(section || panel.dataset.section || 'trans');
+    }
+    panel.style.display = '';
+    panel.classList.add('is-open');
+    backdrop?.classList.add('is-open');
+    syncTranslatorTheme(true);
+  }
+
+  function closeSettingsPanel() {
+    byId('trans-setting-panel')?.classList.remove('is-open');
+    byId('trans-settings-backdrop')?.classList.remove('is-open');
+    closeInfoPopover();
+  }
+
+  // ----- 번역 결과: 원문 보기 -----
+  let origViewOn = false;
+  function setOrigView(on) {
+    origViewOn = Boolean(on);
+    const textarea = byId('trans-result-content');
+    const view = byId('trans-orig-view');
+    if (!textarea || !view) return;
+    if (origViewOn) {
+      persistCurrentHistoryDraft();
+      view.textContent = activeOriginalText || '';
+    }
+    view.hidden = !origViewOn;
+    textarea.hidden = origViewOn;
+    document.querySelector('#trans-result-modal .t-replace')?.classList.toggle('is-disabled', origViewOn);
+    byId('trans-replace-form')?.classList.toggle('is-disabled', origViewOn);
+    document.querySelectorAll('#trans-result-modal [data-orig-toggle]').forEach(button => {
+      button.setAttribute('aria-pressed', String(origViewOn));
+      const label = button.querySelector('.t-tx');
+      const text = origViewOn ? '번역 보기' : '원문 보기';
+      if (label && label.textContent !== text) label.textContent = text;
+    });
+  }
+
+  // ----- 빠른 설정 -----
+  let quickAnchor = null;
+  // 꾹 눌러 연 뒤 손을 떼면 그 자리에 새로 깔린 배경이나 시트 안 버튼이 클릭을 받는다(터치의 유령 클릭).
+  // 손을 뗀 직후까지는 그런 클릭을 무시한다.
+  let quickGhostGuard = false;
+  function armQuickGhostGuard() {
+    quickGhostGuard = true;
+    const release = () => setTimeout(() => { quickGhostGuard = false; }, 350);
+    window.addEventListener('pointerup', release, { once: true, capture: true });
+    window.addEventListener('pointercancel', release, { once: true, capture: true });
+    setTimeout(() => { quickGhostGuard = false; }, 4000);
+  }
+  const quickLink = (section, icon, text, tail) => `<button type="button" class="t-q-link" data-q-go="${section}">${uiIcon(icon, 17)}<span class="t-tx t-q-link-text">${text}</span><span class="t-tx t-q-link-tail">${escapeHtmlText(tail)}</span>${uiIcon('chevR', 16)}</button>`;
+  const optionMarkup = select => Array.from(select.options).map(option => `<option value="${escapeHtmlText(option.value)}"${option.value === select.value ? ' selected' : ''}>${escapeHtmlText(option.textContent)}</option>`).join('');
+
+  function renderQuickPanel() {
+    const quick = byId('trans-quick');
+    const model = byId('trans-model-select');
+    const mode = byId('trans-mode-select');
+    if (!quick || !model || !mode) return;
+    const think = byId('g-think-val');
+    const messageBlock = quickAnchor?.closest('.w-full[data-message-group-id]');
+    const chatId = parsePath();
+    const msgId = messageBlock?.getAttribute('data-message-group-id') || '';
+    const hasResult = Boolean(chatId && messageBlock
+      && hasCachedResultForBubble(chatId, msgId, () => getBubbleVisibleText(messageBlock)));
+    let thinkMarkup = '';
+    if (think?.tagName === 'SELECT') {
+      thinkMarkup = `<div class="t-group"><div class="t-label"><label class="t-tx" for="trans-q-think">추론</label>${infoButton('think', '추론')}</div>${selectWrap(`<select id="trans-q-think">${optionMarkup(think)}</select>`)}</div>`;
+    } else if (think) {
+      thinkMarkup = `<div class="t-group"><div class="t-label"><label class="t-tx" for="trans-q-think">추론 예산</label>${infoButton('think', '추론 예산')}</div><input type="number" id="trans-q-think" min="128" step="128" value="${escapeHtmlText(think.value)}"></div>`;
+    }
+    const pills = Array.from(mode.options).map(option => `<button type="button" class="t-pill" role="tab" data-mode="${escapeHtmlText(option.value)}" aria-selected="${option.value === mode.value}"><span class="t-tx">${escapeHtmlText(option.textContent.replace(' (기본)', ''))}</span></button>`).join('');
+    const turns = byId('trans-ooc-turns')?.value || '10';
+    const mobile = isMobileLayout();
+    quick.innerHTML = `
+<div class="t-q-head">
+  <span class="t-head-logo" style="width: 18px; height: 18px">${uiIcon('logo', 18)}</span>
+  <span class="t-q-title t-tx">빠른 설정</span>
+  <div class="t-head-right" style="gap: 4px">
+    ${saveStateMarkup()}
+    <button type="button" class="t-ghost" data-q-go="trans">${uiIcon('gear', 15)}<span class="t-tx">전체 설정</span></button>
+    ${mobile ? `<button type="button" class="t-icon-btn" data-q-close aria-label="빠른 설정 닫기" style="width: 44px; height: 44px">${UI_ICON('x')}</button>` : ''}
+  </div>
+</div>
+<div class="t-q-body">
+  <div class="t-cols">
+    <div class="t-group"><div class="t-label"><label class="t-tx" for="trans-q-model">모델</label></div>${selectWrap(`<select id="trans-q-model">${optionMarkup(model)}</select>`)}</div>
+    ${thinkMarkup}
+  </div>
+  <div class="t-group"><div class="t-label"><span class="t-tx">번역 지침</span></div><div class="t-pills t-scroll-x" role="tablist" aria-label="번역 지침">${pills}</div></div>
+</div>
+<div class="t-q-section">
+  <div class="t-toggle t-bare">
+    <div class="t-toggle-text"><div class="t-toggle-title"><label class="t-tx" for="trans-q-instant">말풍선 누르면 바로 교체</label>${infoButton('instant', '말풍선 누르면 바로 교체')}</div></div>
+    <input id="trans-q-instant" class="t-switch" type="checkbox" role="switch"${byId('trans-instant-apply')?.checked ? ' checked' : ''}>
+  </div>
+  <div class="t-toggle t-bare">
+    <div class="t-toggle-text"><div class="t-toggle-title"><label class="t-tx" for="trans-q-ooc">OOC 자동 주입</label></div><div class="t-toggle-sub">${escapeHtmlText(turns)}턴 동안 붙이기</div></div>
+    <input id="trans-q-ooc" class="t-switch" type="checkbox" role="switch"${byId('trans-ooc-apply')?.checked ? ' checked' : ''}>
+  </div>
+</div>
+<div class="t-q-links">
+  ${quickLink('guide', 'book', '지침 편집', `${mode.options.length}개`)}
+  ${quickLink('slots', 'swap', '키워드 치환', `${replacementSlots.length}개`)}
+  ${quickLink('api', 'plug', 'API 연결', hasApiKey() ? '키 저장됨' : '키 없음')}
+</div>
+<div class="t-q-foot"><button type="button" class="t-pri" data-q-translate>${uiIcon('logo', 16)}<span class="t-tx">${hasResult ? '이 설정으로 다시 번역' : '이 답변 번역'}</span></button></div>`;
+
+    // 빠른 설정의 값은 전체 설정의 같은 칸으로 넘겨 기존 저장·반영 흐름을 그대로 탄다.
+    const relay = (target, apply) => {
+      if (!target) return;
+      apply(target);
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    quick.querySelector('#trans-q-model')?.addEventListener('change', event => {
+      relay(model, el => { el.value = event.target.value; });
+      renderQuickPanel();
+      positionQuickPanel();
+    });
+    quick.querySelector('#trans-q-think')?.addEventListener('change', event => {
+      relay(byId('g-think-val'), el => { el.value = event.target.value; });
+    });
+    quick.querySelectorAll('[data-mode]').forEach(pill => pill.addEventListener('click', () => {
+      if (mode.value === pill.dataset.mode) return;
+      relay(mode, el => { el.value = pill.dataset.mode; });
+    }));
+    quick.querySelector('#trans-q-instant')?.addEventListener('change', event => {
+      relay(byId('trans-instant-apply'), el => { el.checked = event.target.checked; });
+    });
+    quick.querySelector('#trans-q-ooc')?.addEventListener('change', event => {
+      relay(byId('trans-ooc-apply'), el => { el.checked = event.target.checked; });
+    });
+    quick.querySelectorAll('[data-q-go]').forEach(button => button.addEventListener('click', () => openSettingsPanel(button.dataset.qGo)));
+    quick.querySelector('[data-q-close]')?.addEventListener('click', closeQuickPanel);
+    quick.querySelector('[data-q-translate]')?.addEventListener('click', quickTranslate);
+  }
+
+  function positionQuickPanel() {
+    const quick = byId('trans-quick');
+    if (!quick || !quickAnchor) return;
+    if (isMobileLayout()) {
+      quick.style.left = '';
+      quick.style.top = '';
+      return;
+    }
+    const rect = quickAnchor.getBoundingClientRect();
+    const width = quick.offsetWidth;
+    const height = quick.offsetHeight;
+    const left = Math.min(Math.max(8, rect.left - 6), window.innerWidth - width - 8);
+    let top = rect.bottom + 8;
+    if (top + height > window.innerHeight - 8) top = rect.top - height - 8;
+    if (top < 8) top = Math.max(8, window.innerHeight - height - 8);
+    quick.style.left = `${Math.round(left)}px`;
+    quick.style.top = `${Math.round(top)}px`;
+  }
+
+  function openQuickPanel(anchor, { viaHold = false } = {}) {
+    const quick = byId('trans-quick');
+    if (!quick || !anchor?.isConnected) return;
+    if (quickAnchor === anchor && quick.classList.contains('is-open')) return;
+    if (viaHold) armQuickGhostGuard();
+    closeInfoPopover();
+    quickAnchor?.classList.remove('is-open');
+    quickAnchor = anchor;
+    anchor.classList.add('is-open');
+    renderQuickPanel();
+    syncTranslatorTheme(true);
+    quick.classList.add('is-open');
+    const mobile = isMobileLayout();
+    byId('trans-quick-backdrop')?.classList.toggle('is-open', mobile);
+    positionQuickPanel();
+    if (!mobile) quick.focus({ preventScroll: true });
+  }
+
+  function closeQuickPanel() {
+    const quick = byId('trans-quick');
+    if (!quick?.classList.contains('is-open')) return;
+    quick.classList.remove('is-open');
+    byId('trans-quick-backdrop')?.classList.remove('is-open');
+    quickAnchor?.classList.remove('is-open');
+    quickAnchor = null;
+    closeInfoPopover();
+  }
+
+  // 빠른 설정의 번역 버튼: 결과가 있던 말풍선이면 그 결과 창을 열고 지금 설정으로 한 번 더 번역한다.
+  function quickTranslate() {
+    const anchor = quickAnchor;
+    closeQuickPanel();
+    const messageBlock = anchor?.closest('.w-full[data-message-group-id]');
+    if (!messageBlock) return;
+    const text = getBubbleVisibleText(messageBlock);
+    const msgId = messageBlock.getAttribute('data-message-group-id') || '';
+    if (!text) {
+      transNotice('이 말풍선에서 번역할 텍스트를 찾지 못했어요.');
+      return;
+    }
+    const chatId = parsePath();
+    if (chatId && openCachedResultForBubble(chatId, msgId, text)) {
+      const modalModel = byId('trans-modal-model');
+      const mainModel = byId('trans-model-select');
+      if (modalModel && mainModel) modalModel.value = mainModel.value;
+      byId('trans-reroll-btn')?.click();
+      return;
+    }
+    executeBubbleTranslation(text, msgId, messageBlock);
+  }
+
+  // ----- 말풍선 번역 버튼 -----
+  function bindBubbleButton(btn) {
+    let press = null;
+    let ringTimer = 0;
+    let holdTimer = 0;
+    const clear = () => {
+      clearTimeout(ringTimer);
+      clearTimeout(holdTimer);
+      btn.classList.remove('is-hold');
+      btn.__transPressing = false;
+      press = null;
+    };
+    btn.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.isPrimary === false) return;
+      clear();
+      btn.__transSuppressClick = false;
+      btn.__transPressing = true;
+      press = { x: event.clientX, y: event.clientY };
+      ringTimer = setTimeout(() => btn.classList.add('is-hold'), HOLD_RING_MS);
+      holdTimer = setTimeout(() => {
+        btn.__transSuppressClick = true;
+        clear();
+        openQuickPanel(btn, { viaHold: true });
+      }, HOLD_OPEN_MS);
+    });
+    btn.addEventListener('pointermove', event => {
+      if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 14) clear();
+    });
+    btn.addEventListener('pointerup', clear);
+    btn.addEventListener('pointercancel', clear);
+    btn.addEventListener('pointerleave', clear);
+  }
+
+  const bubbleButtonFor = block => block?.querySelector?.('.trans-bubble-btn') || null;
+  function findBubbleBlock(bubbleId, fallback) {
+    if (fallback?.isConnected) return fallback;
+    if (!bubbleId) return null;
+    const escaped = window.CSS?.escape ? CSS.escape(bubbleId) : bubbleId;
+    return document.querySelector(`[data-message-group-id="${escaped}"]`);
+  }
+
+  function setBubbleButtonState(btn, state, holdMs = 0) {
+    if (!btn) return;
+    clearTimeout(btn.__transStateTimer);
+    btn.classList.toggle('is-busy', state === 'busy');
+    btn.classList.toggle('is-done', state === 'done');
+    btn.classList.toggle('is-fail', state === 'fail');
+    const label = state === 'busy' ? '번역하는 중'
+      : state === 'done' ? '번역으로 교체됨'
+        : state === 'fail' ? '번역하지 못함 · 눌러서 다시 시도' : '';
+    if (label) {
+      if (btn.getAttribute('aria-label') !== label) btn.setAttribute('aria-label', label);
+      if (btn.title !== label) btn.title = label;
+    } else {
+      refreshCachedResultBubbleButtons(btn);
+    }
+    if (holdMs) btn.__transStateTimer = setTimeout(() => setBubbleButtonState(btn, ''), holdMs);
+  }
+
+  // 오류는 알림에 짧게 띄우고 '자세히'로 전체 내용을 연다.
+  function notifyError(title, detail = '', dialogTitle = title) {
+    const text = String(detail || '').trim();
+    const short = text && text.length <= 40 && !text.includes(String.fromCharCode(10)) ? ` · ${text}` : '';
+    showNudge(`${title}${short}`, 'err', false, text ? { label: '자세히', run: () => transNotice(text, dialogTitle) } : null);
+  }
+
+  function wireTranslatorUI({ saveSettings }) {
+    uiHooks.saveNow = saveSettings;
+    uiHooks.modeChanged = () => {
+      refreshGuideUI();
+      refreshSettingsSummaries();
+      if (quickAnchor) renderQuickPanel();
+    };
+    uiHooks.modesChanged = () => {
+      // 결과 창의 좁은 지침 칸에서는 '(기본)'을 떼어 이름이 잘리지 않게 한다
+      byId('trans-modal-mode')?.querySelectorAll('option').forEach(option => {
+        if (option.textContent.endsWith(' (기본)')) option.textContent = option.textContent.replace(' (기본)', '');
+      });
+      refreshGuideUI();
+    };
+    uiHooks.providerChanged = () => {
+      refreshProviderSeg();
+      refreshSettingsSummaries();
+    };
+    uiHooks.thinkingChanged = refreshSettingsSummaries;
+    uiHooks.refreshSettings = () => {
+      refreshGuideUI();
+      refreshProviderSeg();
+      refreshSettingsSummaries();
+    };
+
+    const panel = byId('trans-setting-panel');
+    // 새 치환 입력칸은 '추가'를 눌러야 저장되는 값이라 자동 저장에서 뺀다.
+    const skipAutoSave = el => !el || el.id === 'trans-slot-find' || el.id === 'trans-slot-with';
+    panel.addEventListener('input', event => {
+      const el = event.target;
+      if (el.id === 'trans-custom-prompt') refreshGuideCount();
+      if (el.id === 'trans-api-key' || el.id === 'trans-firebase-script') refreshKeyStatus();
+      if (!skipAutoSave(el) && el.matches('input, textarea')) scheduleAutoSave();
+    });
+    panel.addEventListener('change', event => {
+      if (!skipAutoSave(event.target)) scheduleAutoSave();
+    });
+    panel.querySelectorAll('.t-nav-item').forEach(item => item.addEventListener('click', () => showSettingsSection(item.dataset.section)));
+    byId('trans-settings-back')?.addEventListener('click', () => {
+      panel.dataset.view = 'list';
+      showSettingsSection(panel.dataset.section, { detail: false });
+    });
+    panel.querySelector('[data-go="guide"]')?.addEventListener('click', () => showSettingsSection('guide'));
+    document.querySelectorAll('#trans-provider-seg [data-provider]').forEach(button => button.addEventListener('click', () => {
+      const select = byId('trans-api-provider');
+      if (!select || select.value === button.dataset.provider) return;
+      select.value = button.dataset.provider;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }));
+    const eye = byId('trans-key-eye');
+    eye?.addEventListener('click', () => {
+      const input = byId('trans-api-key');
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      eye.setAttribute('aria-pressed', String(show));
+      eye.setAttribute('aria-label', show ? '키 숨기기' : '키 보기');
+    });
+    for (const id of ['trans-setting-panel', 'trans-result-modal', 'trans-quick']) {
+      byId(id)?.addEventListener('click', event => {
+        const info = event.target.closest?.('.t-info');
+        if (!info) return;
+        event.preventDefault();
+        event.stopPropagation();
+        openInfoPopover(info);
+      });
+    }
+    document.querySelector('#trans-popover .t-pop-close')?.addEventListener('click', closeInfoPopover);
+    byId('trans-settings-backdrop')?.addEventListener('click', closeSettingsPanel);
+    byId('trans-quick-backdrop')?.addEventListener('click', () => {
+      if (!quickGhostGuard) closeQuickPanel();
+    });
+    byId('trans-quick')?.addEventListener('click', event => {
+      if (!quickGhostGuard) return;
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+    // 손을 뗄 때 따라오는 mousedown이 시트 안 칸(모델 선택 등)으로 초점을 옮기지 않게 한다.
+    byId('trans-quick')?.addEventListener('mousedown', event => {
+      if (quickGhostGuard) event.preventDefault();
+    }, true);
+    // 목록을 바로 바꾸는 버튼은 누르는 즉시 저장된다. 표시만 맞춘다.
+    for (const id of ['trans-add-slot-btn', 'trans-add-prompt-slot', 'trans-delete-prompt-slot', 'trans-undo-prompt-slot']) {
+      byId(id)?.addEventListener('click', () => setTimeout(flashSaved, 0));
+    }
+    document.querySelectorAll('#trans-result-modal [data-orig-toggle]').forEach(button => button.addEventListener('click', () => setOrigView(!origViewOn)));
+    const replaceToggle = byId('trans-replace-toggle');
+    replaceToggle?.addEventListener('click', () => {
+      const form = byId('trans-replace-form');
+      form.hidden = !form.hidden;
+      replaceToggle.setAttribute('aria-expanded', String(!form.hidden));
+      if (!form.hidden) byId('trans-replace-find')?.focus();
+    });
+    uiHooks.modesChanged();
+    uiHooks.refreshSettings();
+  }
+
+  // ----- 전역: 번역 버튼의 우클릭 신호, Esc, 바깥 누르기 -----
+  function installTranslatorGlobalListeners() {
+    // 안드로이드는 꾹 누르면 우클릭 신호(contextmenu)도 보낸다. 다른 확장이 document 단계에서 이 신호로 메뉴를 열기 전에,
+    // 더 먼저 도는 window 단계에서 번역 버튼 위의 신호만 끝낸다. PC 우클릭은 빠른 설정을 연다.
+    window.addEventListener('contextmenu', event => {
+      const target = event.target instanceof Element ? event.target : null;
+      const btn = target?.closest('.trans-bubble-btn');
+      if (!btn && !target?.closest('#trans-quick')) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!btn) return;
+      const holding = Boolean(btn.__transPressing);
+      if (holding) btn.__transSuppressClick = true;
+      openQuickPanel(btn, { viaHold: holding });
+    }, true);
+
+    window.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || event.isComposing) return;
+      // 확인 창이 떠 있으면 그 창이 Esc를 처리한다
+      if (document.getElementById('trans-dialog')) return;
+      let handled = true;
+      if (document.getElementById('trans-popover')?.classList.contains('is-open')) closeInfoPopover();
+      else if (document.getElementById('trans-quick')?.classList.contains('is-open')) closeQuickPanel();
+      else if (document.getElementById('trans-result-modal')?.style.display === 'flex') closeResultModal();
+      else if (document.getElementById('trans-setting-panel')?.classList.contains('is-open')) closeSettingsPanel();
+      else handled = false;
+      if (handled) {
+        // 크랙 단축키(Esc → 요약 메모리)로 넘어가지 않게 여기서 끝낸다
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }, true);
+
+    document.addEventListener('pointerdown', event => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (document.getElementById('trans-popover')?.classList.contains('is-open') && !target?.closest('#trans-popover, .t-info')) closeInfoPopover();
+      const quick = document.getElementById('trans-quick');
+      if (quick?.classList.contains('is-open') && !isMobileLayout()
+        && !target?.closest('#trans-quick, #trans-popover') && !(quickAnchor && quickAnchor.contains(target))) {
+        closeQuickPanel();
+      }
+    }, true);
+
+    window.addEventListener('resize', () => {
+      closeInfoPopover();
+      if (quickAnchor) positionQuickPanel();
+    });
+    window.addEventListener('scroll', event => {
+      const target = event.target instanceof Element ? event.target : null;
+      // 설명 팝업은 어디가 스크롤되든 닫고, 빠른 설정은 채팅 화면이 스크롤될 때만 닫는다
+      if (!target?.closest('#trans-popover')) closeInfoPopover();
+      if (quickAnchor && !isMobileLayout()
+        && !target?.closest('#trans-quick, #trans-popover, #trans-setting-panel, #trans-result-modal')) closeQuickPanel();
+    }, true);
   }
 
   function bindUIEvents() {
@@ -1699,6 +3274,7 @@ ${TRANSLATION_ONLY_RULE}`;
         select.appendChild(group);
       }
       select.value = isKnownMode(selectedMode) ? selectedMode : 'ko';
+      uiHooks.modesChanged?.();
     };
 
     const syncPromptSlotControls = mode => {
@@ -1720,6 +3296,7 @@ ${TRANSLATION_ONLY_RULE}`;
       customPromptInput.value = getModePrompt(selectedMode);
       syncPromptSlotControls(selectedMode);
       GM_setValue('transMode', selectedMode);
+      uiHooks.modeChanged?.();
     };
 
     let savedMode = String(GM_getValue('transMode', 'ko'));
@@ -1739,15 +3316,16 @@ ${TRANSLATION_ONLY_RULE}`;
       firebaseScriptInput.style.display = isFirebase ? 'block' : 'none';
 
       if (isFirebase) {
-        keyLabel.textContent = 'Firebase Config';
+        keyLabel.textContent = 'Firebase 설정';
         keyLabel.setAttribute('for', 'trans-firebase-script');
       } else if (isDeepSeek) {
-        keyLabel.textContent = 'DeepSeek API Key';
+        keyLabel.textContent = 'DeepSeek API 키';
         keyLabel.setAttribute('for', 'trans-api-key');
       } else {
-        keyLabel.textContent = 'Google API Key';
+        keyLabel.textContent = 'Google API 키';
         keyLabel.setAttribute('for', 'trans-api-key');
       }
+      uiHooks.providerChanged?.();
     };
 
     function saveThinkVal(model) {
@@ -1770,35 +3348,21 @@ ${TRANSLATION_ONLY_RULE}`;
 
       if (currentModel.includes('gemini-3')) {
         let currentLevel = thinkingLevels[currentModel] || 'medium';
-        const labelPrefix = /^gemini-3\.[78]-flash$/.test(currentModel)
-          ? `${currentModel.includes('3.8') ? '3.8' : '3.7'} Flash`
-          : currentModel.includes('pro') ? '3.1 Pro' : 'Flash';
-        const supportsMinimalThinking = !currentModel.includes('pro')
-          && !/^gemini-3\.[78]-flash$/.test(currentModel);
+        const flash378 = currentModel === 'gemini-3.7-flash' || currentModel === 'gemini-3.8-flash';
+        const supportsMinimalThinking = !currentModel.includes('pro') && !flash378;
         if (!supportsMinimalThinking && currentLevel === 'minimal') currentLevel = 'low';
-        const opts = supportsMinimalThinking
-          ? `<option value="minimal" ${currentLevel === 'minimal' ? 'selected' : ''}>Minimal</option>
-             <option value="low" ${currentLevel === 'low' ? 'selected' : ''}>Low</option>
-             <option value="medium" ${currentLevel === 'medium' ? 'selected' : ''}>Medium</option>
-             <option value="high" ${currentLevel === 'high' ? 'selected' : ''}>High</option>`
-          : `<option value="low" ${currentLevel === 'low' ? 'selected' : ''}>Low</option>
-             <option value="medium" ${currentLevel === 'medium' ? 'selected' : ''}>Medium</option>
-             <option value="high" ${currentLevel === 'high' ? 'selected' : ''}>High</option>`;
-
-        html = `<div class="t-field">
-          <label class="trans-label" for="g-think-val">🧠 ${labelPrefix} 추론 레벨</label>
-          <select id="g-think-val" class="t-select-arrow">${opts}</select>
-        </div>`;
+        const levelLabels = { minimal: '최소', low: '낮음', medium: '보통', high: '높음' };
+        const levels = supportsMinimalThinking ? ['minimal', 'low', 'medium', 'high'] : ['low', 'medium', 'high'];
+        const opts = levels.map(level => `<option value="${level}"${currentLevel === level ? ' selected' : ''}>${levelLabels[level]}</option>`).join('');
+        html = `<div class="t-label"><label class="t-tx" for="g-think-val">추론</label>${infoButton('think', '추론')}</div>${selectWrap(`<select id="g-think-val">${opts}</select>`)}`;
       } else if (currentModel.includes('gemini-2.5')) {
         const budget = thinkingBudgets[currentModel] || 1024;
-        html = `<div class="t-field">
-          <label class="trans-label" for="g-think-val">🧠 2.5 추론 예산 (최소 128)</label>
-          <input type="number" id="g-think-val" min="128" value="${budget}">
-        </div>`;
+        html = `<div class="t-label"><label class="t-tx" for="g-think-val">추론 예산</label>${infoButton('think', '추론 예산')}</div><input type="number" id="g-think-val" min="128" step="128" value="${budget}">`;
       }
 
       thinkContainer.innerHTML = html;
       thinkContainer.setAttribute('data-current-model', currentModel);
+      uiHooks.thinkingChanged?.();
     }
 
     const saveCurrentSettings = () => {
@@ -1957,11 +3521,10 @@ ${TRANSLATION_ONLY_RULE}`;
       const defaultPrompt = customSlot ? '' : currentMode === 'en' ? promptEn : promptKo;
       customPromptInput.value = defaultPrompt;
       persistPromptDraft(currentMode, defaultPrompt);
+      customPromptInput.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
-    closeSettingsBtn.addEventListener('click', () => {
-      document.getElementById('trans-setting-panel').style.display = 'none';
-    });
+    closeSettingsBtn.addEventListener('click', closeSettingsPanel);
 
     closeModalBtn.addEventListener('click', closeResultModal);
     closeResultBtn.addEventListener('click', closeResultModal);
@@ -1983,7 +3546,8 @@ ${TRANSLATION_ONLY_RULE}`;
 
     rerollBtn.addEventListener('click', async () => {
       try {
-        rerollBtn.textContent = '생성 중...';
+        rerollBtn.classList.add('is-busy');
+        rerollBtn.setAttribute('aria-label', '다시 번역하는 중');
         rerollBtn.disabled = true;
         persistCurrentHistoryDraft();
         saveCurrentSettings();
@@ -2006,10 +3570,10 @@ ${TRANSLATION_ONLY_RULE}`;
         if (resultObj.truncated) showNudge(TRUNCATED_REVIEW_MESSAGE, 'err', true);
         else showNudge('재번역이 완료되었습니다.', 'ok');
       } catch (e) {
-        showNudge(e.message, 'err');
-        transNotice(e.message, '다시 번역하지 못했어요');
+        notifyError('다시 번역하지 못했어요', e.message);
       } finally {
-        rerollBtn.textContent = '↻ 다시 돌리기';
+        rerollBtn.classList.remove('is-busy');
+        rerollBtn.setAttribute('aria-label', '다시 번역');
         rerollBtn.disabled = false;
       }
     });
@@ -2073,6 +3637,7 @@ ${TRANSLATION_ONLY_RULE}`;
             applyStatus.className = 'ok';
             patchModalBtn.textContent = '✓ 화면에 바로 반영됨';
             showNudge('교체 완료! 새로고침 없이 바로 반영했습니다.', 'ok');
+            setBubbleButtonState(bubbleButtonFor(findBubbleBlock(saveContext.bubbleId, saveContext.bubbleElement)), 'done', 3000);
             setTimeout(() => {
               if (saveContext.sessionId !== transSessionId) return;
               closeResultModal();
@@ -2089,6 +3654,7 @@ ${TRANSLATION_ONLY_RULE}`;
             patchModalBtn.textContent = '✓ 서버 저장 완료';
             patchModalBtn.disabled = false;
             showNudge('번역문은 저장됐습니다. 화면 표시를 다시 시도할 수 있습니다.', 'ok');
+            setBubbleButtonState(bubbleButtonFor(findBubbleBlock(saveContext.bubbleId, saveContext.bubbleElement)), 'done', 3000);
           }
         }
       } catch (e) {
@@ -2096,8 +3662,7 @@ ${TRANSLATION_ONLY_RULE}`;
         if (stillSameResult) {
           applyStatus.textContent = e.message;
           applyStatus.className = 'err';
-          showNudge(e.message, 'err');
-          transNotice(e.message, '교체하지 못했어요');
+          notifyError('교체하지 못했어요', e.message);
           patchModalBtn.textContent = getPatchButtonIdleText();
           patchModalBtn.disabled = false;
         }
@@ -2167,6 +3732,7 @@ ${TRANSLATION_ONLY_RULE}`;
       });
     }
 
+    wireTranslatorUI({ saveSettings: saveCurrentSettings });
     toggleProviderUI();
     updateThinkingUI();
     renderReplacementSlots();
@@ -2199,8 +3765,8 @@ ${TRANSLATION_ONLY_RULE}`;
 
   function getPatchButtonIdleText() {
     return transIndex >= 0 && transHistory.length > 0
-      ? `결과 ${transIndex + 1}로 교체하기`
-      : '이 결과로 교체하기';
+      ? `결과 ${transIndex + 1}로 교체`
+      : '이 결과로 교체';
   }
 
   function renderModalState() {
@@ -2228,16 +3794,48 @@ ${TRANSLATION_ONLY_RULE}`;
     historySelect.value = String(transIndex);
     historySelect.disabled = transHistory.length <= 1;
 
-    let costText = '';
-    const usageData = transUsageHistory[transIndex];
-    if (usageData && usageData.usage) {
-      const costData = calculateCost(usageData.usage, 1500, usageData.model);
-      if (costData) {
-        costText = `약 ₩${costData.krw.toFixed(2)} · 입력 ${costData.tokens.write} / 캐시 ${costData.tokens.read} / 출력 ${costData.tokens.output} / 추론 ${costData.tokens.thoughts}`;
-      }
+    // 결과 목록은 알약으로 보여 준다(숨긴 선택 상자는 기존 흐름용으로 그대로 둔다)
+    const historyPills = document.getElementById('trans-history-pills');
+    if (historyPills) {
+      historyPills.replaceChildren(...transHistory.map((_, index) => {
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 't-pill';
+        pill.setAttribute('role', 'tab');
+        pill.setAttribute('aria-selected', String(index === transIndex));
+        const label = document.createElement('span');
+        label.className = 't-tx';
+        label.textContent = `결과 ${index + 1} · ${getHistoryModelLabel(transUsageHistory[index]?.model)}`;
+        pill.append(label);
+        pill.addEventListener('click', () => selectTranslationHistory(index));
+        return pill;
+      }));
     }
 
-    costInfo.textContent = costText;
+    costInfo.replaceChildren();
+    const usageData = transUsageHistory[transIndex];
+    const costData = usageData?.usage ? calculateCost(usageData.usage, 1500, usageData.model) : null;
+    if (costData) {
+      const fmt = value => Number(value || 0).toLocaleString('ko-KR');
+      const price = document.createElement('span');
+      price.className = 't-tx';
+      price.textContent = `약 ₩${costData.krw.toFixed(2)}`;
+      const info = document.createElement('button');
+      info.type = 'button';
+      info.className = 't-info';
+      info.setAttribute('aria-label', '비용 자세히');
+      info.innerHTML = uiIcon('info', 16);
+      info.dataset.infoTitle = '비용 자세히';
+      info.dataset.infoText = `입력 ${fmt(costData.tokens.write)} · 캐시 ${fmt(costData.tokens.read)} · 출력 ${fmt(costData.tokens.output)} · 추론 ${fmt(costData.tokens.thoughts)} 토큰. 모델 요금표로 계산한 추정값이에요.`;
+      const tail = document.createElement('span');
+      tail.className = 't-tx';
+      tail.textContent = `· ${getHistoryModelLabel(usageData.model)} · ${transIndex === 0 ? '처음 번역' : '다시 번역한 결과'}`;
+      costInfo.append(price, info, tail);
+    }
+    if (origViewOn) {
+      const origView = document.getElementById('trans-orig-view');
+      if (origView) origView.textContent = activeOriginalText || '';
+    }
     historyCount.textContent = `선택 ${transIndex + 1} / ${transHistory.length}`;
     prevBtn.disabled = transIndex === 0;
     nextBtn.disabled = transIndex === transHistory.length - 1;
@@ -2249,6 +3847,7 @@ ${TRANSLATION_ONLY_RULE}`;
     storeActiveBubbleResult();
     document.getElementById('trans-result-overlay').style.display = 'none';
     document.getElementById('trans-result-modal').style.display = 'none';
+    closeInfoPopover();
 
     const nudge = document.getElementById('trans-nudge');
     if (nudge?.textContent === '다시 번역 중...') nudge.classList.remove('active');
@@ -2262,6 +3861,10 @@ ${TRANSLATION_ONLY_RULE}`;
 
     const patchButton = document.getElementById('trans-patch-modal');
     patchButton.disabled = false;
+    setOrigView(false);
+    const replaceForm = document.getElementById('trans-replace-form');
+    if (replaceForm) replaceForm.hidden = true;
+    document.getElementById('trans-replace-toggle')?.setAttribute('aria-expanded', 'false');
     patchButton.textContent = getPatchButtonIdleText();
     renderModalState();
     const applyStatus = document.getElementById('trans-apply-status');
@@ -2287,29 +3890,47 @@ ${TRANSLATION_ONLY_RULE}`;
     const modalList = document.getElementById('trans-modal-slot-list');
     if (!settingList || !modalList) return;
 
-    settingList.innerHTML = '';
-    modalList.innerHTML = '';
+    settingList.replaceChildren();
+    modalList.replaceChildren();
+    const countLabel = document.getElementById('trans-slot-count-label');
+    if (countLabel) countLabel.textContent = replacementSlots.length ? `저장한 치환 ${replacementSlots.length}` : '저장한 치환';
 
     if (replacementSlots.length === 0) {
-      settingList.innerHTML = '<span class="t-slot-empty">저장된 슬롯이 없습니다.</span>';
-      modalList.innerHTML = '<span class="t-slot-empty">저장된 치환 슬롯 없음</span>';
+      settingList.innerHTML = '<span class="t-slot-empty">저장한 치환이 없어요.</span>';
+      modalList.innerHTML = '<span class="t-slot-empty">저장한 치환 없음</span>';
+      uiHooks.refreshSettings?.();
       return;
     }
 
+    const chipBody = slot => {
+      const find = document.createElement('span');
+      find.className = 't-tx';
+      find.textContent = slot.find;
+      const arrow = document.createElement('span');
+      arrow.className = 't-chip-arrow';
+      arrow.innerHTML = uiIcon('arrowR', 13);
+      const replace = document.createElement('span');
+      replace.className = 't-tx';
+      replace.textContent = slot.replace || '(지움)';
+      return [find, arrow, replace];
+    };
+
     replacementSlots.forEach((slot, index) => {
       const settingChip = document.createElement('span');
-      settingChip.className = 't-slot-chip';
+      settingChip.className = 't-chip has-x';
+      settingChip.style.cursor = 'default';
       settingChip.title = `${slot.find} → ${slot.replace}`;
-      settingChip.appendChild(document.createTextNode(`${slot.find} → ${slot.replace}`));
-
+      settingChip.append(...chipBody(slot));
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
-      deleteBtn.textContent = '✕';
-      deleteBtn.title = '삭제';
+      deleteBtn.className = 't-chip-x';
+      deleteBtn.setAttribute('aria-label', `${slot.find} 치환 지우기`);
+      deleteBtn.innerHTML = uiIcon('x', 12);
       deleteBtn.addEventListener('click', () => {
         replacementSlots.splice(index, 1);
         GM_setValue('replacementSlots', replacementSlots);
         renderReplacementSlots();
+        flashSaved();
         showNudge('치환 슬롯을 삭제했습니다.', 'ok');
       });
       settingChip.appendChild(deleteBtn);
@@ -2317,14 +3938,15 @@ ${TRANSLATION_ONLY_RULE}`;
 
       const modalBtn = document.createElement('button');
       modalBtn.type = 'button';
-      modalBtn.className = 't-apply-slot';
-      modalBtn.textContent = `${slot.find} → ${slot.replace}`;
+      modalBtn.className = 't-chip';
       modalBtn.title = '현재 번역 결과에 적용';
+      modalBtn.append(...chipBody(slot));
       modalBtn.addEventListener('click', () => {
         applyReplacementToResult(slot.find, slot.replace);
       });
       modalList.appendChild(modalBtn);
     });
+    uiHooks.refreshSettings?.();
   }
 
   function applyReplacementToResult(find, replace) {
@@ -2359,18 +3981,28 @@ ${TRANSLATION_ONLY_RULE}`;
     return text.split(needle).length - 1;
   }
 
-  function showNudge(message, type = 'info', persist = false) {
+  function showNudge(message, type = 'info', persist = false, action = null) {
     const nudge = document.getElementById('trans-nudge');
     if (!nudge) return;
 
     clearTimeout(nudgeTimer);
-    nudge.textContent = message;
-    nudge.className = `${type} active ${detectSiteTheme() === 'dark' ? 'trans-theme-dark' : 'trans-theme-light'}`;
+    const iconName = type === 'ok' ? 'check' : type === 'err' ? 'alert' : persist ? 'spin' : 'info';
+    nudge.innerHTML = `<span class="t-nudge-icon">${uiIcon(iconName, 16, iconName === 'spin' ? 't-spin-ico' : '')}</span><span class="t-tx t-nudge-text"></span>${action ? '<button type="button" class="t-nudge-action"><span class="t-tx"></span></button>' : ''}`;
+    nudge.querySelector('.t-nudge-text').textContent = message;
+    if (action) {
+      const actionBtn = nudge.querySelector('.t-nudge-action');
+      actionBtn.querySelector('.t-tx').textContent = action.label || '자세히';
+      actionBtn.addEventListener('click', () => {
+        nudge.classList.remove('active');
+        action.run?.();
+      });
+    }
+    nudge.className = `trans-ui ${type} active${action ? ' has-action' : ''} ${detectSiteTheme() === 'dark' ? 'trans-theme-dark' : 'trans-theme-light'}`;
 
     if (!persist) {
       nudgeTimer = setTimeout(() => {
         nudge.classList.remove('active');
-      }, 3200);
+      }, action ? 6000 : 3200);
     }
   }
 
@@ -2384,7 +4016,7 @@ ${TRANSLATION_ONLY_RULE}`;
       const previousFocus = document.activeElement;
       const overlay = document.createElement('div');
       overlay.id = 'trans-dialog';
-      overlay.className = detectSiteTheme() === 'dark' ? 'trans-theme-dark' : 'trans-theme-light';
+      overlay.className = 'trans-ui ' + (detectSiteTheme() === 'dark' ? 'trans-theme-dark' : 'trans-theme-light');
       overlay.setAttribute('role', cancelLabel ? 'alertdialog' : 'dialog');
       overlay.setAttribute('aria-modal', 'true');
       overlay.setAttribute('aria-labelledby', 'trans-dialog-title');
@@ -4122,10 +5754,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
               <span class="whitespace-nowrap overflow-hidden text-ellipsis typo-text-sm_leading-none_medium">초월 번역 설정</span>
             </span>
           </div>`;
-        btn.onclick = () => {
-          document.getElementById('trans-setting-panel').style.display = 'block';
-          syncTranslatorTheme();
-        };
+        btn.onclick = () => openSettingsPanel();
         container.parentNode.insertBefore(btn, container.nextSibling);
         return;
       }
@@ -4219,9 +5848,11 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       // 말풍선 글(복제·정규화)은 결과가 저장된 말풍선에서만 읽는다. 전에는 버튼마다 매번 읽었다.
       const hasCachedResult = Boolean(bubbleResultCache.size > 0 && currentChatId && messageBlock)
         && hasCachedResultForBubble(currentChatId, bubbleMsgId, () => getBubbleVisibleText(messageBlock));
-      const title = hasCachedResult ? '번역 결과 다시 열기' : '초월 번역';
+      const title = hasCachedResult ? BUBBLE_TITLE_SAVED : BUBBLE_TITLE_IDLE;
 
       btn.classList.toggle('trans-has-result', hasCachedResult);
+      // 번역 중·교체됨·실패 표시 동안은 그 상태의 이름을 둔다
+      if (btn.classList.contains('is-busy') || btn.classList.contains('is-done') || btn.classList.contains('is-fail')) return;
       // 같은 값을 다시 써도 속성 변경 기록이 생겨 다른 확장의 감시가 깨어난다.
       if (btn.title !== title) {
         btn.title = title;
@@ -4248,6 +5879,8 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     }
 
     bubbleTranslationInProgress = true;
+    const bubbleBtn = bubbleButtonFor(bubbleElement);
+    setBubbleButtonState(bubbleBtn, 'busy');
     const instantApply = document.getElementById('trans-instant-apply')?.checked || GM_getValue('instantApply', false);
     if (instantApply) {
       try {
@@ -4287,20 +5920,24 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       transIndex = 0;
 
       storeActiveBubbleResult();
+      setBubbleButtonState(bubbleBtn, '');
       refreshCachedResultBubbleButtons();
       openResultModal();
       if (resultObj.truncated) showNudge(TRUNCATED_REVIEW_MESSAGE, 'err', true);
       else showNudge('번역 완료. 팝업에서 확인하세요.', 'ok');
     } catch (err) {
       if (translationSessionId !== transSessionId) return;
-      showNudge(`번역 실패: ${err.message}`, 'err');
-      transNotice(err.message, '번역하지 못했어요');
+      setBubbleButtonState(bubbleBtn, 'fail', 6000);
+      notifyError('번역하지 못했어요', err.message);
     } finally {
       bubbleTranslationInProgress = false;
+      if (bubbleBtn?.classList.contains('is-busy')) setBubbleButtonState(bubbleBtn, '');
     }
   }
 
   async function executeInstantBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement = null) {
+    const bubbleBtn = bubbleButtonFor(bubbleElement);
+    setBubbleButtonState(bubbleBtn, 'busy');
     showNudge('번역 중... 완료되면 바로 교체합니다.', 'info', true);
 
     try {
@@ -4326,9 +5963,10 @@ if(__exports != exports)module.exports = exports;return module.exports}));
         ? '번역 교체 완료! 화면에 바로 반영했습니다.'
         : '번역 저장 완료! 말풍선이 나타나면 자동으로 반영합니다.';
       showNudge(`${displayText}${formatCostForMessage(resultObj.usage, resultObj.model)}`, 'ok');
+      setBubbleButtonState(bubbleButtonFor(findBubbleBlock(stableTarget.bubbleId, bubbleElement)) || bubbleBtn, 'done', 3000);
     } catch (err) {
-      showNudge(`번역 실패: ${err.message}`, 'err');
-      transNotice(err.message, '번역하지 못했어요');
+      setBubbleButtonState(bubbleBtn, 'fail', 6000);
+      notifyError('번역하지 못했어요', err.message);
     }
   }
 
@@ -4341,14 +5979,23 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       if (group.querySelector('.trans-bubble-btn')) return;
 
       const btn = document.createElement('button');
-      btn.className = 'trans-bubble-btn relative inline-flex items-center justify-center overflow-hidden rounded-full transition-colors size-7 bg-transparent hover:bg-accent';
+      btn.className = 'trans-bubble-btn relative inline-flex items-center justify-center rounded-full transition-colors size-7 bg-transparent hover:bg-accent';
       btn.type = 'button';
-      btn.innerHTML = TRANSLATOR_ICON_SVG;
+      btn.innerHTML = BUBBLE_BUTTON_INNER;
       btn.style.marginRight = '4px';
-      btn.title = '초월 번역';
+      btn.title = BUBBLE_TITLE_IDLE;
       btn.setAttribute('aria-label', btn.title);
       btn.onclick = (e) => {
         e.stopPropagation();
+        // 꾹 눌러 빠른 설정을 연 뒤 손을 뗄 때 오는 클릭은 번역으로 치지 않는다
+        if (btn.__transSuppressClick) {
+          btn.__transSuppressClick = false;
+          return;
+        }
+        if (quickAnchor === btn) {
+          closeQuickPanel();
+          return;
+        }
         const messageBlock = e.currentTarget.closest('.w-full[data-message-group-id]');
         let text = '';
         let msgId = '';
@@ -4365,6 +6012,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
         executeBubbleTranslation(text, msgId, messageBlock);
       };
+      bindBubbleButton(btn);
       group.insertBefore(btn, group.firstChild);
       group.classList.add('trans-injected');
     });
@@ -4401,6 +6049,10 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       document.getElementById('trans-result-overlay'),
       document.getElementById('trans-nudge'),
       document.getElementById('trans-dialog'),
+      document.getElementById('trans-settings-backdrop'),
+      document.getElementById('trans-quick'),
+      document.getElementById('trans-quick-backdrop'),
+      document.getElementById('trans-popover'),
     ].filter(Boolean);
 
     targets.forEach(el => {
@@ -4414,6 +6066,11 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     '#trans-result-modal',
     '#trans-result-overlay',
     '#trans-nudge',
+    '#trans-settings-backdrop',
+    '#trans-quick',
+    '#trans-quick-backdrop',
+    '#trans-popover',
+    '#trans-dialog',
     '#trans-menu-btn',
     '.trans-bubble-btn',
     '.trans-live-content',
@@ -4609,6 +6266,7 @@ if(__exports != exports)module.exports = exports;return module.exports}));
     translatorInitialized = true;
     addStyles();
     createUI();
+    installTranslatorGlobalListeners();
 
     const themeObserver = new MutationObserver(() => syncTranslatorTheme());
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
