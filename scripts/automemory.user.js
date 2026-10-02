@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.6
+// @version      2.4.0.7
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -397,6 +397,88 @@ This requirement controls coverage only. It must not change or add any output fo
         VERTEX_SESSION_JSON = null;
         VERTEX_SESSION_PERSISTED = false;
         VERTEX_TOKEN_CACHE.clear();
+    }
+
+    // 앱체크 디버그 토큰은 이 Firebase 웹앱의 앱체크 토큰을 발급받을 수 있는 비밀값이다. Vertex JSON처럼
+    // 페이지 localStorage에는 두지 않고 GM 저장소에만 보관한다. GM 저장소가 없으면 이번 실행 동안만 메모리에 둔다.
+    var FIREBASE_APPCHECK_DEBUG_TOKEN_KEY = 'crack_ext_firebase_appcheck_debug_token_v1';
+    var FIREBASE_APPCHECK_TOKEN_CACHE_KEY = 'crack_ext_firebase_appcheck_token_cache_v1';
+    var FIREBASE_APPCHECK_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+    var FIREBASE_APPCHECK_MEMORY_DEBUG_TOKEN = '';
+    var FIREBASE_APPCHECK_MEMORY_TOKEN = null;
+
+    function getSavedFirebaseAppCheckDebugToken() {
+        try {
+            if (typeof GM_getValue === 'function') {
+                var saved = String(GM_getValue(FIREBASE_APPCHECK_DEBUG_TOKEN_KEY, '') || '').trim();
+                if (saved) return saved;
+            }
+        } catch (e) {}
+        return FIREBASE_APPCHECK_MEMORY_DEBUG_TOKEN;
+    }
+
+    function saveFirebaseAppCheckDebugToken(value) {
+        var normalized = String(value || '').trim();
+        clearFirebaseAppCheckTokenCache();
+        FIREBASE_APPCHECK_LAST_ERROR = '';
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(FIREBASE_APPCHECK_DEBUG_TOKEN_KEY, normalized);
+                FIREBASE_APPCHECK_MEMORY_DEBUG_TOKEN = '';
+                return true;
+            }
+        } catch (e) {}
+        FIREBASE_APPCHECK_MEMORY_DEBUG_TOKEN = normalized;
+        return false;
+    }
+
+    function deleteFirebaseAppCheckDebugToken() {
+        FIREBASE_APPCHECK_MEMORY_DEBUG_TOKEN = '';
+        clearFirebaseAppCheckTokenCache();
+        FIREBASE_APPCHECK_LAST_ERROR = '';
+        try {
+            if (typeof GM_deleteValue === 'function') {
+                GM_deleteValue(FIREBASE_APPCHECK_DEBUG_TOKEN_KEY);
+                return true;
+            }
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(FIREBASE_APPCHECK_DEBUG_TOKEN_KEY, '');
+                return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    // 발급받은 앱체크 토큰(보통 1시간 유효)은 탭과 새로고침을 넘어 함께 쓴다.
+    // 디버그 토큰 교환 API는 할당량이 빡빡해서 요청마다 새로 받으면 금방 막힌다.
+    function readFirebaseAppCheckTokenCache(cacheKey) {
+        var entry = FIREBASE_APPCHECK_MEMORY_TOKEN;
+        if (!entry || entry.key !== cacheKey) {
+            try {
+                entry = typeof GM_getValue === 'function' ? JSON.parse(GM_getValue(FIREBASE_APPCHECK_TOKEN_CACHE_KEY, '') || 'null') : null;
+            } catch (e) {
+                entry = null;
+            }
+        }
+        if (!entry || entry.key !== cacheKey || typeof entry.token !== 'string' || !entry.token) return null;
+        if (!(Number(entry.expireTimeMillis) - Date.now() > FIREBASE_APPCHECK_REFRESH_MARGIN_MS)) return null;
+        FIREBASE_APPCHECK_MEMORY_TOKEN = entry;
+        return entry;
+    }
+
+    function writeFirebaseAppCheckTokenCache(entry) {
+        FIREBASE_APPCHECK_MEMORY_TOKEN = entry;
+        try {
+            if (typeof GM_setValue === 'function') GM_setValue(FIREBASE_APPCHECK_TOKEN_CACHE_KEY, JSON.stringify(entry));
+        } catch (e) {}
+    }
+
+    function clearFirebaseAppCheckTokenCache() {
+        FIREBASE_APPCHECK_MEMORY_TOKEN = null;
+        try {
+            if (typeof GM_deleteValue === 'function') GM_deleteValue(FIREBASE_APPCHECK_TOKEN_CACHE_KEY);
+            else if (typeof GM_setValue === 'function') GM_setValue(FIREBASE_APPCHECK_TOKEN_CACHE_KEY, '');
+        } catch (e) {}
     }
 
     function getSavedVertexLocation() {
@@ -2353,8 +2435,130 @@ async function fetchRecentMessages(limit) {
         el.classList.remove('is-working');
     }
 
+    // ============== Firebase 앱체크 ==============
+    // 2026-11-02부터 Firebase AI Logic은 앱체크 토큰이 없는 요청을 막는다. 유저스크립트는 reCAPTCHA 증명을 쓸 수 없으므로
+    // 사용자가 콘솔에 등록한 디버그 토큰을 확프 쪽(페이지 밖)에서 앱체크 토큰으로 바꾸고, 그 단기 토큰만 페이지 브리지에 넘긴다.
+    var FIREBASE_APPCHECK_EXCHANGE_BASE = 'https://content-firebaseappcheck.googleapis.com/v1';
+    var FIREBASE_APPCHECK_PENDING = new Map();
+    // 요약 창의 앱체크 칸이 직전 실패를 보여줄 수 있도록 이번 실행 동안만 기억한다.
+    var FIREBASE_APPCHECK_LAST_ERROR = '';
+
+    function getFirebaseAppCheckTarget(firebaseConfig) {
+        var projectId = String(firebaseConfig && firebaseConfig.projectId || '').trim();
+        var appId = String(firebaseConfig && firebaseConfig.appId || '').trim();
+        var apiKey = String(firebaseConfig && firebaseConfig.apiKey || '').trim();
+        if (!projectId || !appId || !apiKey) throw new Error('앱체크를 쓰려면 Firebase 스크립트에 apiKey·projectId·appId가 모두 있어야 합니다.');
+        if (!/^[A-Za-z0-9._:-]+$/.test(projectId) || !/^[A-Za-z0-9._:-]+$/.test(appId)) throw new Error('Firebase 스크립트의 projectId 또는 appId 형식이 올바르지 않습니다.');
+        return { projectId:projectId, appId:appId, apiKey:apiKey };
+    }
+
+    function describeFirebaseAppCheckExchangeError(status, detail) {
+        var text = String(detail || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        var hint;
+        if (status === 429) hint = '앱체크 토큰 발급 한도를 넘었습니다. 잠시 후 다시 시도해주세요.';
+        else if (/referr?er/i.test(text)) hint = 'API 키의 웹사이트(리퍼러) 제한에 막혔습니다. 이 키에서 crack.wrtn.ai를 허용해주세요.';
+        else if (/are blocked|API_KEY_SERVICE_BLOCKED/i.test(text)) hint = 'API 키 제한에 막혔습니다. 이 키의 API 제한 목록에 Firebase App Check API를 추가해주세요.';
+        else if (status === 403) hint = '이 디버그 토큰이 Firebase 스크립트의 웹앱(appId)에 등록돼 있지 않습니다. Firebase 콘솔 App Check에서 같은 웹앱에 등록한 토큰인지 확인해주세요.';
+        else if (status === 400) hint = '디버그 토큰이나 Firebase 스크립트 값이 올바르지 않습니다.';
+        else if (status === 404) hint = 'Firebase 프로젝트나 웹앱을 찾지 못했습니다. Firebase 스크립트의 projectId·appId를 확인해주세요.';
+        else if (status >= 500) hint = 'Firebase 앱체크 서버 오류입니다. 잠시 후 다시 시도해주세요.';
+        else hint = '앱체크 토큰을 받지 못했습니다.';
+        return 'Firebase 앱체크 토큰 발급 실패(' + status + '): ' + hint + (text ? ' · ' + text : '');
+    }
+
+    async function exchangeFirebaseAppCheckDebugToken(target, debugToken) {
+        var url = FIREBASE_APPCHECK_EXCHANGE_BASE + '/projects/' + target.projectId + '/apps/' + target.appId +
+            ':exchangeDebugToken?key=' + encodeURIComponent(target.apiKey);
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timer = controller ? setTimeout(function() { controller.abort(); }, 30000) : 0;
+        var response;
+        try {
+            response = await fetch(url, {
+                method:'POST',
+                headers:{ 'Content-Type':'application/json' },
+                body:JSON.stringify({ debug_token:debugToken }),
+                credentials:'omit',
+                cache:'no-store',
+                redirect:'error',
+                signal:controller ? controller.signal : undefined
+            });
+        } catch (err) {
+            if (controller && controller.signal.aborted) throw new Error('Firebase 앱체크 토큰 발급 응답이 30초 동안 없어 중단했습니다.');
+            throw new Error('Firebase 앱체크 토큰 발급 중 네트워크 오류가 났습니다.');
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+        if (!response.ok) throw new Error(describeFirebaseAppCheckExchangeError(response.status, await readApiError(response, '')));
+        var data = null;
+        try { data = await response.json(); } catch (e) {}
+        var ttl = String(data && data.ttl || '').match(/^(\d+(?:\.\d+)?)s$/);
+        if (!data || typeof data.token !== 'string' || !data.token || !ttl) throw new Error('Firebase 앱체크 응답에 토큰이 없습니다.');
+        return { token:data.token, expireTimeMillis:Date.now() + Math.round(Number(ttl[1]) * 1000) };
+    }
+
+    function getFirebaseAppCheckCacheKey(target, debugToken) {
+        return hashText([target.projectId, target.appId, target.apiKey, debugToken].join('\n'));
+    }
+
+    // 네트워크 요청 없이 저장 상태와 캐시만 보고 앱체크 칸에 띄울 상태를 정한다.
+    function getFirebaseAppCheckState(firebaseConfig) {
+        var debugToken = getSavedFirebaseAppCheckDebugToken();
+        if (!debugToken) return { kind:'none' };
+        if (FIREBASE_APPCHECK_LAST_ERROR) return { kind:'error', error:FIREBASE_APPCHECK_LAST_ERROR };
+        var cached = null;
+        try {
+            cached = readFirebaseAppCheckTokenCache(getFirebaseAppCheckCacheKey(getFirebaseAppCheckTarget(firebaseConfig), debugToken));
+        } catch (e) {}
+        if (cached) return { kind:'issued', minutes:Math.max(1, Math.floor((cached.expireTimeMillis - Date.now()) / 60000)) };
+        return { kind:'saved' };
+    }
+
+    function getFirebaseAppCheckToken(firebaseConfig, debugToken) {
+        var target;
+        try {
+            target = getFirebaseAppCheckTarget(firebaseConfig);
+        } catch (err) {
+            FIREBASE_APPCHECK_LAST_ERROR = err.message;
+            return Promise.reject(err);
+        }
+        var cacheKey = getFirebaseAppCheckCacheKey(target, debugToken);
+        var cached = readFirebaseAppCheckTokenCache(cacheKey);
+        if (cached) return Promise.resolve(cached);
+        if (FIREBASE_APPCHECK_PENDING.has(cacheKey)) return FIREBASE_APPCHECK_PENDING.get(cacheKey);
+        var pending = exchangeFirebaseAppCheckDebugToken(target, debugToken).then(function(token) {
+            var entry = { key:cacheKey, token:token.token, expireTimeMillis:token.expireTimeMillis };
+            writeFirebaseAppCheckTokenCache(entry);
+            FIREBASE_APPCHECK_LAST_ERROR = '';
+            return entry;
+        }, function(err) {
+            FIREBASE_APPCHECK_LAST_ERROR = String(err && err.message || err || '');
+            throw err;
+        }).finally(function() {
+            FIREBASE_APPCHECK_PENDING.delete(cacheKey);
+        });
+        FIREBASE_APPCHECK_PENDING.set(cacheKey, pending);
+        return pending;
+    }
+
+    function isFirebaseAppCheckError(message) {
+        return /app.?check|attestation/i.test(String(message || ''));
+    }
+
+    function explainFirebaseAppCheckFailure(error, sentToken) {
+        var message = String(error && error.message || error || '');
+        if (!isFirebaseAppCheckError(message)) return error instanceof Error ? error : new Error(message);
+        // 오래 쓰지 않은 프로젝트는 AI Logic이 꺼져서 콘솔에서 앱체크를 적용해야 다시 켜진다. 그 밖에는 적용 없이 토큰만 있으면 된다.
+        var hint = /deactivated/i.test(message)
+            ? '최근 사용이 없어 이 프로젝트의 Firebase AI Logic이 꺼졌습니다. Firebase 콘솔 → 보안 → App Check → API 탭에서 Firebase AI Logic을 적용' + (sentToken ? '해주세요.' : '하고, 디버그 토큰을 요약 창의 앱체크 칸에 저장해주세요.')
+            : sentToken
+                ? 'Firebase가 앱체크 토큰을 받아들이지 않았습니다. 디버그 토큰을 Firebase 스크립트와 같은 웹앱에 등록했는지 확인해주세요.'
+                : 'Firebase AI는 앱체크 토큰이 있어야 합니다. Firebase 콘솔 App Check에서 디버그 토큰을 만들어 요약 창의 앱체크 칸에 저장해주세요.';
+        return new Error('Firebase 앱체크 인증 실패: ' + hint + ' (원문: ' + message.slice(0, 300) + ')');
+    }
+
     // DOM 격리 샌드박스에서는 원격 ESM을 직접 import할 수 없으므로 Firebase 호출만
-    // 고정된 page-world 모듈 브리지로 실행한다. Vertex 자격증명은 이 브리지에 전달하지 않는다.
+    // 고정된 page-world 모듈 브리지로 실행한다. Vertex 자격증명과 앱체크 디버그 토큰은 이 브리지에 전달하지 않고,
+    // 앱체크는 확프 쪽에서 미리 받아 둔 단기 토큰만 넘긴다.
     function callFirebaseViaPage(request, timeoutMs) {
         return new Promise(function(resolve, reject) {
             var randomPart = window.crypto && typeof window.crypto.randomUUID === 'function'
@@ -2411,7 +2615,7 @@ async function fetchRecentMessages(limit) {
                 finishWithError(new Error('Firebase SDK 모듈을 불러오지 못했습니다. 페이지 CSP를 확인해주세요.'));
             };
             script.textContent = `
-import { initializeApp } from "https://www.gstatic.com/firebasejs/12.8.0/firebase-app.js";
+import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/12.8.0/firebase-app.js";
 import * as FirebaseAI from "https://www.gstatic.com/firebasejs/12.8.0/firebase-ai.js";
 const { getAI, getGenerativeModel, VertexAIBackend, HarmBlockThreshold, HarmCategory } = FirebaseAI;
 const ThinkingLevel = FirebaseAI.ThinkingLevel || {};
@@ -2424,7 +2628,18 @@ const finish = payload => {
 };
 try {
   const req = JSON.parse(channel.textContent || "{}");
-  const app = initializeApp(req.firebaseConfig, req.appName);
+  const app = getApps().find(item => item.name === req.appName) || initializeApp(req.firebaseConfig, req.appName);
+  if (req.appCheckToken) {
+    // getAI가 앱체크를 붙잡기 전에 초기화한다. 같은 앱의 두 번째 호출부터는 첫 공급자가 재사용되므로
+    // 공급자는 앱에 매번 갱신해 두는 토큰을 읽고, 강제 갱신으로 이번 토큰을 SDK에 넘긴다.
+    const AppCheck = await import("https://www.gstatic.com/firebasejs/12.8.0/firebase-app-check.js");
+    app[Symbol.for("crack-ext.firebase-app-check-token")] = req.appCheckToken;
+    const appCheck = AppCheck.initializeAppCheck(app, {
+      provider:new AppCheck.CustomProvider({ getToken:() => Promise.resolve(app[Symbol.for("crack-ext.firebase-app-check-token")]) }),
+      isTokenAutoRefreshEnabled:false
+    });
+    await AppCheck.getToken(appCheck, true);
+  }
   const ai = getAI(app, { backend:new VertexAIBackend("global") });
   const safetySettings = [
     { category:HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold:HarmBlockThreshold.OFF },
@@ -2614,18 +2829,37 @@ try {
         if (provider === 'firebase') {
             const firebaseConfig = parseFirebaseConfig(config.firebaseScript);
             if (!firebaseConfig) throw new Error('Firebase 스크립트 형식이 올바르지 않습니다.');
+            const appCheckDebugToken = getSavedFirebaseAppCheckDebugToken();
+            const appCheckToken = appCheckDebugToken ? await getFirebaseAppCheckToken(firebaseConfig, appCheckDebugToken) : null;
             const generationConfig = getGeminiGenerationConfig(config.model);
             const rawThinkingConfig = getGeminiThinkingConfig(config.model, reasoningValue);
             if (options.jsonMode) generationConfig.responseMimeType = 'application/json';
-            const bridgeResult = await callFirebaseViaPage({
-                firebaseConfig:firebaseConfig,
-                appName:'crack-ext-' + Date.now() + '-' + Math.random().toString(36).slice(2),
-                model:config.model,
-                systemInstruction:currentPrompt,
-                prompt:reinforcedPrompt,
-                generationConfig:generationConfig,
-                thinkingConfig:rawThinkingConfig
-            }, 90000);
+            let bridgeResult;
+            try {
+                bridgeResult = await callFirebaseViaPage({
+                    firebaseConfig:firebaseConfig,
+                    // 앱체크 SDK는 앱 이름마다 토큰을 페이지 IndexedDB에 남긴다. 호출마다 새 이름을 쓰면
+                    // 기록이 계속 쌓이므로 앱체크를 쓸 때는 설정별 고정 이름으로 같은 앱을 다시 쓴다.
+                    appName:appCheckToken
+                        ? 'crack-ext-fbac-' + hashText(JSON.stringify(firebaseConfig))
+                        : 'crack-ext-' + Date.now() + '-' + Math.random().toString(36).slice(2),
+                    appCheckToken:appCheckToken ? { token:appCheckToken.token, expireTimeMillis:appCheckToken.expireTimeMillis } : null,
+                    model:config.model,
+                    systemInstruction:currentPrompt,
+                    prompt:reinforcedPrompt,
+                    generationConfig:generationConfig,
+                    thinkingConfig:rawThinkingConfig
+                }, 90000);
+            } catch (err) {
+                var explained = explainFirebaseAppCheckFailure(err, !!appCheckToken);
+                // 거부된 토큰을 다음 요청에서 다시 쓰지 않도록 캐시를 비운다.
+                if (appCheckToken && isFirebaseAppCheckError(err && err.message)) {
+                    clearFirebaseAppCheckTokenCache();
+                    FIREBASE_APPCHECK_LAST_ERROR = explained.message;
+                }
+                throw explained;
+            }
+            if (appCheckToken) FIREBASE_APPCHECK_LAST_ERROR = '';
             const text = bridgeResult.text;
             if (!text || !text.trim()) throw new Error('Firebase AI 응답에 텍스트가 없습니다.');
             setGeminiUsage(provider, config.model, reasoningValue, bridgeResult.usageMetadata);
@@ -3301,6 +3535,16 @@ transition:border-color .2s,box-shadow .2s,background .2s!important;
 #ce-ai-secondary-settings{display:grid;grid-template-columns:1fr 1fr 2fr;align-items:end;gap:12px;margin-bottom:18px}
 #ce-ai-vertex-wrap{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(220px,1fr);gap:12px;margin:-2px 0 14px;padding:12px;border:1px solid var(--ce-line-soft);border-radius:11px;background:var(--ce-panel-2)}
 #ce-ai-vertex-json{min-height:104px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace!important;font-size:var(--ce-fs-sub)!important;line-height:1.45}
+#ce-ai-appcheck-row{display:grid;grid-template-columns:1.1fr 1.7fr 1.4fr .75fr .95fr;align-items:end;gap:12px;margin-bottom:12px}
+#ce-ai-appcheck-row .fg{min-width:0!important}
+#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1/5}
+#ce-ai-appcheck-row .crack-ext-ai-mbtn{width:100%;height:var(--ce-control-h);padding:0 9px;white-space:nowrap}
+.crack-ext-ai-modal .crack-ext-status-box{display:flex;align-items:center;height:var(--ce-control-h);padding:0 10px;border:1px solid var(--ce-line,#ddd);border-radius:8px;background:var(--ce-bg,#fafafa);color:var(--ce-ink-faint);font-size:var(--ce-fs-body);font-weight:500;line-height:1;box-sizing:border-box;min-width:0;overflow:hidden}
+.crack-ext-status-box span{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.crack-ext-ai-modal .crack-ext-status-box.is-ok{color:var(--ce-sage)}
+.crack-ext-ai-modal .crack-ext-status-box.is-error{color:var(--ce-rose)}
+@media(max-width:820px){#ce-ai-appcheck-row{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(58px,.62fr) minmax(76px,.72fr);gap:8px;margin-bottom:10px}#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1/4}}
+@media(max-width:430px){#ce-ai-appcheck-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1}}
 .crack-ext-vertex-credential-actions{display:flex;align-items:center;gap:7px;margin-top:7px;flex-wrap:wrap}
 .crack-ext-vertex-status{flex:1 1 120px;color:var(--ce-ink-faint);font-size:var(--ce-fs-sub);line-height:1.4}
 .crack-ext-vertex-status.is-saved{color:var(--ce-sage)}
@@ -4869,8 +5113,18 @@ margin-bottom:12px;
     function shortAutoError(msg) {
         var raw = String(msg || '').trim();
         if (!raw) return '알 수 없음';
-        var codeMatch = raw.match(/\[\s*(\d{3})\s*\]|\bHTTP\s*(\d{3})\b|\((\d{3})\)/i);
+        var codeMatch = raw.match(/\[\s*(\d{3})(?:\s[^\]]*)?\]|\bHTTP\s*(\d{3})\b|\((\d{3})\)/i);
         var code = codeMatch ? (codeMatch[1] || codeMatch[2] || codeMatch[3]) : '';
+        if (/앱체크|app.?check|attestation/i.test(raw)) {
+            if (code === '429') return 'Firebase 앱체크 발급 한도 초과(429) · 잠시 후 다시 시도';
+            if (/^5/.test(code)) return 'Firebase 앱체크 서버 오류(' + code + ') · 잠시 후 다시 시도';
+            if (/네트워크|30초|timed? ?out/i.test(raw)) return 'Firebase 앱체크 토큰 발급 실패 · 네트워크 확인';
+            if (/API 키|referr?er|are blocked/i.test(raw)) return 'Firebase 앱체크 실패' + (code ? '(' + code + ')' : '') + ' · API 키 제한 확인';
+            if (code === '400' || code === '404') return 'Firebase 앱체크 실패(' + code + ') · Firebase 스크립트·토큰 값 확인';
+            if (/deactivated/i.test(raw)) return 'Firebase 앱체크 AI Logic 꺼짐' + (code ? '(' + code + ')' : '') + ' · API 탭에서 적용';
+            if (!code && raw.length <= 80) return raw;
+            return 'Firebase 앱체크 인증 실패' + (code ? '(' + code + ')' : '') + ' · 디버그 토큰 확인';
+        }
         if (/\b429\b|resource.?exhausted|rate.?limit|too many requests|요청 한도|사용량/i.test(raw)) return 'AI 요청 한도 초과(429) · 잠시 후 다시 시도';
         if (/\b40[13]\b|permission.?denied|unauthori[sz]ed|unauthenticated|api key not valid|인증 실패/i.test(raw)) return 'AI 인증 실패' + (code ? '(' + code + ')' : '') + ' · 키·권한 확인';
         if (/\b50[0234]\b|unavailable|overloaded|internal error/i.test(raw)) return 'AI 서버 오류' + (code ? '(' + code + ')' : '') + ' · 잠시 후 다시 시도';
@@ -6936,6 +7190,19 @@ if (mainModel && mainProvider) {
             '</div>';
         html += '</div>';
 
+        // Firebase를 고르면 첫 줄 아래에 같은 열 격자로 한 줄을 더 둔다. 상태 칸은 API~턴 수, 버튼은 상단 버튼 아래.
+        html += '<div class="crack-flex-ai-row" id="ce-ai-appcheck-row"' + (savedProvider === 'firebase' ? '' : ' style="display:none"') + '>' +
+            '<div class="fg crack-ext-appcheck-status-field"><div class="crack-ext-field-head"><label>앱체크 디버그 토큰</label>' +
+            infoTip('ce-tip-appcheck', '앱체크 안내', [
+                '2026년 11월 2일부터 Firebase AI는 앱체크 토큰이 있어야 합니다',
+                'Firebase 콘솔 → 보안 → App Check → 앱 탭에서 Firebase 스크립트와 같은 웹앱의 ⋮ → <b>디버그 토큰 관리</b>로 토큰을 만들어 <b>토큰 등록</b>으로 붙여넣습니다.',
+                '<b>토큰 교체</b>에서 비워 두고 확인하면 저장된 토큰을 지웁니다.',
+                '토큰은 확프 저장소에만 보관하고 페이지에는 1시간짜리 앱체크 토큰만 넘깁니다.'
+            ]) + '</div>' +
+            '<div class="crack-ext-status-box" id="ce-ai-appcheck-status" role="status" aria-live="polite"><span>토큰 없음</span></div></div>' +
+            '<div class="fg crack-ext-appcheck-action-field"><button type="button" class="crack-ext-ai-mbtn" id="ce-ai-appcheck-btn">토큰 등록</button></div>' +
+            '</div>';
+
         html += '<div id="ce-ai-vertex-wrap"' + (savedProvider === 'vertex' ? '' : ' style="display:none"') + '>';
         html += '<div class="fg"><label>서비스 계정 JSON</label>';
         html += '<div class="crack-ext-vertex-credential-actions"><span class="crack-ext-vertex-status" id="ce-ai-vertex-status"></span><button class="crack-ext-ai-mbtn crack-ext-vertex-small-btn" id="ce-ai-vertex-use" type="button">JSON 입력 (세션)</button><button class="crack-ext-ai-mbtn crack-ext-vertex-small-btn" id="ce-ai-vertex-save" type="button">JSON 저장/교체</button><button class="crack-ext-ai-mbtn crack-ext-vertex-small-btn" id="ce-ai-vertex-clear" type="button">저장 삭제</button></div>';
@@ -7184,6 +7451,90 @@ if (mainModel && mainProvider) {
             }
         };
 
+        var appCheckRow = overlay.querySelector('#ce-ai-appcheck-row');
+        var appCheckStatus = overlay.querySelector('#ce-ai-appcheck-status');
+        var btnAppCheck = overlay.querySelector('#ce-ai-appcheck-btn');
+
+        function getVisibleFirebaseConfig() {
+            return parseFirebaseConfig(inputFirebase.value || localStorage.getItem('crack_ext_firebase_script') || '');
+        }
+
+        function describeAppCheckField(state) {
+            if (state.kind === 'busy') return { text:'확인 중…', tone:'', title:'앱체크 토큰을 받는 중입니다.' };
+            if (state.kind === 'issued') return { text:'✓ 발급 완료', tone:'is-ok', title:'앱체크 토큰 발급 완료 · ' + state.minutes + '분 유효' };
+            if (state.kind === 'saved') return { text:'✓ 저장됨', tone:'is-ok', title:'디버그 토큰 저장됨 · 다음 Firebase 요청 때 앱체크 토큰을 받습니다' };
+            if (state.kind === 'error') {
+                var cause = shortAutoError(state.error);
+                return { text:'! ' + cause.replace(/^Firebase 앱체크 /, ''), tone:'is-error', title:cause };
+            }
+            return { text:'토큰 없음', tone:'', title:'디버그 토큰 없음 · 앱체크 없이 요청합니다' };
+        }
+
+        // 다른 칸처럼 한 줄에 상태만 짧게 보여주고, 자세한 내용은 마우스를 올리면 보인다.
+        function updateAppCheckField(busy) {
+            var view = describeAppCheckField(busy ? { kind:'busy' } : getFirebaseAppCheckState(getVisibleFirebaseConfig()));
+            appCheckStatus.querySelector('span').textContent = view.text;
+            appCheckStatus.classList.toggle('is-ok', view.tone === 'is-ok');
+            appCheckStatus.classList.toggle('is-error', view.tone === 'is-error');
+            appCheckStatus.title = view.title;
+            btnAppCheck.textContent = getSavedFirebaseAppCheckDebugToken() ? '토큰 교체' : '토큰 등록';
+            btnAppCheck.disabled = !!busy;
+        }
+
+        async function checkAppCheckConnection() {
+            var debugToken = getSavedFirebaseAppCheckDebugToken();
+            if (!debugToken) {
+                updateAppCheckField();
+                return;
+            }
+            var firebaseConfig = getVisibleFirebaseConfig();
+            if (!firebaseConfig) {
+                updateAppCheckField();
+                await showUiAlert('토큰은 저장했습니다. Firebase 스크립트를 넣으면 다음 요청 때 앱체크 토큰을 받습니다.', '앱체크', { tone:'warning' });
+                return;
+            }
+            updateAppCheckField(true);
+            try {
+                await getFirebaseAppCheckToken(firebaseConfig, debugToken);
+                updateAppCheckField();
+                showToast('앱체크 토큰을 발급받았습니다.');
+            } catch (err) {
+                updateAppCheckField();
+                await showUiAlert(err.message, '앱체크 연결 실패', { tone:'danger' });
+            }
+        }
+
+        updateAppCheckField();
+
+        btnAppCheck.onclick = async function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var hasDebugToken = !!getSavedFirebaseAppCheckDebugToken();
+            // 비밀값이라 Vertex JSON처럼 사이트 DOM이 아닌 브라우저 입력창으로 받는다.
+            var rawToken = window.prompt(hasDebugToken
+                ? '새 앱체크 디버그 토큰을 붙여넣으면 교체합니다. 비워 두고 확인을 누르면 저장된 토큰을 지웁니다.'
+                : 'Firebase 콘솔 App Check에서 만든 디버그 토큰을 붙여넣으세요.', '');
+            if (rawToken === null) return;
+            var debugToken = String(rawToken).trim();
+            if (!debugToken) {
+                if (!hasDebugToken) return;
+                var confirmed = await showUiConfirm('저장된 앱체크 디버그 토큰을 지울까요? 지우면 앱체크 없이 요청합니다.', '앱체크 토큰 삭제', { confirmText:'삭제', danger:true });
+                if (!confirmed) return;
+                var clearedPersistently = deleteFirebaseAppCheckDebugToken();
+                updateAppCheckField();
+                showToast(clearedPersistently ? '앱체크 디버그 토큰을 지웠습니다.' : '현재 세션의 앱체크 디버그 토큰을 지웠습니다.');
+                return;
+            }
+            if (!/^[A-Za-z0-9._-]{8,200}$/.test(debugToken)) {
+                await showUiAlert('Firebase 콘솔에서 복사한 디버그 토큰을 공백 없이 그대로 붙여넣어 주세요.', '앱체크 토큰 오류', { tone:'danger' });
+                return;
+            }
+            if (!saveFirebaseAppCheckDebugToken(debugToken)) {
+                await showUiAlert('GM 저장소를 사용할 수 없어 이 페이지를 닫을 때까지만 보관합니다.', '세션 보관', { tone:'warning' });
+            }
+            await checkAppCheckConnection();
+        };
+
         function getSelectedPromptSlot() {
             var slots = loadPromptSlots(promptMode);
             return slots.find(function(slot) { return slot.id === selPromptSlot.value; }) || getActivePromptSlot(promptMode);
@@ -7233,6 +7584,7 @@ if (mainModel && mainProvider) {
             secondarySettings.style.display = enabled ? 'none' : '';
             autoPanel.style.display = enabled ? 'none' : '';
             vertexWrap.style.display = enabled ? 'none' : (selProvider.value === 'vertex' ? 'grid' : 'none');
+            appCheckRow.style.display = enabled ? 'none' : (selProvider.value === 'firebase' ? '' : 'none');
             mainActions.style.display = enabled ? 'none' : 'flex';
             mainFooter.classList.toggle('is-prompt-editing', enabled);
             btnSave.style.display = enabled ? 'none' : 'block';
@@ -7271,6 +7623,7 @@ if (mainModel && mainProvider) {
             var firebaseValue = inputFirebase.value || '';
             if ((localStorage.getItem('crack_ext_firebase_script') || '') !== firebaseValue) {
                 localStorage.setItem('crack_ext_firebase_script', firebaseValue);
+                updateAppCheckField();
             }
         });
         bindAutoSave(inputVertexLocation, function() { saveVisibleCredentials('vertex'); });
@@ -7294,11 +7647,14 @@ if (mainModel && mainProvider) {
                 keyWrap.style.display = 'none';
                 firebaseWrap.style.display = 'block';
                 vertexWrap.style.display = 'none';
+                appCheckRow.style.display = '';
                 inputFirebase.value = localStorage.getItem('crack_ext_firebase_script') || '';
+                updateAppCheckField();
             } else if (provider === 'vertex') {
                 keyWrap.style.display = 'none';
                 firebaseWrap.style.display = 'none';
                 vertexWrap.style.display = 'grid';
+                appCheckRow.style.display = 'none';
                 inputVertexLocation.value = getSavedVertexLocation();
                 inputVertexProject.value = getSavedVertexProjectId();
                 updateVertexCredentialStatus();
@@ -7306,6 +7662,7 @@ if (mainModel && mainProvider) {
                 keyWrap.style.display = 'block';
                 firebaseWrap.style.display = 'none';
                 vertexWrap.style.display = 'none';
+                appCheckRow.style.display = 'none';
                 inputKey.value = getSavedApiKey(provider);
             }
             updateModelOptions(provider);
@@ -7990,6 +8347,7 @@ if (mainModel && mainProvider) {
                 btnSave.disabled = false;
                 btnGen.innerHTML = UI_ICONS.sparkle + '<span>재생성 (리롤)</span>';
                 updatePreviewCards();
+                if (selProvider.value === 'firebase') updateAppCheckField();
             }
         };
 
