@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.2.1
+// @version      4.2.3
 // @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 번역 버튼 꾹 눌러 빠른 설정, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -293,6 +293,8 @@ ${TRANSLATION_ONLY_RULE}`;
                 // 쓰기 요청 사이에 간격을 둔다. 실패하면(429·5xx 포함) 남은 정리는 다음 전송 때 다시 한다.
                 if (patched++) await new Promise(resolve => setTimeout(resolve, 80));
                 await patchMessage(chatId, msg._id || msg.id, cleanContent);
+                // 지운 OOC가 화면의 유저 말풍선에서도 바로 빠지게 크랙 화면 저장소를 맞춘다.
+                await syncCrackMessage(chatId, msg._id || msg.id, cleanContent);
                 console.log(`[Crack Translator] Cleaned up OOC marker in older message: ${msg._id || msg.id}`);
               }
             }
@@ -1743,6 +1745,30 @@ ${TRANSLATION_ONLY_RULE}`;
   cursor: pointer;
 }
 
+.t-apply-btn {
+  flex: 0 0 auto;
+  height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--t-pbg);
+  color: var(--t-pfg);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.t-apply-btn:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.t-apply-btn:focus-visible {
+  outline: 2px solid var(--t-t1);
+  outline-offset: 2px;
+}
+
 .t-btn-ghost {
   border: 1px solid var(--t-line);
   background: transparent;
@@ -2100,6 +2126,12 @@ ${TRANSLATION_ONLY_RULE}`;
     height: 44px;
   }
 
+  .t-apply-btn {
+    height: 44px;
+    padding: 0 16px;
+    font-size: 14px;
+  }
+
   /* 빠른 설정 */
   #trans-quick {
     top: auto !important;
@@ -2443,6 +2475,7 @@ ${TRANSLATION_ONLY_RULE}`;
         <div class="t-row">
           <input type="password" id="trans-appcheck-token" placeholder="Firebase 콘솔에서 만든 디버그 토큰" autocomplete="off" spellcheck="false">
           <button type="button" class="t-icon-btn t-bordered" id="trans-appcheck-eye" aria-label="토큰 보기" aria-pressed="false">${uiIcon('eye', 18)}</button>
+          <button type="button" class="t-apply-btn" id="trans-appcheck-apply"><span class="t-tx">적용</span></button>
         </div>
       </div>
       <div class="t-row t-key-status-row">
@@ -2569,7 +2602,7 @@ ${TRANSLATION_ONLY_RULE}`;
     think: ['추론', 'Gemini 3 계열은 추론 단계를, 2.5 계열은 추론 토큰 예산(128 이상)을 정해요. 높을수록 느려지고 비용이 늘어요.'],
     'ooc-turns': ['유지할 턴', '정한 턴이 지나면 지난 대화 기록에서 OOC 문구를 지워요.'],
     slots: ['저장한 치환', '번역 결과 창의 치환 칩을 누르면 번역문에서 찾을 말을 바꿀 말로 한 번에 바꿔요.'],
-    appcheck: ['앱체크 디버그 토큰', '2026년 11월 2일부터 Firebase AI는 앱체크 토큰이 없는 요청을 막아요. Firebase 콘솔 → 보안 → App Check → 앱 탭에서 Firebase 설정과 같은 웹앱의 ⋮ → 디버그 토큰 관리로 토큰을 만들어 붙여넣으세요. 토큰은 탬퍼몽키 저장소에만 두고, 번역할 때는 1시간짜리 앱체크 토큰만 받아서 써요.'],
+    appcheck: ['앱체크 디버그 토큰', '2026년 11월 2일부터 Firebase AI는 앱체크 토큰이 없는 요청을 막아요. Firebase 콘솔 → 보안 → App Check → 앱 탭에서 Firebase 설정과 같은 웹앱의 ⋮ → 디버그 토큰 관리로 토큰을 만들어 붙여넣고 적용을 누르세요. 적용하면 저장하고 바로 한 번 받아 봐서 결과를 옆 상태칸에 보여 줘요. 칸을 비우고 적용하면 저장된 토큰을 지워요. 토큰은 탬퍼몽키 저장소에만 두고, 번역할 때는 1시간짜리 앱체크 토큰만 받아서 써요.'],
   };
 
   // ----- 설명 팝업 (i 버튼) -----
@@ -2685,12 +2718,15 @@ ${TRANSLATION_ONLY_RULE}`;
   function refreshAppCheckStatus(busy = false) {
     const chip = byId('trans-appcheck-status');
     if (!chip) return;
-    const state = busy ? { kind: 'busy' } : getAppCheckState(byId('trans-firebase-script')?.value || '');
+    // 입력칸 값이 저장값과 다르면 아직 적용 전이다. 적용을 눌러야 저장하고 확인한다.
+    const typed = byId('trans-appcheck-token')?.value.trim() ?? getAppCheckDebugToken();
+    const state = busy ? { kind: 'busy' } : typed !== getAppCheckDebugToken() ? { kind: 'pending' } : getAppCheckState(byId('trans-firebase-script')?.value || '');
     const [tone, text, title] = {
       none: ['warn', '앱체크 없음', '디버그 토큰이 없어 앱체크 없이 요청해요'],
       saved: ['ok', '앱체크 저장됨', '다음 Firebase 번역 때 앱체크 토큰을 받아요'],
       issued: ['ok', '앱체크 발급 완료', `앱체크 토큰 ${state.minutes}분 남음`],
       busy: ['warn', '앱체크 확인 중…', '앱체크 토큰을 받는 중이에요'],
+      pending: ['warn', '앱체크 적용 전', '적용을 눌러야 저장하고 확인해요'],
       error: ['error', '앱체크 실패', String(state.error || '').slice(0, 200)],
     }[state.kind];
     if (chip.dataset.tone !== tone) chip.dataset.tone = tone;
@@ -3077,12 +3113,12 @@ ${TRANSLATION_ONLY_RULE}`;
 
     const panel = byId('trans-setting-panel');
     // 새 치환 입력칸은 '추가'를 눌러야 저장되는 값이라 자동 저장에서 뺀다.
-    const skipAutoSave = el => !el || el.id === 'trans-slot-find' || el.id === 'trans-slot-with';
+    const skipAutoSave = el => !el || el.id === 'trans-slot-find' || el.id === 'trans-slot-with' || el.id === 'trans-appcheck-token';
     panel.addEventListener('input', event => {
       const el = event.target;
       if (el.id === 'trans-custom-prompt') refreshGuideCount();
       if (el.id === 'trans-api-key' || el.id === 'trans-firebase-script') refreshKeyStatus();
-      if (el.id === 'trans-firebase-script') refreshAppCheckStatus();
+      if (el.id === 'trans-firebase-script' || el.id === 'trans-appcheck-token') refreshAppCheckStatus();
       if (!skipAutoSave(el) && el.matches('input, textarea')) scheduleAutoSave();
     });
     panel.addEventListener('change', event => {
@@ -3115,6 +3151,49 @@ ${TRANSLATION_ONLY_RULE}`;
       input.type = show ? 'text' : 'password';
       appCheckEye.setAttribute('aria-pressed', String(show));
       appCheckEye.setAttribute('aria-label', show ? '토큰 숨기기' : '토큰 보기');
+    });
+    // 적용: 입력칸의 토큰을 저장하고 바로 한 번 받아 본다. 비워 두고 적용하면 저장된 토큰을 지운다.
+    const appCheckApply = byId('trans-appcheck-apply');
+    const applyAppCheckToken = async () => {
+      const input = byId('trans-appcheck-token');
+      if (!input || appCheckApply.disabled) return;
+      const next = input.value.trim();
+      const previous = getAppCheckDebugToken();
+      if (!next) {
+        if (!previous) { refreshAppCheckStatus(); return; }
+        const confirmed = await transConfirm('저장된 앱체크 디버그 토큰을 지울까요? 지우면 앱체크 없이 요청해요.', { title: '앱체크 토큰 삭제', confirmLabel: '지우기', danger: true });
+        if (!confirmed) { input.value = previous; refreshAppCheckStatus(); return; }
+        GM_setValue('firebaseAppCheckDebugToken', '');
+        clearAppCheckCache();
+        appCheckLastError = '';
+        refreshAppCheckStatus();
+        showNudge('앱체크 디버그 토큰을 지웠어요.', 'ok');
+        return;
+      }
+      if (!FIREBASE_APPCHECK_TOKEN_RE.test(next)) {
+        notifyError('앱체크 토큰 형식이 아니에요', 'Firebase 콘솔의 디버그 토큰 관리에서 복사한 토큰(8-4-4-4-12자리)을 공백 없이 붙여넣어 주세요.', '앱체크 토큰');
+        return;
+      }
+      input.value = next;
+      GM_setValue('firebaseAppCheckDebugToken', next);
+      if (next !== previous) clearAppCheckCache();
+      appCheckLastError = '';
+      const configRaw = byId('trans-firebase-script')?.value.trim() || '';
+      let hasConfig = false;
+      try { hasConfig = !!parseFirebaseConfig(configRaw).configObj; } catch (_) {}
+      if (byId('trans-api-provider')?.value !== 'firebase' || !hasConfig) {
+        refreshAppCheckStatus();
+        showNudge('토큰을 저장했어요. Firebase 설정을 넣으면 다음 번역 때 앱체크 토큰을 받아요.', 'info');
+        return;
+      }
+      appCheckApply.disabled = true;
+      try { await verifyAppCheckToken(); }
+      finally { appCheckApply.disabled = false; }
+      if (getAppCheckState(configRaw).kind === 'issued') showNudge('앱체크 토큰을 받았어요.', 'ok');
+    };
+    appCheckApply?.addEventListener('click', applyAppCheckToken);
+    byId('trans-appcheck-token')?.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); applyAppCheckToken(); }
     });
     for (const id of ['trans-setting-panel', 'trans-result-modal', 'trans-quick']) {
       byId(id)?.addEventListener('click', event => {
@@ -3429,15 +3508,7 @@ ${TRANSLATION_ONLY_RULE}`;
       GM_setValue('apiProvider', apiProviderSelect.value);
       GM_setValue('apiKey', apiKeyInput.value.trim());
       GM_setValue('firebaseScript', firebaseScriptInput.value.trim());
-      // 디버그 토큰이 바뀌면 받아 둔 앱체크 토큰을 버리고, Firebase면 바로 한 번 받아서 칩에 결과를 띄운다.
-      const nextAppCheckToken = appCheckTokenInput.value.trim();
-      if (nextAppCheckToken !== getAppCheckDebugToken()) {
-        GM_setValue('firebaseAppCheckDebugToken', nextAppCheckToken);
-        clearAppCheckCache();
-        appCheckLastError = '';
-        if (nextAppCheckToken && apiProviderSelect.value === 'firebase') verifyAppCheckToken();
-        else refreshAppCheckStatus();
-      }
+      // 앱체크 디버그 토큰은 자동 저장하지 않는다. 적용 버튼(applyAppCheckToken)이 저장과 확인을 함께 한다.
       GM_setValue('apiModel', modelSelect.value);
       GM_setValue('transMode', modeSelect.value);
       GM_setValue('customPromptKo', currentPrompts.ko);
@@ -4796,6 +4867,143 @@ ${TRANSLATION_ONLY_RULE}`;
     }
   }
 
+  // ---------- 크랙 화면 저장소 맞추기 (새로고침 없이) ----------
+  // 크랙 말풍선은 메시지 저장소(zustand)에서 그려진다. 서버 글만 바꾸면 화면과 크랙 수정창은 옛 글을 들고 있다.
+  // 크랙 자체 resyncMessage(서버에서 그 메시지를 다시 받아 저장소에 넣음)를 부르면 크랙이 말풍선을 새 글로
+  // 다시 그린다. 리롤 스위트 2.4.6·핀셋과 같은 방식이다. 모바일 브라우저 일부는 스크립트를 페이지와 분리된
+  // 공간에서 돌려 React 내부가 안 보이므로, 페이지에 작은 연결부를 넣어 그쪽에서 부른다. 문자열(JSON)만 주고받는다.
+  const CRACK_BRIDGE_REQUEST = 'crack-translator:page-bridge-request';
+  const CRACK_BRIDGE_RESPONSE = 'crack-translator:page-bridge-response';
+  const crackBridge = { installed: false, seq: 0, waiters: new Map() };
+
+  // 문자열로 바꿔 페이지에 넣는 함수라 바깥 변수를 쓰지 않는다.
+  function crackTranslatorPageBridge(requestType, responseType) {
+    if (window.__crackTranslatorPageBridge) return;
+    window.__crackTranslatorPageBridge = true;
+    const fiberOf = node => {
+      for (let el = node, depth = 0; el && depth < 12; depth += 1, el = el.parentElement) {
+        const key = Object.getOwnPropertyNames(el).find(name =>
+          name.startsWith('__reactFiber$') || name.startsWith('__reactInternalInstance$'));
+        if (key && el[key]) return el[key];
+      }
+      return null;
+    };
+    const valuesOf = fiber => {
+      const values = [];
+      for (const candidate of [fiber, fiber && fiber.alternate]) {
+        if (!candidate) continue;
+        for (const props of [candidate.memoizedProps, candidate.pendingProps]) {
+          const value = props && props.value;
+          if (value && typeof value === 'object' && !values.includes(value)) values.push(value);
+        }
+      }
+      return values;
+    };
+    const isActions = value => typeof value.resyncMessage === 'function' &&
+      typeof value.removeMessage === 'function' && typeof value.sendMessage === 'function';
+    const isStatus = value => typeof value.status === 'string' && 'chatId' in value &&
+      Object.prototype.hasOwnProperty.call(value, 'selectedMessageId');
+    const isStore = value => typeof value.getState === 'function' && typeof value.subscribe === 'function' &&
+      !!value.getState() && typeof value.getState().messages?.get === 'function';
+    // 메시지 말풍선이나 입력창에서 위로 올라가며 크랙 채팅 함수·상태·메시지 저장소를 찾는다.
+    const locate = chatId => {
+      const found = { actions: null, status: null, store: null };
+      const anchors = Array.from(document.querySelectorAll('[data-message-group-id]')).slice(0, 3);
+      anchors.push(document.querySelector('.__chat_input_textarea[contenteditable="true"], .tiptap.ProseMirror[contenteditable="true"]'));
+      for (const anchor of anchors) {
+        let fiber = anchor && anchor.isConnected ? fiberOf(anchor) : null;
+        if (!fiber) continue;
+        for (let depth = 0; fiber && depth < 10000; depth += 1, fiber = fiber.return) {
+          for (const value of valuesOf(fiber)) {
+            try {
+              if (!found.actions && isActions(value)) found.actions = value;
+              if (!found.status && isStatus(value)) found.status = value;
+              if (!found.store && isStore(value)) found.store = value;
+            } catch (e) {}
+          }
+        }
+        break;
+      }
+      // 다른 방의 크랙 함수면 쓰지 않는다.
+      if (found.status && String(found.status.chatId) !== String(chatId)) found.actions = null;
+      return found;
+    };
+    const reply = (id, payload) => document.dispatchEvent(new CustomEvent(responseType, {
+      detail: JSON.stringify(Object.assign({ id }, payload)),
+    }));
+    document.addEventListener(requestType, event => {
+      let request = null;
+      try { request = JSON.parse(event.detail); } catch (e) {}
+      if (!request || !request.id) return;
+      const found = locate(request.chatId);
+      if (request.op === 'read') {
+        const message = found.store && found.store.getState().messages.get(request.messageId);
+        reply(request.id, { ok: !!found.store, content: message && typeof message.content === 'string' ? message.content : null });
+      } else if (request.op === 'resync') {
+        if (!found.actions) {
+          reply(request.id, { ok: false, error: 'not-found' });
+          return;
+        }
+        Promise.resolve().then(() => found.actions.resyncMessage(request.messageId)).then(
+          () => reply(request.id, { ok: true }),
+          error => reply(request.id, { ok: false, error: String((error && error.message) || error) }));
+      }
+    });
+  }
+
+  function callCrackBridge(request, timeoutMs) {
+    if (!crackBridge.installed) {
+      crackBridge.installed = true;
+      document.addEventListener(CRACK_BRIDGE_RESPONSE, event => {
+        let response = null;
+        try { response = JSON.parse(event.detail); } catch (_) {}
+        const waiter = response && crackBridge.waiters.get(response.id);
+        if (!waiter) return;
+        crackBridge.waiters.delete(response.id);
+        clearTimeout(waiter.timer);
+        waiter.resolve(response);
+      });
+      const script = document.createElement('script');
+      script.textContent = `(${crackTranslatorPageBridge})(${JSON.stringify(CRACK_BRIDGE_REQUEST)}, ${JSON.stringify(CRACK_BRIDGE_RESPONSE)});`;
+      (document.head || document.documentElement).appendChild(script);
+      script.remove();
+    }
+    return new Promise(resolve => {
+      crackBridge.seq += 1;
+      const id = `${Date.now().toString(36)}-${crackBridge.seq}`;
+      const timer = setTimeout(() => {
+        crackBridge.waiters.delete(id);
+        resolve({ ok: false, error: 'timeout' });
+      }, timeoutMs);
+      crackBridge.waiters.set(id, { resolve, timer });
+      document.dispatchEvent(new CustomEvent(CRACK_BRIDGE_REQUEST, { detail: JSON.stringify({ ...request, id }) }));
+    });
+  }
+
+  // 서버에서 그 메시지를 다시 받아 크랙 화면 저장소를 맞추고, 저장소 글이 기대한 글이 됐는지 확인한다.
+  async function syncCrackMessage(chatId, messageId, expectedContent) {
+    try {
+      const request = { chatId: String(chatId), messageId: String(messageId) };
+      const synced = await callCrackBridge({ ...request, op: 'resync' }, 15000);
+      if (!synced.ok) return false;
+      const stored = await callCrackBridge({ ...request, op: 'read' }, 3000);
+      return stored.ok && typeof stored.content === 'string' &&
+        normalizeForMessageMatch(stored.content) === normalizeForMessageMatch(expectedContent);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // 크랙이 저장소 변경을 말풍선에 그릴 때까지 잠깐 기다린다(보통 다음 프레임).
+  async function waitForNativeBubble(record, timeoutMs = 1500) {
+    const target = getLivePatchNorms(record).content;
+    for (const deadline = Date.now() + timeoutMs; Date.now() < deadline;) {
+      if (readLiveBubbleNorm(record) === target) return true;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return false;
+  }
+
   function findMessageById(messages, messageId) {
     if (!messageId) return null;
     const targetId = String(messageId);
@@ -5970,12 +6178,15 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       ].filter(Boolean))];
 
       await patchMessage(chatId, messageId, content);
-      liveMessagePatches.set(patchKey, record);
       originalMessageSources.set(patchKey, { ...record });
       if (originalMessageSources.size > 500) {
         const oldestKey = originalMessageSources.keys().next().value;
         if (oldestKey) originalMessageSources.delete(oldestKey);
       }
+      // 크랙 화면 저장소를 서버 글로 맞추면 크랙이 말풍선을 직접 번역문으로 다시 그리고(native), 크랙 수정창도
+      // 번역문을 연다. 안 되면 지금처럼 번역문 덮개로 보여 준다. 덮개 기록은 그다음에 건다.
+      if (await syncCrackMessage(chatId, messageId, content)) await waitForNativeBubble(record);
+      liveMessagePatches.set(patchKey, record);
       const displayResult = applyLiveMessagePatch(record);
       // native는 크랙이 이미 말풍선을 번역문으로 다시 그린 경우다. 실패로 알리지 않는다.
       if (displayResult === 'visible' || displayResult === 'native') return 'visible';
