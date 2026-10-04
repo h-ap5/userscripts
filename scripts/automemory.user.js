@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.7
+// @version      2.4.0.8
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -3537,14 +3537,19 @@ transition:border-color .2s,box-shadow .2s,background .2s!important;
 #ce-ai-vertex-json{min-height:104px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace!important;font-size:var(--ce-fs-sub)!important;line-height:1.45}
 #ce-ai-appcheck-row{display:grid;grid-template-columns:1.1fr 1.7fr 1.4fr .75fr .95fr;align-items:end;gap:12px;margin-bottom:12px}
 #ce-ai-appcheck-row .fg{min-width:0!important}
-#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1/5}
+#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1/5;grid-row:1}
+#ce-ai-appcheck-row .crack-ext-appcheck-action-field{grid-column:-2/-1;grid-row:1}
+#ce-ai-appcheck-row .crack-ext-appcheck-state{grid-column:1/5;grid-row:1;justify-self:end;align-self:start;max-width:62%}
 #ce-ai-appcheck-row .crack-ext-ai-mbtn{width:100%;height:var(--ce-control-h);padding:0 9px;white-space:nowrap}
 .crack-ext-ai-modal .crack-ext-status-box{display:flex;align-items:center;height:var(--ce-control-h);padding:0 10px;border:1px solid var(--ce-line,#ddd);border-radius:8px;background:var(--ce-bg,#fafafa);color:var(--ce-ink-faint);font-size:var(--ce-fs-body);font-weight:500;line-height:1;box-sizing:border-box;min-width:0;overflow:hidden}
 .crack-ext-status-box span{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.crack-ext-ai-modal .crack-ext-appcheck-state{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--ce-ink-faint);font-size:var(--ce-fs-sub);font-weight:600;line-height:18px}
+.crack-ext-ai-modal .crack-ext-appcheck-state.is-ok{color:var(--ce-sage)}
+.crack-ext-ai-modal .crack-ext-appcheck-state.is-error{color:var(--ce-rose)}
 .crack-ext-ai-modal .crack-ext-status-box.is-ok{color:var(--ce-sage)}
 .crack-ext-ai-modal .crack-ext-status-box.is-error{color:var(--ce-rose)}
-@media(max-width:820px){#ce-ai-appcheck-row{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(58px,.62fr) minmax(76px,.72fr);gap:8px;margin-bottom:10px}#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1/4}}
-@media(max-width:430px){#ce-ai-appcheck-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1}}
+@media(max-width:820px){#ce-ai-appcheck-row{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(58px,.62fr) minmax(76px,.72fr);gap:8px;margin-bottom:10px}#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1/4}#ce-ai-appcheck-row .crack-ext-appcheck-state{grid-column:1/4}}
+@media(max-width:430px){#ce-ai-appcheck-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1}#ce-ai-appcheck-row .crack-ext-appcheck-state{grid-column:2;justify-self:start;max-width:100%}}
 .crack-ext-vertex-credential-actions{display:flex;align-items:center;gap:7px;margin-top:7px;flex-wrap:wrap}
 .crack-ext-vertex-status{flex:1 1 120px;color:var(--ce-ink-faint);font-size:var(--ce-fs-sub);line-height:1.4}
 .crack-ext-vertex-status.is-saved{color:var(--ce-sage)}
@@ -7190,17 +7195,19 @@ if (mainModel && mainProvider) {
             '</div>';
         html += '</div>';
 
-        // Firebase를 고르면 첫 줄 아래에 같은 열 격자로 한 줄을 더 둔다. 상태 칸은 API~턴 수, 버튼은 상단 버튼 아래.
+        // Firebase를 고르면 첫 줄 아래에 같은 열 격자로 한 줄을 더 둔다. 입력칸은 API~턴 수, 적용 버튼은 상단 버튼 아래.
         html += '<div class="crack-flex-ai-row" id="ce-ai-appcheck-row"' + (savedProvider === 'firebase' ? '' : ' style="display:none"') + '>' +
-            '<div class="fg crack-ext-appcheck-status-field"><div class="crack-ext-field-head"><label>앱체크 디버그 토큰</label>' +
+            '<div class="fg crack-ext-appcheck-status-field"><div class="crack-ext-field-head"><label for="ce-ai-appcheck-token">앱체크 디버그 토큰</label>' +
             infoTip('ce-tip-appcheck', '앱체크 안내', [
                 '2026년 11월 2일부터 Firebase AI는 앱체크 토큰이 있어야 합니다',
-                'Firebase 콘솔 → 보안 → App Check → 앱 탭에서 Firebase 스크립트와 같은 웹앱의 ⋮ → <b>디버그 토큰 관리</b>로 토큰을 만들어 <b>토큰 등록</b>으로 붙여넣습니다.',
-                '<b>토큰 교체</b>에서 비워 두고 확인하면 저장된 토큰을 지웁니다.',
+                'Firebase 콘솔 → 보안 → App Check → 앱 탭에서 Firebase 스크립트와 같은 웹앱의 ⋮ → <b>디버그 토큰 관리</b>로 토큰을 만들어 이 칸에 붙여넣고 <b>적용</b>을 누릅니다.',
+                '적용하면 저장하고 바로 한 번 받아 봐서 결과를 칸 위에 보여 줍니다. 칸을 비우고 적용하면 저장된 토큰을 지웁니다.',
                 '토큰은 확프 저장소에만 보관하고 페이지에는 1시간짜리 앱체크 토큰만 넘깁니다.'
             ]) + '</div>' +
-            '<div class="crack-ext-status-box" id="ce-ai-appcheck-status" role="status" aria-live="polite"><span>토큰 없음</span></div></div>' +
-            '<div class="fg crack-ext-appcheck-action-field"><button type="button" class="crack-ext-ai-mbtn" id="ce-ai-appcheck-btn">토큰 등록</button></div>' +
+            '<input type="password" id="ce-ai-appcheck-token" autocomplete="off" spellcheck="false" placeholder="Firebase 콘솔에서 만든 디버그 토큰"></div>' +
+            '<div class="fg crack-ext-appcheck-action-field"><button type="button" class="crack-ext-ai-mbtn" id="ce-ai-appcheck-btn">적용</button></div>' +
+            // 상태는 줄 격자 위에 따로 얹는다. 넓은 화면은 라벨 줄 오른쪽, 휴대폰은 적용 버튼 위 빈자리.
+            '<span class="crack-ext-appcheck-state" id="ce-ai-appcheck-status" role="status" aria-live="polite">토큰 없음</span>' +
             '</div>';
 
         html += '<div id="ce-ai-vertex-wrap"' + (savedProvider === 'vertex' ? '' : ' style="display:none"') + '>';
@@ -7453,7 +7460,9 @@ if (mainModel && mainProvider) {
 
         var appCheckRow = overlay.querySelector('#ce-ai-appcheck-row');
         var appCheckStatus = overlay.querySelector('#ce-ai-appcheck-status');
+        var appCheckInput = overlay.querySelector('#ce-ai-appcheck-token');
         var btnAppCheck = overlay.querySelector('#ce-ai-appcheck-btn');
+        appCheckInput.value = getSavedFirebaseAppCheckDebugToken();
 
         function getVisibleFirebaseConfig() {
             return parseFirebaseConfig(inputFirebase.value || localStorage.getItem('crack_ext_firebase_script') || '');
@@ -7470,14 +7479,17 @@ if (mainModel && mainProvider) {
             return { text:'토큰 없음', tone:'', title:'디버그 토큰 없음 · 앱체크 없이 요청합니다' };
         }
 
-        // 다른 칸처럼 한 줄에 상태만 짧게 보여주고, 자세한 내용은 마우스를 올리면 보인다.
+        // 상태는 라벨 줄 오른쪽에 짧게 보여주고, 자세한 내용은 마우스를 올리면 보인다.
+        // 칸에 쓴 값이 저장값과 다르면 아직 적용 전이다. 입력만으로는 저장하지 않는다.
         function updateAppCheckField(busy) {
-            var view = describeAppCheckField(busy ? { kind:'busy' } : getFirebaseAppCheckState(getVisibleFirebaseConfig()));
-            appCheckStatus.querySelector('span').textContent = view.text;
+            var pending = !busy && String(appCheckInput.value || '').trim() !== getSavedFirebaseAppCheckDebugToken();
+            var view = pending
+                ? { text:'적용 전', tone:'', title:'적용을 눌러야 저장하고 확인합니다' }
+                : describeAppCheckField(busy ? { kind:'busy' } : getFirebaseAppCheckState(getVisibleFirebaseConfig()));
+            appCheckStatus.textContent = view.text;
             appCheckStatus.classList.toggle('is-ok', view.tone === 'is-ok');
             appCheckStatus.classList.toggle('is-error', view.tone === 'is-error');
             appCheckStatus.title = view.title;
-            btnAppCheck.textContent = getSavedFirebaseAppCheckDebugToken() ? '토큰 교체' : '토큰 등록';
             btnAppCheck.disabled = !!busy;
         }
 
@@ -7506,21 +7518,21 @@ if (mainModel && mainProvider) {
 
         updateAppCheckField();
 
-        btnAppCheck.onclick = async function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            var hasDebugToken = !!getSavedFirebaseAppCheckDebugToken();
-            // 비밀값이라 Vertex JSON처럼 사이트 DOM이 아닌 브라우저 입력창으로 받는다.
-            var rawToken = window.prompt(hasDebugToken
-                ? '새 앱체크 디버그 토큰을 붙여넣으면 교체합니다. 비워 두고 확인을 누르면 저장된 토큰을 지웁니다.'
-                : 'Firebase 콘솔 App Check에서 만든 디버그 토큰을 붙여넣으세요.', '');
-            if (rawToken === null) return;
-            var debugToken = String(rawToken).trim();
+        // 적용: 칸의 토큰을 저장하고 바로 한 번 받아 본다. 같은 토큰이면 저장된 발급분을 다시 쓴다.
+        async function applyAppCheckToken() {
+            if (btnAppCheck.disabled) return;
+            var savedToken = getSavedFirebaseAppCheckDebugToken();
+            var debugToken = String(appCheckInput.value || '').trim();
             if (!debugToken) {
-                if (!hasDebugToken) return;
+                if (!savedToken) { updateAppCheckField(); return; }
                 var confirmed = await showUiConfirm('저장된 앱체크 디버그 토큰을 지울까요? 지우면 앱체크 없이 요청합니다.', '앱체크 토큰 삭제', { confirmText:'삭제', danger:true });
-                if (!confirmed) return;
+                if (!confirmed) {
+                    appCheckInput.value = savedToken;
+                    updateAppCheckField();
+                    return;
+                }
                 var clearedPersistently = deleteFirebaseAppCheckDebugToken();
+                appCheckInput.value = '';
                 updateAppCheckField();
                 showToast(clearedPersistently ? '앱체크 디버그 토큰을 지웠습니다.' : '현재 세션의 앱체크 디버그 토큰을 지웠습니다.');
                 return;
@@ -7529,10 +7541,25 @@ if (mainModel && mainProvider) {
                 await showUiAlert('Firebase 콘솔에서 복사한 디버그 토큰을 공백 없이 그대로 붙여넣어 주세요.', '앱체크 토큰 오류', { tone:'danger' });
                 return;
             }
-            if (!saveFirebaseAppCheckDebugToken(debugToken)) {
+            appCheckInput.value = debugToken;
+            if (debugToken !== savedToken && !saveFirebaseAppCheckDebugToken(debugToken)) {
                 await showUiAlert('GM 저장소를 사용할 수 없어 이 페이지를 닫을 때까지만 보관합니다.', '세션 보관', { tone:'warning' });
             }
             await checkAppCheckConnection();
+        }
+
+        appCheckInput.addEventListener('input', function() { updateAppCheckField(); });
+        appCheckInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.isComposing) {
+                e.preventDefault();
+                e.stopPropagation();
+                applyAppCheckToken();
+            }
+        });
+        btnAppCheck.onclick = function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            applyAppCheckToken();
         };
 
         function getSelectedPromptSlot() {
