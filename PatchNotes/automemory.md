@@ -159,6 +159,18 @@
 
 * `추가하기`로 장기기억을 저장할 때 크랙 웹과 같은 방식(`longTerm`)으로 요청하도록 수정했습니다.
 
+### 참고한 확장프로그램
+
+> 아래 확장프로그램의 기능을 참고해 통합했습니다. 좋은 기능을 만들어 주셔서 감사합니다.
+
+* `백업 · 복원`, `주석 복사` — 삼이일 님의 요약 메모리 백업/복원 확프
+
+  [원글](https://gall.dcinside.com/mini/wrtnw/167143) · [주석 복사 업데이트](https://gall.dcinside.com/mini/wrtnw/186321) · [GitHub](https://github.com/wrtn321/userjs/blob/main/json_memory.user.js)
+
+* `덮어쓰기` 복원 — 장기요약 덮어쓰기 확프
+
+  [원글](https://gall.dcinside.com/mini/wrtnw/185132) · [Gist](https://gist.github.com/ibulpati496-source/12ae402a47c6bc8677ab7b7c9a9e4c83)
+
 ---
 
 ## v2.3.8
