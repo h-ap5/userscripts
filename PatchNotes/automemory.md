@@ -171,6 +171,11 @@
 
   [원글](https://gall.dcinside.com/mini/wrtnw/185132) · [Gist](https://gist.github.com/ibulpati496-source/12ae402a47c6bc8677ab7b7c9a9e4c83)
 
+아래 두 확장프로그램도 참고했지만, 원글과 작성자를 찾지 못해 이름만 적습니다.
+
+* `방 이식` — Crack Memory Transfer (요약 메모리 이식) 1.3.1
+* TXT·MD·JSON 파일 불러오기 — 요약 메모리 일괄 추가 (TXT/MD/JSON) 1.3.2
+
 ---
 
 ## v2.3.8
