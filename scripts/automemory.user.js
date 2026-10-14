@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.10
+// @version      2.4.0.11
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -2003,7 +2003,7 @@ async function fetchRecentMessages(limit) {
         if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(modelId)) {
             throw new Error('Vertex 모델 ID 형식이 올바르지 않습니다.');
         }
-        if (modelId.toLowerCase().startsWith('gemini-3') || modelId.toLowerCase().includes('gemini-2.0-flash-thinking')) {
+        if (modelId.toLowerCase().startsWith('gemini-3') || modelId.toLowerCase().startsWith('gemini-4') || modelId.toLowerCase().includes('gemini-2.0-flash-thinking')) {
             locationId = 'global';
         }
         var host = locationId === 'global' ? 'aiplatform.googleapis.com' : locationId + '-aiplatform.googleapis.com';
@@ -2044,7 +2044,7 @@ async function fetchRecentMessages(limit) {
     }
 
     var LAST_AI_USAGE = null;
-    var MODEL_PRICING_UPDATED_AT = '2026-09-03';
+    var MODEL_PRICING_UPDATED_AT = '2026-10-14';
     var USD_KRW_FALLBACK = 1400;
     var USD_KRW_CACHE_KEY = 'crack_ext_usd_krw_rate_v1';
     var USD_KRW_CACHE_TTL = 12 * 60 * 60 * 1000;
@@ -2052,6 +2052,8 @@ async function fetchRecentMessages(limit) {
     // 유료 API 표준 처리 기준, USD / 1M tokens. 실제 청구액은 무료 티어·캐시·지역·세금에 따라 달라질 수 있음.
     var MODEL_PRICING_USD_PER_M = {
         google: {
+            // Gemini 4 Argon 출시 할인가: 2026-11-30까지. 12월 1일 0시(미국 태평양 시간)부터 standard 단가로 계산한다.
+            'gemini-4-argon': { input:2.00, cachedInput:0.10, output:10.00, standardFrom:Date.UTC(2026, 11, 1, 8), standard:{ input:4.00, cachedInput:0.20, output:20.00 } },
             // Gemini 3.8/3.7/3.6 프로모션 단가: 2026-12-31까지. 2027-01-01부터 표준 단가로 갱신 필요.
             'gemini-3.8-flash': { input:0.75, cachedInput:0.075, output:3.75 },
             'gemini-3.7-flash': { input:0.75, cachedInput:0.075, output:3.75 },
@@ -2124,7 +2126,8 @@ async function fetchRecentMessages(limit) {
         }
         if (provider === 'google' || provider === 'firebase' || provider === 'vertex') {
             var m = String(model || '').toLowerCase();
-            if (m === 'gemini-3.8-flash' || m === 'gemini-3.7-flash') {
+            // Gemini 4 Argon과 3.7·3.8 Flash는 최소(minimal) 단계가 없다.
+            if (m === 'gemini-3.8-flash' || m === 'gemini-3.7-flash' || m.startsWith('gemini-4')) {
                 return auto.concat([
                     { v:'low', t:'낮음' },
                     { v:'medium', t:'보통' },
@@ -2219,7 +2222,7 @@ async function fetchRecentMessages(limit) {
     function getGeminiThinkingConfig(model, value) {
         if (!value || value === 'auto') return null;
         var m = String(model || '').toLowerCase();
-        if ((m === 'gemini-3.8-flash' || m === 'gemini-3.7-flash') && value === 'minimal') return null;
+        if ((m === 'gemini-3.8-flash' || m === 'gemini-3.7-flash' || m.startsWith('gemini-4')) && value === 'minimal') return null;
         if (m.includes('2.5-')) {
             var budget = geminiThinkingBudget(model, value);
             return budget == null ? null : { thinkingBudget:budget };
@@ -2230,8 +2233,8 @@ async function fetchRecentMessages(limit) {
 
     function getGeminiGenerationConfig(model) {
         var m = String(model || '').toLowerCase();
-        // Gemini 3 계열은 모델별 고정/권장 샘플링 설정과 충돌하지 않도록 별도 값을 보내지 않는다.
-        if (m.startsWith('gemini-3')) return {};
+        // Gemini 3·4 계열은 모델별 고정/권장 샘플링 설정과 충돌하지 않도록 별도 값을 보내지 않는다.
+        if (m.startsWith('gemini-3') || m.startsWith('gemini-4')) return {};
         return { temperature:0.2, topK:40, topP:0.8 };
     }
 
@@ -2302,6 +2305,8 @@ async function fetchRecentMessages(limit) {
         var catalog = MODEL_PRICING_USD_PER_M[catalogProvider] || {};
         var price = catalog[String(model || '').toLowerCase()] || null;
         if (!price) return null;
+        // 할인 기간이 끝난 모델은 standard 단가를 쓴다.
+        if (price.standard && Date.now() >= price.standardFrom) price = price.standard;
         var useLong = price.threshold && Number(inputTokens || 0) > price.threshold;
         return {
             input:useLong && price.longInput != null ? price.longInput : price.input,
@@ -4061,6 +4066,7 @@ margin-bottom:12px;
         var models = [];
         if (provider === 'google' || provider === 'vertex') {
             models = [
+                {v:'gemini-4-argon', t:'4 Argon'},
                 {v:'gemini-3.8-flash', t:'3.8 Flash'},
                 {v:'gemini-3.7-flash', t:'3.7 Flash'},
                 {v:'gemini-3.6-flash', t:'3.6 Flash'},
@@ -4079,6 +4085,7 @@ margin-bottom:12px;
             ];
         } else if (provider === 'firebase') {
             models = [
+                {v:'gemini-4-argon', t:'4 Argon'},
                 {v:'gemini-3.8-flash', t:'3.8 Flash'},
                 {v:'gemini-3.7-flash', t:'3.7 Flash'},
                 {v:'gemini-3.6-flash', t:'3.6 Flash'},

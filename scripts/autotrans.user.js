@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.2.3
-// @description  Gemini 3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 번역 버튼 꾹 눌러 빠른 설정, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
+// @version      4.2.4
+// @description  Gemini 4 Argon·3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 번역 버튼 꾹 눌러 빠른 설정, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -32,7 +32,15 @@
   const TRANSLATOR_ICON_SVG = `<svg width="15.5" height="15.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="trans-logo-icon" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"></rect><path d="M8 16.5 12 7.5l4 9"></path><path d="M9.6 13.4h4.8"></path></svg>`;
   const TRANSLATOR_SIDEBAR_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="var(--icon_secondary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" color="icon_secondary" class="trans-sidebar-logo-icon" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"></rect><path d="M8 16.5 12 7.5l4 9"></path><path d="M9.6 13.4h4.8"></path></svg>`;
 
+  // Gemini 4 Argon은 2026-11-30까지 출시 할인가다. 12월 1일 0시(미국 태평양 시간)부터 standard 단가로 계산한다.
+  const GEMINI_4_ARGON_STANDARD_FROM = Date.UTC(2026, 11, 1, 8);
+
   const MODEL_PRICING = {
+    'gemini-4-argon': {
+      input: 2.00, output: 10.00, cacheRead: 0.10, cacheWrite: 2.00,
+      standardFrom: GEMINI_4_ARGON_STANDARD_FROM,
+      standard: { input: 4.00, output: 20.00, cacheRead: 0.20, cacheWrite: 4.00 },
+    },
     'gemini-3.8-flash': { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 },
     'gemini-3.7-flash': { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 },
     'gemini-3.6-flash': { input: 1.50, output: 7.50, cacheRead: 0.15, cacheWrite: 1.50 },
@@ -362,12 +370,18 @@ ${TRANSLATION_ONLY_RULE}`;
     return `custom-${randomPart}`;
   }
 
+  // 할인 기간이 끝난 모델은 standard 단가를 쓴다.
+  function getModelPricing(modelId) {
+    const pricing = MODEL_PRICING[modelId];
+    return pricing?.standard && Date.now() >= pricing.standardFrom ? pricing.standard : pricing;
+  }
+
   function calculateCost(usage, exchangeRate = 1500, modelOverride = '') {
     const u = usage ? normalizeUsage(usage) : null;
     if (!u) return null;
 
     const modelIdRaw = u.model || modelOverride;
-    const pricing = MODEL_PRICING[modelIdRaw] || MODEL_PRICING['gemini-3-flash-preview'];
+    const pricing = getModelPricing(modelIdRaw) || MODEL_PRICING['gemini-3-flash-preview'];
     if (!pricing) return null;
 
     const thoughtsTokens = u.thoughtsTokenCount || 0;
@@ -2314,6 +2328,7 @@ ${TRANSLATION_ONLY_RULE}`;
     { key: 'api', icon: 'plug', name: 'API 연결', desc: '번역에 쓸 AI 서비스와 키' },
   ];
   const MODEL_OPTIONS = [
+    ['gemini-4-argon', 'Gemini 4 Argon', '4 Argon'],
     ['gemini-3.8-flash', 'Gemini 3.8 Flash', '3.8 Flash'],
     ['gemini-3.7-flash', 'Gemini 3.7 Flash', '3.7 Flash'],
     ['gemini-3.6-flash', 'Gemini 3.6 Flash', '3.6 Flash'],
@@ -2599,7 +2614,7 @@ ${TRANSLATION_ONLY_RULE}`;
   const HOLD_OPEN_MS = 550;
   const INFO_TEXT = {
     instant: ['말풍선 누르면 바로 교체', '번역이 끝나면 결과 창을 띄우지 않고 최신 답변을 바로 교체해요. 든 비용은 아래 알림에 잠깐 떠요.'],
-    think: ['추론', 'Gemini 3 계열은 추론 단계를, 2.5 계열은 추론 토큰 예산(128 이상)을 정해요. 높을수록 느려지고 비용이 늘어요.'],
+    think: ['추론', 'Gemini 3·4 계열은 추론 단계를, 2.5 계열은 추론 토큰 예산(128 이상)을 정해요. 높을수록 느려지고 비용이 늘어요.'],
     'ooc-turns': ['유지할 턴', '정한 턴이 지나면 지난 대화 기록에서 OOC 문구를 지워요.'],
     slots: ['저장한 치환', '번역 결과 창의 치환 칩을 누르면 번역문에서 찾을 말을 바꿀 말로 한 번에 바꿔요.'],
     appcheck: ['앱체크 디버그 토큰', '2026년 11월 2일부터 Firebase AI는 앱체크 토큰이 없는 요청을 막아요. Firebase 콘솔 → 보안 → App Check → 앱 탭에서 Firebase 설정과 같은 웹앱의 ⋮ → 디버그 토큰 관리로 토큰을 만들어 붙여넣고 적용을 누르세요. 적용하면 저장하고 바로 한 번 받아 봐서 결과를 옆 상태칸에 보여 줘요. 칸을 비우고 적용하면 저장된 토큰을 지워요. 토큰은 탬퍼몽키 저장소에만 두고, 번역할 때는 1시간짜리 앱체크 토큰만 받아서 써요.'],
@@ -3469,7 +3484,7 @@ ${TRANSLATION_ONLY_RULE}`;
       const input = document.getElementById('g-think-val');
       if (!input) return;
 
-      if (model.includes('gemini-3')) {
+      if (usesThinkingLevel(model)) {
         thinkingLevels[model] = input.value;
       } else if (model.includes('gemini-2.5')) {
         let val = parseInt(input.value, 10) || 1024;
@@ -3482,13 +3497,12 @@ ${TRANSLATION_ONLY_RULE}`;
       const currentModel = modelSelect.value;
       let html = '';
 
-      if (currentModel.includes('gemini-3')) {
+      if (usesThinkingLevel(currentModel)) {
         let currentLevel = thinkingLevels[currentModel] || 'medium';
-        const flash378 = currentModel === 'gemini-3.7-flash' || currentModel === 'gemini-3.8-flash';
-        const supportsMinimalThinking = !currentModel.includes('pro') && !flash378;
-        if (!supportsMinimalThinking && currentLevel === 'minimal') currentLevel = 'low';
+        const minimalOk = supportsMinimalThinking(currentModel);
+        if (!minimalOk && currentLevel === 'minimal') currentLevel = 'low';
         const levelLabels = { minimal: '최소', low: '낮음', medium: '보통', high: '높음' };
-        const levels = supportsMinimalThinking ? ['minimal', 'low', 'medium', 'high'] : ['low', 'medium', 'high'];
+        const levels = minimalOk ? ['minimal', 'low', 'medium', 'high'] : ['low', 'medium', 'high'];
         const opts = levels.map(level => `<option value="${level}"${currentLevel === level ? ' selected' : ''}>${levelLabels[level]}</option>`).join('');
         html = `<div class="t-label"><label class="t-tx" for="g-think-val">추론</label>${infoButton('think', '추론')}</div>${selectWrap(`<select id="g-think-val">${opts}</select>`)}`;
       } else if (currentModel.includes('gemini-2.5')) {
@@ -4257,15 +4271,25 @@ ${TRANSLATION_ONLY_RULE}`;
     return text.replace(/^```[^\n]*\n([\s\S]*?)\n```\s*$/m, '$1').trim();
   }
 
+  // 추론 단계(thinkingLevel)로 조절하는 모델: Gemini 3 계열과 Gemini 4 계열.
+  function usesThinkingLevel(modelId) {
+    return modelId.includes('gemini-3') || modelId.startsWith('gemini-4');
+  }
+
+  // 최소(minimal) 단계는 일부 Flash만 받는다. Pro, 3.7·3.8 Flash, Gemini 4 Argon은 낮음·보통·높음만 받는다(최소는 400 오류).
+  function supportsMinimalThinking(modelId) {
+    return usesThinkingLevel(modelId) && !modelId.includes('pro')
+      && !/^gemini-3\.[78]-flash$/.test(modelId) && !modelId.startsWith('gemini-4');
+  }
+
   function buildGenerationConfig(modelId) {
     const genConfig = { temperature: 0.7 };
 
-    if (modelId.includes('gemini-3')) {
+    // Gemini 3·4 계열은 temperature 같은 샘플링 값을 쓰지 않으므로 보내지 않는다.
+    if (usesThinkingLevel(modelId)) {
       delete genConfig.temperature;
       let level = thinkingLevels[modelId] || 'medium';
-      const supportsMinimalThinking = !modelId.includes('pro')
-        && !/^gemini-3\.[78]-flash$/.test(modelId);
-      if (!supportsMinimalThinking && level === 'minimal') level = 'low';
+      if (!supportsMinimalThinking(modelId) && level === 'minimal') level = 'low';
       genConfig.thinkingConfig = { thinkingLevel: level };
     } else if (modelId.includes('gemini-2.5')) {
       let budget = thinkingBudgets[modelId] || 1024;
