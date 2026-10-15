@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.11
+// @version      2.4.0.12
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -1442,6 +1442,80 @@ async function fetchSummaries(options) {
     function refreshNativeMemoryDialog() {
         var dialog = findNativeMemoryDialog();
         if (dialog) refreshCurrentTab(dialog);
+    }
+
+    // ============== 크랙 '메모리 PRO' 안내 숨기기 ==============
+    // 요약 메모리 창 맨 위의 '더 강력한 기억력을 원한다면, 메모리 PRO' 줄. 설정의 PRO 안내를 켜기 전까지 숨긴다.
+    var MEMORY_PRO_HIDE_STORAGE_KEY = 'crack_ext_hide_memory_pro';
+    var MEMORY_PRO_HIDDEN_ATTR = 'data-crack-ext-hidden-pro';
+    var MEMORY_PRO_TEXT_RE = /메모리\s*PRO/;
+    var memoryProTimer = 0;
+
+    function isMemoryProBannerHidden() {
+        try { return localStorage.getItem(MEMORY_PRO_HIDE_STORAGE_KEY) !== '0'; } catch (e) { return true; }
+    }
+    function setMemoryProBannerHidden(hidden) {
+        try { localStorage.setItem(MEMORY_PRO_HIDE_STORAGE_KEY, hidden ? '1' : '0'); } catch (e) {}
+    }
+
+    function memoryProText(el) {
+        return String(el && el.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // 안내 글자만 담은 칸인지. 창 제목·탭·기억 목록 글자가 섞인 칸은 안내 줄이 아니다.
+    function isMemoryProOnlyText(text) {
+        return MEMORY_PRO_TEXT_RE.test(text) && text.length <= 60 && !/요약\s*메모리|장기\s*기억|단기\s*기억|관계도/.test(text);
+    }
+
+    // 클래스 이름은 자주 바뀌므로 글자로 찾는다. 'PRO' 글자에서 위로 올라가 '메모리 PRO'가 한 덩어리가 되는 칸을 찾고,
+    // 거기서 안내 글자만 담은 가장 바깥 칸(아이콘·화살표·여백 포함)까지 올라간다.
+    function findMemoryProBanner(dialog) {
+        var firstTab = findNativeMemoryTab(dialog, '장기 기억');
+        var walker = document.createTreeWalker(dialog, NodeFilter.SHOW_TEXT);
+        for (var node = walker.nextNode(); node; node = walker.nextNode()) {
+            if (String(node.nodeValue || '').indexOf('PRO') === -1) continue;
+            var el = node.parentElement;
+            while (el && el !== dialog && !MEMORY_PRO_TEXT_RE.test(memoryProText(el))) el = el.parentElement;
+            if (!el || el === dialog || !isMemoryProOnlyText(memoryProText(el))) continue;
+            while (el.parentElement && el.parentElement !== dialog && isMemoryProOnlyText(memoryProText(el.parentElement))) el = el.parentElement;
+            // 안내 줄은 탭보다 위에 있다. 탭 아래 기억 목록에 같은 글자가 있어도 건드리지 않는다.
+            if (firstTab && !(el.compareDocumentPosition(firstTab) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+            return el;
+        }
+        return null;
+    }
+
+    function applyMemoryProBannerSetting() {
+        if (!isMemoryProBannerHidden()) {
+            document.querySelectorAll('[' + MEMORY_PRO_HIDDEN_ATTR + ']').forEach(function(el) { el.removeAttribute(MEMORY_PRO_HIDDEN_ATTR); });
+            return;
+        }
+        var dialog = findNativeMemoryDialog();
+        if (!dialog || dialog.querySelector('[' + MEMORY_PRO_HIDDEN_ATTR + ']')) return;
+        var banner = findMemoryProBanner(dialog);
+        if (!banner) return;
+        injectAiStyles();
+        banner.setAttribute(MEMORY_PRO_HIDDEN_ATTR, '');
+    }
+
+    function scheduleMemoryProBannerCheck() {
+        if (memoryProTimer) return;
+        memoryProTimer = setTimeout(function() {
+            memoryProTimer = 0;
+            applyMemoryProBannerSetting();
+        }, 60);
+    }
+
+    // 대화상자 안에 노드가 붙었는지. 채팅 글이 흘러나올 때는 거의 걸리지 않는다.
+    function mutationTouchesDialog(mutation) {
+        if (mutation.type !== 'childList' || !mutation.addedNodes.length) return false;
+        var target = mutation.target;
+        if (target && target.nodeType === 1 && target.closest('[role="dialog"]')) return true;
+        for (var i = 0; i < mutation.addedNodes.length; i++) {
+            var node = mutation.addedNodes[i];
+            if (node.nodeType === 1 && (node.matches('[role="dialog"]') || node.querySelector('[role="dialog"]'))) return true;
+        }
+        return false;
     }
 
     function memoryRoomId(room) {
@@ -3554,15 +3628,15 @@ transition:border-color .2s,box-shadow .2s,background .2s!important;
 .crack-ext-ai-modal input[type="checkbox"]{accent-color:var(--ce-amber)}
 .crack-ext-ai-modal input:disabled,.crack-ext-ai-modal textarea:disabled,.crack-ext-ai-modal select:disabled{opacity:.48!important;cursor:not-allowed}
 #ce-ai-result{min-height:150px;resize:vertical;line-height:1.7;padding:14px!important}
-#ce-ai-top-settings{display:grid;grid-template-columns:1.1fr 1.7fr 1.4fr .75fr .95fr;align-items:end;gap:12px;margin-bottom:12px}
+#ce-ai-top-settings{display:grid;grid-template-columns:1.1fr 1.3fr 1.5fr .75fr .95fr .95fr;align-items:end;gap:12px;margin-bottom:12px}
 #ce-ai-secondary-settings{display:grid;grid-template-columns:1fr 1fr 2fr;align-items:end;gap:12px;margin-bottom:18px}
 #ce-ai-vertex-wrap{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(220px,1fr);gap:12px;margin:-2px 0 14px;padding:12px;border:1px solid var(--ce-line-soft);border-radius:11px;background:var(--ce-panel-2)}
 #ce-ai-vertex-json{min-height:104px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace!important;font-size:var(--ce-fs-sub)!important;line-height:1.45}
-#ce-ai-appcheck-row{display:grid;grid-template-columns:1.1fr 1.7fr 1.4fr .75fr .95fr;align-items:end;gap:12px;margin-bottom:12px}
+#ce-ai-appcheck-row{display:grid;grid-template-columns:1.1fr 1.3fr 1.5fr .75fr .95fr .95fr;align-items:end;gap:12px;margin-bottom:12px}
 #ce-ai-appcheck-row .fg{min-width:0!important}
-#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1/5;grid-row:1}
+#ce-ai-appcheck-row .crack-ext-appcheck-status-field{grid-column:1/6;grid-row:1}
 #ce-ai-appcheck-row .crack-ext-appcheck-action-field{grid-column:-2/-1;grid-row:1}
-#ce-ai-appcheck-row .crack-ext-appcheck-state{grid-column:1/5;grid-row:1;justify-self:end;align-self:start;max-width:62%}
+#ce-ai-appcheck-row .crack-ext-appcheck-state{grid-column:1/6;grid-row:1;justify-self:end;align-self:start;max-width:62%}
 #ce-ai-appcheck-row .crack-ext-ai-mbtn{width:100%;height:var(--ce-control-h);padding:0 9px;white-space:nowrap}
 .crack-ext-ai-modal .crack-ext-status-box{display:flex;align-items:center;height:var(--ce-control-h);padding:0 10px;border:1px solid var(--ce-line,#ddd);border-radius:8px;background:var(--ce-bg,#fafafa);color:var(--ce-ink-faint);font-size:var(--ce-fs-body);font-weight:500;line-height:1;box-sizing:border-box;min-width:0;overflow:hidden}
 .crack-ext-status-box span{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
@@ -3582,7 +3656,9 @@ transition:border-color .2s,box-shadow .2s,background .2s!important;
 /* ── ⓘ 안내 (턴 수·상단 버튼·자동 정리) ───────────────── */
 .crack-ext-field-head{display:flex;align-items:center;gap:4px;min-height:18px;margin:0 0 6px}
 .crack-ext-field-head label{margin:0!important}
-.crack-ext-turn-field,.crack-ext-entry-field,.crack-ext-auto-field,.crack-ext-check-wrap{position:relative}
+.crack-ext-turn-field,.crack-ext-entry-field,.crack-ext-pro-field,.crack-ext-auto-field,.crack-ext-check-wrap{position:relative}
+/* 크랙 요약 메모리 창의 메모리 PRO 안내 줄(설정의 PRO 안내를 끄면 숨김) */
+[data-crack-ext-hidden-pro]{display:none!important}
 .crack-ext-auto-note .crack-ext-info-btn{vertical-align:-4px;margin-left:3px!important}
 .crack-ext-check-wrap{display:inline-flex;align-items:center;gap:4px}
 .crack-ext-info-btn{position:relative;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 auto!important;width:18px!important;height:18px!important;min-width:18px!important;min-height:0!important;padding:0!important;margin:0!important;border:0!important;border-radius:50%!important;background:transparent!important;color:var(--ce-ink-faint)!important;cursor:pointer;box-shadow:none!important;transition:color .18s,background .18s,transform .18s!important}
@@ -3757,7 +3833,8 @@ margin-bottom:10px;
 #ce-ai-top-settings .ce-ai-model-field{grid-column:2;grid-row:1}
 #ce-ai-top-settings .crack-ext-turn-field{grid-column:3;grid-row:1}
 #ce-ai-top-settings .crack-ext-entry-field{grid-column:4;grid-row:1}
-#ce-ai-key-wrap,#ce-ai-firebase-wrap{grid-column:1/-1;grid-row:2}
+#ce-ai-top-settings .crack-ext-pro-field{grid-column:4;grid-row:2}
+#ce-ai-key-wrap,#ce-ai-firebase-wrap{grid-column:1/4;grid-row:2}
 #ce-ai-secondary-settings{
 grid-template-columns:minmax(0,.75fr) minmax(0,.75fr) minmax(134px,1.5fr);
 gap:8px;
@@ -3807,6 +3884,7 @@ margin-bottom:12px;
 #ce-ai-top-settings .crack-ext-turn-field{grid-column:1;grid-row:2}
 #ce-ai-top-settings .crack-ext-entry-field{grid-column:2;grid-row:2}
 #ce-ai-key-wrap,#ce-ai-firebase-wrap{grid-column:1/-1;grid-row:3}
+#ce-ai-top-settings .crack-ext-pro-field{grid-column:1/-1;grid-row:4}
 #ce-ai-secondary-settings{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 #ce-ai-secondary-settings .fg:nth-child(3){grid-column:1/-1}
 #ce-ai-secondary-settings .crack-ext-export-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%}
@@ -7512,9 +7590,14 @@ if (mainModel && mainProvider) {
             infoTip('ce-tip-header-button', '상단 버튼 안내', ['끄면 상단 요약 버튼을 숨깁니다', '사이드바의 <b>AI 요약·메모리</b> 메뉴로 계속 열 수 있습니다.']) + '</div>' +
             '<label class="crack-ext-toggle-box"><input type="checkbox" id="ce-top-header-button"' + (showTopHeaderButton ? ' checked' : '') + '><span>표시</span></label>' +
             '</div>';
+        html += '<div class="fg crack-ext-pro-field">' +
+            '<div class="crack-ext-field-head"><label for="ce-memory-pro-banner">PRO 안내</label>' +
+            infoTip('ce-tip-memory-pro', 'PRO 안내', ['끄면 크랙 요약 메모리 창의 <b>메모리 PRO</b> 안내 줄을 숨깁니다', '화면에서 가리기만 하고 크랙 기능은 그대로입니다.']) + '</div>' +
+            '<label class="crack-ext-toggle-box"><input type="checkbox" id="ce-memory-pro-banner"' + (isMemoryProBannerHidden() ? '' : ' checked') + '><span>표시</span></label>' +
+            '</div>';
         html += '</div>';
 
-        // Firebase를 고르면 첫 줄 아래에 같은 열 격자로 한 줄을 더 둔다. 입력칸은 API~턴 수, 적용 버튼은 상단 버튼 아래.
+        // Firebase를 고르면 첫 줄 아래에 같은 열 격자로 한 줄을 더 둔다. 입력칸은 API~상단 버튼, 적용 버튼은 PRO 안내 아래.
         html += '<div class="crack-flex-ai-row" id="ce-ai-appcheck-row"' + (savedProvider === 'firebase' ? '' : ' style="display:none"') + '>' +
             '<div class="fg crack-ext-appcheck-status-field"><div class="crack-ext-field-head"><label for="ce-ai-appcheck-token">앱체크 디버그 토큰</label>' +
             infoTip('ce-tip-appcheck', '앱체크 안내', [
@@ -7684,6 +7767,13 @@ if (mainModel && mainProvider) {
         var autoSettingsDirtyFields = new Set();
         var autoSettingsSaveLabelTimer = 0;
         var autoSettingsStorageHandler = null;
+        var memoryProToggle = overlay.querySelector('#ce-memory-pro-banner');
+        if (memoryProToggle) {
+            memoryProToggle.addEventListener('change', function() {
+                setMemoryProBannerHidden(!memoryProToggle.checked);
+                applyMemoryProBannerSetting();
+            });
+        }
         if (topHeaderButtonToggle) {
             topHeaderButtonToggle.addEventListener('change', function() {
                 setTopHeaderButtonEnabled(topHeaderButtonToggle.checked);
@@ -9215,9 +9305,11 @@ if (mainModel && mainProvider) {
             }
             if (needsLayout) ceScheduleLayout(120);
             if (responseChanged) scheduleAutoMemoryResponseCheck(AUTO_MEMORY_RESPONSE_DEBOUNCE_MS);
+            if (!memoryProTimer && isMemoryProBannerHidden() && mutations.some(mutationTouchesDialog)) scheduleMemoryProBannerCheck();
         });
         bodyObserver.observe(document.body, { childList:true, characterData:true, subtree:true });
         ceScheduleLayout(0);
+        scheduleMemoryProBannerCheck();
         window.addEventListener('resize', function() { ceScheduleLayout(160); }, { passive:true });
         window.addEventListener('popstate', function() { ceCheckRoute(); ceScheduleLayout(0); });
         window.addEventListener('hashchange', function() { ceCheckRoute(); ceScheduleLayout(0); });
@@ -9237,6 +9329,7 @@ if (mainModel && mainProvider) {
             wakeAutoMemoryOnReturn();
         }, { passive:true });
         window.addEventListener('storage', function(event) {
+            if (event && (event.key === MEMORY_PRO_HIDE_STORAGE_KEY || event.key === null)) scheduleMemoryProBannerCheck();
             if (event && (event.key === TOP_HEADER_BUTTON_STORAGE_KEY || event.key === null)) {
                 ceScheduleLayout(0);
                 return;
