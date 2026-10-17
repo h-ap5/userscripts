@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.12
+// @version      2.4.0.13
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -214,6 +214,34 @@ This requirement controls coverage only. It must not change or add any output fo
         return mode + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
     }
 
+    // 크랙 사이트의 localStorage는 브라우저마다 약 5MB라, 다른 확장 기록으로 가득 차면 setItem이 QuotaExceededError를 던진다.
+    // 고른 모델·턴 수·프롬프트 사본처럼 못 써도 되는 값은 이 함수로 쓴다. 예전에는 창을 열 때 이 오류가 나면
+    // 그 뒤의 버튼(설정 저장·지금 실행·닫기 등)이 하나도 연결되지 않았다(사파리 제보). 실패는 한 번만 알린다.
+    var LOCAL_STORAGE_WRITE_WARNED = false;
+    function isStorageQuotaError(err) {
+        return !!err && (err.name === 'QuotaExceededError' || err.name === 'NS_ERROR_DOM_QUOTA_REACHED' || err.code === 22 || err.code === 1014);
+    }
+    function describeStorageError(err) {
+        if (isStorageQuotaError(err)) return '크랙 사이트 저장 공간이 가득 차서 저장하지 못했습니다. 다른 확장프로그램의 기록을 정리한 뒤 다시 시도해주세요.';
+        return String(err && err.message || err);
+    }
+    function setLocalSetting(key, value) {
+        try {
+            localStorage.setItem(key, value);
+            return true;
+        } catch (err) {
+            if (!LOCAL_STORAGE_WRITE_WARNED) {
+                LOCAL_STORAGE_WRITE_WARNED = true;
+                try { console.warn('[요약 메모리] localStorage 저장 실패:', key, err); } catch (e) {}
+                showToast(isStorageQuotaError(err) ? '크랙 저장 공간이 가득 차서 설정 일부를 저장하지 못했습니다' : '브라우저 저장소에 설정을 저장하지 못했습니다');
+            }
+            return false;
+        }
+    }
+    function trySavePromptSlots(mode, slots) {
+        return setLocalSetting(PROMPT_SLOT_KEYS[mode], JSON.stringify(slots));
+    }
+
     function savePromptSlots(mode, slots) {
         localStorage.setItem(PROMPT_SLOT_KEYS[mode], JSON.stringify(slots));
     }
@@ -231,7 +259,7 @@ This requirement controls coverage only. It must not change or add any output fo
                 return slot && typeof slot.id === 'string' && typeof slot.name === 'string' && typeof slot.prompt === 'string';
             });
             if (normalized.length) {
-                if (migrateBuiltInDefaultPrompt(mode, normalized)) savePromptSlots(mode, normalized);
+                if (migrateBuiltInDefaultPrompt(mode, normalized)) trySavePromptSlots(mode, normalized);
                 return normalized;
             }
         }
@@ -284,8 +312,8 @@ This requirement controls coverage only. It must not change or add any output fo
                 preferredSlot = legacySlot;
             }
         }
-        localStorage.setItem(PROMPT_ACTIVE_KEYS[mode], preferredSlot.id);
-        savePromptSlots(mode, slots);
+        setLocalSetting(PROMPT_ACTIVE_KEYS[mode], preferredSlot.id);
+        trySavePromptSlots(mode, slots);
         return slots;
     }
 
@@ -293,15 +321,15 @@ This requirement controls coverage only. It must not change or add any output fo
         var slots = loadPromptSlots(mode);
         var activeId = localStorage.getItem(PROMPT_ACTIVE_KEYS[mode]);
         var active = slots.find(function(slot) { return slot.id === activeId; }) || slots[0];
-        if (active.id !== activeId) localStorage.setItem(PROMPT_ACTIVE_KEYS[mode], active.id);
+        if (active.id !== activeId) setLocalSetting(PROMPT_ACTIVE_KEYS[mode], active.id);
         return active;
     }
 
     function setActivePromptSlot(mode, slotId) {
         var slots = loadPromptSlots(mode);
         var active = slots.find(function(slot) { return slot.id === slotId; }) || slots[0];
-        localStorage.setItem(PROMPT_ACTIVE_KEYS[mode], active.id);
-        localStorage.setItem(LEGACY_PROMPT_KEYS[mode], active.prompt);
+        setLocalSetting(PROMPT_ACTIVE_KEYS[mode], active.id);
+        setLocalSetting(LEGACY_PROMPT_KEYS[mode], active.prompt);
         return active;
     }
 
@@ -316,7 +344,7 @@ This requirement controls coverage only. It must not change or add any output fo
         Object.assign(target, changes || {});
         savePromptSlots(mode, slots);
         if (localStorage.getItem(PROMPT_ACTIVE_KEYS[mode]) === target.id) {
-            localStorage.setItem(LEGACY_PROMPT_KEYS[mode], target.prompt);
+            setLocalSetting(LEGACY_PROMPT_KEYS[mode], target.prompt);
         }
         return target;
     }
@@ -335,7 +363,7 @@ This requirement controls coverage only. It must not change or add any output fo
 
     function saveApiKey(provider, value) {
         var key = getApiKeyStorageKey(provider);
-        if (key) localStorage.setItem(key, value || '');
+        if (key) setLocalSetting(key, value || '');
     }
 
     // 서비스 계정 JSON에는 장기 개인키가 포함되므로 페이지 localStorage에는 절대 저장하지 않는다.
@@ -492,8 +520,8 @@ This requirement controls coverage only. It must not change or add any output fo
     }
 
     function saveVertexEndpointSettings(locationValue, projectIdValue) {
-        localStorage.setItem(VERTEX_LOCATION_STORAGE_KEY, String(locationValue || '').trim() || 'global');
-        localStorage.setItem(VERTEX_PROJECT_STORAGE_KEY, String(projectIdValue || '').trim());
+        setLocalSetting(VERTEX_LOCATION_STORAGE_KEY, String(locationValue || '').trim() || 'global');
+        setLocalSetting(VERTEX_PROJECT_STORAGE_KEY, String(projectIdValue || '').trim());
     }
 
     function getDefaultModel(provider) {
@@ -2270,7 +2298,7 @@ async function fetchRecentMessages(limit) {
         var saved = localStorage.getItem(key) || 'auto';
         if (!options.some(function(item) { return item.v === saved; })) {
             saved = 'auto';
-            localStorage.setItem(key, saved);
+            setLocalSetting(key, saved);
         }
         select.innerHTML = '';
         options.forEach(function(item) {
@@ -4138,7 +4166,7 @@ margin-bottom:12px;
         var savedModel = localStorage.getItem(modelStorageKey) || '';
         if ((provider === 'google' || provider === 'firebase' || provider === 'vertex') && savedModel === 'gemini-3-pro-preview') {
             savedModel = 'gemini-3.1-pro-preview';
-            localStorage.setItem(modelStorageKey, savedModel);
+            setLocalSetting(modelStorageKey, savedModel);
         }
         sel.innerHTML = '';
         var models = [];
@@ -6192,7 +6220,7 @@ margin-bottom:12px;
             transferPane.hidden = tab !== 'transfer';
             archivePane.hidden = tab !== 'archive';
             commentPane.hidden = tab !== 'comment';
-            localStorage.setItem(MEMORY_TOOLS_TAB_KEY, tab);
+            setLocalSetting(MEMORY_TOOLS_TAB_KEY, tab);
             // 탭을 처음 열 때만 필요한 목록을 읽는다(복사만 하려고 열어도 채팅방 목록을 읽지 않게).
             if (tab === 'transfer' && !roomsRequested) { roomsRequested = true; loadRooms(false); }
             if (tab === 'comment' && commentStale) loadCommentCards();
@@ -7090,7 +7118,7 @@ margin-bottom:12px;
             try {
                 await copyTextToClipboard(text);
                 var prefix = prefixInput.value.trim();
-                if (prefix && prefix !== MEMORY_COMMENT_DEFAULT_PREFIX) localStorage.setItem(MEMORY_COMMENT_PREFIX_KEY, prefix);
+                if (prefix && prefix !== MEMORY_COMMENT_DEFAULT_PREFIX) setLocalSetting(MEMORY_COMMENT_PREFIX_KEY, prefix);
                 else localStorage.removeItem(MEMORY_COMMENT_PREFIX_KEY);
                 setCommentStatus('클립보드에 복사했습니다 · 카드 ' + cards.length + '개 · ' + text.length.toLocaleString() + '자');
                 showToast('장기기억 ' + cards.length + '개를 주석으로 복사했습니다.');
@@ -7494,8 +7522,8 @@ margin-bottom:12px;
 var mainModel = document.getElementById('ce-ai-model');
 var mainProvider = document.getElementById('ce-ai-provider');
 if (mainModel && mainProvider) {
-    localStorage.setItem('crack_ext_api_provider', mainProvider.value);
-    localStorage.setItem('crack_ext_' + mainProvider.value + '_model', mainModel.value);
+    setLocalSetting('crack_ext_api_provider', mainProvider.value);
+    setLocalSetting('crack_ext_' + mainProvider.value + '_model', mainModel.value);
 }
             var provider = localStorage.getItem('crack_ext_api_provider') || 'google';
             var model = localStorage.getItem('crack_ext_' + provider + '_model') || getDefaultModel(provider);
@@ -8035,7 +8063,7 @@ if (mainModel && mainProvider) {
             if (provider === 'firebase') {
                 var firebaseValue = inputFirebase.value || '';
                 if ((localStorage.getItem('crack_ext_firebase_script') || '') !== firebaseValue) {
-                    localStorage.setItem('crack_ext_firebase_script', firebaseValue);
+                    setLocalSetting('crack_ext_firebase_script', firebaseValue);
                 }
             } else if (provider === 'vertex') {
                 var vertexLocationValue = inputVertexLocation.value.trim() || 'global';
@@ -8058,7 +8086,7 @@ if (mainModel && mainProvider) {
         bindAutoSave(inputFirebase, function() {
             var firebaseValue = inputFirebase.value || '';
             if ((localStorage.getItem('crack_ext_firebase_script') || '') !== firebaseValue) {
-                localStorage.setItem('crack_ext_firebase_script', firebaseValue);
+                setLocalSetting('crack_ext_firebase_script', firebaseValue);
                 updateAppCheckField();
             }
         });
@@ -8069,7 +8097,7 @@ if (mainModel && mainProvider) {
         bindAutoSave(inputTurns, function() {
             var turns = nonNegativeSafeInteger(inputTurns.value, null);
             if (turns == null) return;
-            if (localStorage.getItem('crack_ext_turn_count') !== String(turns)) localStorage.setItem('crack_ext_turn_count', String(turns));
+            if (localStorage.getItem('crack_ext_turn_count') !== String(turns)) setLocalSetting('crack_ext_turn_count', String(turns));
         });
 
         selProvider.onchange = async function() {
@@ -8078,7 +8106,7 @@ if (mainModel && mainProvider) {
             saveVisibleCredentials(activeCredentialProvider);
             var provider = requestedProvider;
             activeCredentialProvider = provider;
-            localStorage.setItem('crack_ext_api_provider', provider);
+            setLocalSetting('crack_ext_api_provider', provider);
             if (provider === 'firebase') {
                 keyWrap.style.display = 'none';
                 firebaseWrap.style.display = 'block';
@@ -8113,12 +8141,12 @@ if (mainModel && mainProvider) {
         setTimeout(function() { if (overlay.isConnected) saveVisibleCredentials(activeCredentialProvider); }, 250);
         setTimeout(function() { if (overlay.isConnected) saveVisibleCredentials(activeCredentialProvider); }, 1000);
         selModel.addEventListener('change', function() {
-            localStorage.setItem('crack_ext_' + selProvider.value + '_model', selModel.value);
+            setLocalSetting('crack_ext_' + selProvider.value + '_model', selModel.value);
             updateReasoningOptions(selProvider.value, selModel.value);
             updateReasoningUsage(null, false);
         });
         selReasoning.addEventListener('change', function() {
-            localStorage.setItem(getReasoningStorageKey(selProvider.value, selModel.value), selReasoning.value);
+            setLocalSetting(getReasoningStorageKey(selProvider.value, selModel.value), selReasoning.value);
             updateReasoningUsage({
                 provider:selProvider.value,
                 model:selModel.value,
@@ -8129,7 +8157,7 @@ if (mainModel && mainProvider) {
             }, false);
         });
         selStyle.addEventListener('change', function() {
-            localStorage.setItem('crack_ext_summary_style', selStyle.value);
+            setLocalSetting('crack_ext_summary_style', selStyle.value);
         });
 
         function readAutoInteger(input, min, max) {
@@ -8262,7 +8290,7 @@ if (mainModel && mainProvider) {
                     }
                 } catch (err) {
                     setAutoMemorySettingsEditPending(modalChatId, true);
-                    autoStatus.textContent = '설정 자동 저장 실패 · ' + err.message;
+                    autoStatus.textContent = '설정 자동 저장 실패 · ' + describeStorageError(err);
                 }
             }, delay == null ? AUTO_MEMORY_SETTINGS_AUTOSAVE_MS : delay);
         }
@@ -8291,10 +8319,10 @@ if (mainModel && mainProvider) {
 
         function persistAutoSettingsFromUi() {
             saveVisibleCredentials(activeCredentialProvider);
-            localStorage.setItem('crack_ext_api_provider', selProvider.value);
-            localStorage.setItem('crack_ext_' + selProvider.value + '_model', selModel.value);
-            localStorage.setItem('crack_ext_summary_style', selStyle.value);
-            localStorage.setItem(getReasoningStorageKey(selProvider.value, selModel.value), selReasoning.value || 'auto');
+            setLocalSetting('crack_ext_api_provider', selProvider.value);
+            setLocalSetting('crack_ext_' + selProvider.value + '_model', selModel.value);
+            setLocalSetting('crack_ext_summary_style', selStyle.value);
+            setLocalSetting(getReasoningStorageKey(selProvider.value, selModel.value), selReasoning.value || 'auto');
             clearTimeout(autoSettingsSaveTimer);
             autoSettingsSaveTimer = 0;
             var saved = saveAutoSettingsOnlyFromUi({ writeBack:true });
@@ -8314,7 +8342,7 @@ if (mainModel && mainProvider) {
                 if (!modalChatId || getChatId() !== modalChatId) throw new Error('설정창을 연 채팅방과 현재 채팅방이 다릅니다. 창을 닫고 현재 방에서 다시 열어주세요.');
                 persistAutoSettingsFromUi();
             } catch (err) {
-                await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
+                await showUiAlert(describeStorageError(err), '자동 설정 저장 실패', { tone:'warning' });
                 return;
             }
             showToast('현재 채팅방의 자동 장기기억 설정을 저장했습니다.');
@@ -8328,7 +8356,7 @@ if (mainModel && mainProvider) {
                 if (!modalChatId || getChatId() !== modalChatId) throw new Error('설정창을 연 채팅방과 현재 채팅방이 다릅니다. 창을 닫고 현재 방에서 다시 열어주세요.');
                 persistAutoSettingsFromUi();
             } catch (err) {
-                await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
+                await showUiAlert(describeStorageError(err), '자동 설정 저장 실패', { tone:'warning' });
                 return;
             }
             renderAutoMemoryStatus();
@@ -8448,7 +8476,7 @@ if (mainModel && mainProvider) {
             var promptText = txtResult.value.trim();
             if (!promptText) { await showUiAlert('프롬프트 내용을 입력해주세요.', '내용 없음', { tone:'warning' }); return; }
             var slot = getSelectedPromptSlot();
-            updatePromptSlot(promptMode, slot.id, { prompt: promptText });
+            try { updatePromptSlot(promptMode, slot.id, { prompt: promptText }); } catch (err) { await showUiAlert(describeStorageError(err), '프롬프트 슬롯 저장 실패', { tone:'danger' }); return; }
             setActivePromptSlot(promptMode, slot.id);
             editingSlotId = slot.id;
             showToast('✅ [' + slot.name + '] 슬롯이 저장되었습니다.');
@@ -8472,7 +8500,7 @@ if (mainModel && mainProvider) {
                 prompt: txtResult.value.trim() || getDefaultPrompt(promptMode)
             };
             slots.push(slot);
-            savePromptSlots(promptMode, slots);
+            try { savePromptSlots(promptMode, slots); } catch (err) { await showUiAlert(describeStorageError(err), '프롬프트 슬롯 저장 실패', { tone:'danger' }); return; }
             setActivePromptSlot(promptMode, slot.id);
             renderPromptSlots(slot.id);
             editingSlotId = slot.id;
@@ -8492,7 +8520,7 @@ if (mainModel && mainProvider) {
                 confirmText: '변경'
             });
             if (!dialogResult.confirmed) return;
-            updatePromptSlot(promptMode, slot.id, { name: dialogResult.value.slice(0, 30) });
+            try { updatePromptSlot(promptMode, slot.id, { name: dialogResult.value.slice(0, 30) }); } catch (err) { await showUiAlert(describeStorageError(err), '프롬프트 슬롯 저장 실패', { tone:'danger' }); return; }
             renderPromptSlots(slot.id);
         };
 
@@ -8518,7 +8546,7 @@ if (mainModel && mainProvider) {
             });
             if (!dialogResult.confirmed) return;
             slots = slots.filter(function(item) { return item.id !== slot.id; });
-            savePromptSlots(promptMode, slots);
+            try { savePromptSlots(promptMode, slots); } catch (err) { await showUiAlert(describeStorageError(err), '프롬프트 슬롯 저장 실패', { tone:'danger' }); return; }
             setActivePromptSlot(promptMode, slots[0].id);
             renderPromptSlots(slots[0].id);
             editingSlotId = slots[0].id;
@@ -8674,7 +8702,7 @@ if (mainModel && mainProvider) {
                     }
                 } catch (err) {
                     setAutoMemorySettingsEditPending(modalChatId, true);
-                    await showUiAlert(err.message, '자동 설정 저장 실패', { tone:'warning' });
+                    await showUiAlert(describeStorageError(err), '자동 설정 저장 실패', { tone:'warning' });
                     return;
                 }
             }
@@ -8702,8 +8730,8 @@ if (mainModel && mainProvider) {
                 }
             }
             saveVisibleCredentials(activeCredentialProvider);
-            localStorage.setItem('crack_ext_api_provider', selProvider.value);
-            localStorage.setItem('crack_ext_' + selProvider.value + '_model', selModel.value);
+            setLocalSetting('crack_ext_api_provider', selProvider.value);
+            setLocalSetting('crack_ext_' + selProvider.value + '_model', selModel.value);
             overlay.style.display = 'none';
             showCompressModal(overlay);
         };
@@ -8736,13 +8764,13 @@ if (mainModel && mainProvider) {
             if (provider === 'firebase' && !firebaseScript) { await showUiAlert('Firebase 스크립트를 입력해주세요.', 'Firebase 설정 필요', { tone:'warning' }); return; }
             if (provider === 'vertex' && !vertexJson) { await showUiAlert('서비스 계정 JSON을 입력하거나 저장해주세요.', 'Vertex JSON 필요', { tone:'warning' }); return; }
 
-            localStorage.setItem('crack_ext_api_provider', provider);
-            localStorage.setItem('crack_ext_' + provider + '_model', model);
-            localStorage.setItem('crack_ext_turn_count', turns.toString());
-            localStorage.setItem('crack_ext_summary_style', style);
-            localStorage.setItem(getReasoningStorageKey(provider, model), reasoning);
+            setLocalSetting('crack_ext_api_provider', provider);
+            setLocalSetting('crack_ext_' + provider + '_model', model);
+            setLocalSetting('crack_ext_turn_count', turns.toString());
+            setLocalSetting('crack_ext_summary_style', style);
+            setLocalSetting(getReasoningStorageKey(provider, model), reasoning);
             saveApiKey(provider, apiKey);
-            if (provider === 'firebase') localStorage.setItem('crack_ext_firebase_script', firebaseScript);
+            if (provider === 'firebase') setLocalSetting('crack_ext_firebase_script', firebaseScript);
             if (provider === 'vertex') {
                 saveVertexEndpointSettings(vertexLocation, vertexProjectId);
             }
