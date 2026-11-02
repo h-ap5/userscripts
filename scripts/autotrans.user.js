@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.2.4
-// @description  Gemini 4 Argon·3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 번역 버튼 꾹 눌러 빠른 설정, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
+// @version      4.2.5
+// @description  Gemini 4 Argon·3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 검열·거절 답은 교체하지 않고 원문 유지, PC는 번역을 뒤에서 돌리고 끝나면 알림, 번역 버튼 꾹 눌러 빠른 설정, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -191,7 +191,8 @@ ${TRANSLATION_ONLY_RULE}`;
   let activeBubbleCacheKey = '';
   let activeBubbleElement = null;
   let activeIsFullMode = true;
-  let bubbleTranslationInProgress = false;
+  // 번역 중인 말풍선(결과 캐시 키). PC는 여러 말풍선을 함께 돌리고, 폰은 하나씩 한다.
+  const bubbleJobs = new Set();
   const bubbleResultCache = new Map();
   let thinkingLevels = GM_getValue('thinkingLevels', {});
   let thinkingBudgets = GM_getValue('thinkingBudgets', {});
@@ -2613,7 +2614,7 @@ ${TRANSLATION_ONLY_RULE}`;
   const HOLD_RING_MS = 130;
   const HOLD_OPEN_MS = 550;
   const INFO_TEXT = {
-    instant: ['말풍선 누르면 바로 교체', '번역이 끝나면 결과 창을 띄우지 않고 최신 답변을 바로 교체해요. 든 비용은 아래 알림에 잠깐 떠요.'],
+    instant: ['말풍선 누르면 바로 교체', '번역이 끝나면 결과 창을 띄우지 않고 최신 답변을 바로 교체해요. 든 비용은 아래 알림에 잠깐 떠요. 검열에 걸리거나 AI가 번역을 거절하면 교체하지 않고 원문을 그대로 둬요.'],
     think: ['추론', 'Gemini 3·4 계열은 추론 단계를, 2.5 계열은 추론 토큰 예산(128 이상)을 정해요. 높을수록 느려지고 비용이 늘어요.'],
     'ooc-turns': ['유지할 턴', '정한 턴이 지나면 지난 대화 기록에서 OOC 문구를 지워요.'],
     slots: ['저장한 치환', '번역 결과 창의 치환 칩을 누르면 번역문에서 찾을 말을 바꿀 말로 한 번에 바꿔요.'],
@@ -3095,11 +3096,57 @@ ${TRANSLATION_ONLY_RULE}`;
   }
 
   // 오류는 알림에 짧게 띄우고 '자세히'로 전체 내용을 연다.
-  function notifyError(title, detail = '', dialogTitle = title) {
+  // whenBack: 말풍선 번역의 결과 알림. PC에서 자리를 비운 사이 끝났으면 돌아왔을 때 띄운다.
+  function notifyError(title, detail = '', dialogTitle = title, whenBack = false) {
     const text = String(detail || '').trim();
     const short = text && text.length <= 40 && !text.includes(String.fromCharCode(10)) ? ` · ${text}` : '';
-    showNudge(`${title}${short}`, 'err', false, text ? { label: '자세히', run: () => transNotice(text, dialogTitle) } : null);
+    const action = text ? { label: '자세히', run: () => transNotice(text, dialogTitle) } : null;
+    if (whenBack) notifyTranslationResult(`${title}${short}`, 'err', action);
+    else showNudge(`${title}${short}`, 'err', false, action);
   }
+
+  // --- PC: 자리를 비운 사이 끝난 번역 알림 ---
+  // PC 베이스의 '답변 완성 알림'과 같은 방식이다. 다른 탭·창에 가 있는 동안 번역이 끝나면 탭 제목 앞에 표시를 붙이고,
+  // 돌아오면 표시를 지우고 알림을 띄운다. 페이지를 보고 있거나 폰이면 바로 알린다.
+  const TRANSLATE_TITLE_MARKS = { ok: '✅ 번역 완료 · ', err: '⚠️ 번역 확인 · ' };
+  // PC 베이스는 제목 맨 앞에 있는 제 표시만 지운다. 그 표시가 있으면 우리 표시는 그 뒤에 넣는다.
+  const PCBASE_TITLE_MARK = /^(?:⏳ 생성 중|✅ 답변 완성|⚠️ 생성 실패) · /;
+  const awayNotices = [];
+  const isAwayFromPage = () => document.hidden || !document.hasFocus();
+
+  function setTranslateTitleMark(kind) {
+    let title = document.title;
+    for (const mark of Object.values(TRANSLATE_TITLE_MARKS)) title = title.split(mark).join('');
+    if (kind) {
+      const lead = title.match(PCBASE_TITLE_MARK)?.[0] || '';
+      title = lead + TRANSLATE_TITLE_MARKS[kind] + title.slice(lead.length);
+    }
+    if (document.title !== title) document.title = title;
+  }
+
+  function notifyTranslationResult(message, type = 'ok', action = null) {
+    if (isMobileLayout() || !isAwayFromPage()) {
+      showNudge(message, type, false, action);
+      return;
+    }
+    awayNotices.push({ message, type, action });
+    setTranslateTitleMark(awayNotices.some(notice => notice.type === 'err') ? 'err' : 'ok');
+  }
+
+  function showAwayNotices() {
+    if (!awayNotices.length || isAwayFromPage()) return;
+    const notices = awayNotices.splice(0);
+    setTranslateTitleMark('');
+    if (notices.length === 1) {
+      showNudge(notices[0].message, notices[0].type, false, notices[0].action);
+      return;
+    }
+    const needCheck = notices.filter(notice => notice.type === 'err').length;
+    showNudge(`자리를 비운 사이 번역 ${notices.length}개가 끝났어요${needCheck ? ` · 확인할 게 ${needCheck}개 있어요` : ''}`, needCheck ? 'err' : 'ok');
+  }
+
+  window.addEventListener('focus', showAwayNotices);
+  document.addEventListener('visibilitychange', showAwayNotices);
 
   function wireTranslatorUI({ saveSettings }) {
     uiHooks.saveNow = saveSettings;
@@ -3719,9 +3766,10 @@ ${TRANSLATION_ONLY_RULE}`;
         renderModalState();
         storeActiveBubbleResult();
         if (resultObj.truncated) showNudge(TRUNCATED_REVIEW_MESSAGE, 'err', true);
+        else if (resultObj.refused) showNudge(REFUSED_REVIEW_MESSAGE, 'err', true);
         else showNudge('재번역이 완료되었습니다.', 'ok');
       } catch (e) {
-        notifyError('다시 번역하지 못했어요', e.message);
+        notifyError(e.censored ? '검열에 걸려 번역하지 못했어요' : '다시 번역하지 못했어요', e.message);
       } finally {
         rerollBtn.classList.remove('is-busy');
         rerollBtn.setAttribute('aria-label', '다시 번역');
@@ -3860,6 +3908,7 @@ ${TRANSLATION_ONLY_RULE}`;
 
           const resultObj = await callGemini(original);
           if (resultObj.truncated) throw new Error(TRUNCATED_APPLY_MESSAGE);
+          if (resultObj.refused) throw new Error(`${REFUSED_TITLE}. 받은 답: ${resultObj.text.trim().slice(0, 200)}`);
           const displayResult = await saveAndDisplayMessage({
             chatId,
             messageId: msgId,
@@ -4317,7 +4366,14 @@ ${TRANSLATION_ONLY_RULE}`;
     return buildSystemPrompt(editablePrompt);
   }
 
+  // 번역 AI가 번역 대신 거절 문장을 보냈으면 refused로 표시해 둔다. 교체하는 쪽이 보고 원문을 지킨다.
   function callGemini(text, overrideModel = null) {
+    return requestTranslation(text, overrideModel).then(result => (
+      looksLikeRefusal(result.text, text) ? { ...result, refused: true } : result
+    ));
+  }
+
+  function requestTranslation(text, overrideModel = null) {
     try {
       getPrompt();
     } catch (error) {
@@ -4357,7 +4413,8 @@ ${TRANSLATION_ONLY_RULE}`;
             try {
               const data = parseTranslationResponse(res, 'DeepSeek');
               if (data.error) {
-                reject(new Error(data.error.message));
+                const message = String(data.error.message || '');
+                reject(isCensorErrorMessage(message) ? censoredError(censorReasonOf(message)) : new Error(message));
                 return;
               }
               const choice = data.choices?.[0];
@@ -4408,6 +4465,8 @@ ${TRANSLATION_ONLY_RULE}`;
         data: JSON.stringify({
           system_instruction: { parts: [{ text: finalPrompt }] },
           contents: [{ parts: [{ text: maskedText }] }],
+          // Firebase 쪽과 같이 조절 가능한 안전 필터는 끈다. 그래도 막히는 답은 checkedTranslation이 거른다.
+          safetySettings: GOOGLE_SAFETY_SETTINGS,
           generationConfig,
         }),
         timeout: TRANSLATION_TIMEOUT_MS,
@@ -4415,7 +4474,8 @@ ${TRANSLATION_ONLY_RULE}`;
           try {
             const data = parseTranslationResponse(res, 'Google');
             if (data.error) {
-              reject(new Error(data.error.message));
+              const message = String(data.error.message || '');
+              reject(isCensorErrorMessage(message) ? censoredError(censorReasonOf(message)) : new Error(message));
               return;
             }
 
@@ -4425,8 +4485,9 @@ ${TRANSLATION_ONLY_RULE}`;
             const restored = unmaskCodeBlocks(stripOuterFence(raw));
             resolve(checkedTranslation(
               { text: restored, usage, model: modelId },
-              candidate?.finishReason || data.promptFeedback?.blockReason,
-              candidate?.finishReason === 'MAX_TOKENS'
+              candidate?.finishReason,
+              candidate?.finishReason === 'MAX_TOKENS',
+              data.promptFeedback?.blockReason
             ));
           } catch (e) {
             reject(e);
@@ -4465,13 +4526,66 @@ ${TRANSLATION_ONLY_RULE}`;
       .join('');
   }
 
+  // --- 검열·거절 걸러내기 ---
+  // 번역 AI가 검열로 답을 막거나 번역 대신 "번역할 수 없습니다" 같은 거절 문장을 보내면, 바로 교체에서 그 글이
+  // 서버의 원문을 덮어써서 원문이 사라진다. 교체하기 전에 걸러서 원문은 그대로 두고 알림만 띄운다.
+  const CENSORED_TITLE = '검열에 걸려 원문을 그대로 뒀어요';
+  const REFUSED_TITLE = '번역 AI가 거절해서 원문을 그대로 뒀어요';
+  const REFUSED_REVIEW_MESSAGE = '번역 AI가 번역을 거절한 것 같아요. 결과를 확인한 뒤 교체하세요.';
+  // 정상으로 끝난 응답(길이 제한은 따로 잘림으로 다룬다). 그 밖의 끝 사유는 중간에 막히거나 끊긴 답이다.
+  const NORMAL_FINISH_REASONS = new Set(['', 'STOP', 'FINISH_REASON_UNSPECIFIED', 'MAX_TOKENS', 'stop', 'length']);
+  const CENSOR_FINISH_REASONS = new Set(['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION', 'IMAGE_SAFETY', 'OTHER', 'content_filter']);
+
+  function censoredError(reason) {
+    const error = new Error(`번역 AI가 검열로 답을 막았어요${reason ? ` (사유: ${reason})` : ''}. 원문은 바꾸지 않았어요. 다른 모델이나 지침으로 다시 해 보세요.`);
+    error.censored = true;
+    return error;
+  }
+
+  // Firebase SDK·DeepSeek가 오류로 알려 주는 검열 차단
+  // 사유 이름은 대문자 그대로만 본다('safety settings' 같은 설정 오류는 검열이 아니다).
+  const CENSOR_REASON_WORD = /\b(?:PROHIBITED_CONTENT|SAFETY|BLOCKLIST|SPII|RECITATION)\b/;
+
+  function isCensorErrorMessage(message) {
+    const text = String(message || '');
+    return /blocked due to|Content Exists Risk/i.test(text) || CENSOR_REASON_WORD.test(text);
+  }
+
+  function censorReasonOf(message) {
+    const text = String(message || '');
+    return text.match(CENSOR_REASON_WORD)?.[0] || (/Content Exists Risk/i.test(text) ? 'Content Exists Risk' : '');
+  }
+
   // 차단·빈 응답을 번역문으로 쓰면 즉시 교체에서 원문이 빈 글로 덮어써진다.
-  function checkedTranslation(result, finishReason, truncated) {
+  // 검열로 막힌 답(차단 사유)은 글이 조금 와도 중간에 끊긴 것이라 번역문으로 쓰지 않는다.
+  function checkedTranslation(result, finishReason, truncated, blockReason = '') {
+    const finish = String(finishReason || '');
+    if (blockReason || CENSOR_FINISH_REASONS.has(finish)) throw censoredError(blockReason || finish);
     if (!String(result.text || '').trim()) {
-      const reason = finishReason ? ` (사유: ${finishReason})` : '';
+      const reason = finish ? ` (사유: ${finish})` : '';
       throw new Error(`번역 결과가 비어 있습니다${reason}. 원문은 그대로 두었습니다.`);
     }
+    if (!NORMAL_FINISH_REASONS.has(finish)) {
+      throw new Error(`번역이 정상적으로 끝나지 않았습니다 (사유: ${finish}). 원문은 그대로 두었습니다.`);
+    }
     return truncated ? { ...result, truncated: true } : result;
+  }
+
+  // 거절 문장: AI가 번역 대신 자기 말로 거절한 짧은 답. 지침의 "대사"·*지문* 형식 없이 사과·불가로 시작하고,
+  // 요청·내용·번역·정책 같은 말이 들어 있다. 캐릭터 대사 속 사과는 따옴표·별표 안에 있어 여기 걸리지 않는다.
+  const REFUSAL_START = /^(?:i['’]?m sorry|i am sorry|sorry[,.! ]|i apologi[sz]e|unfortunately,? i\b|i (?:can(?:not|['’]t)|won['’]t|will not|am (?:not able|unable))|i['’]m (?:not able|unable)|as an ai\b|죄송(?:합니다|하지만|해요|하나)|미안(?:합니다|하지만)|(?:저는|제가) .{0,24}(?:수 없|어렵)|(?:요청하신|제공(?:해 주신|하신|된)|주신|해당|이) ?(?:내용|텍스트|글|요청|콘텐츠|부분)[은는을이]? )/i;
+  const REFUSAL_CANT = /수 없|어렵|불가|can(?:not|['’]t)|unable|not able|won['’]t|will not|refuse|decline/i;
+  const REFUSAL_TOPIC = /번역|translat|요청|request|내용|content|텍스트|text|가이드라인|guideline|정책|polic|부적절|inappropriate|explicit|노골적|성적|sexual|미성년|minor|도와|assist|help|comply|제공/i;
+
+  function looksLikeRefusal(result, source) {
+    const text = String(result || '').trim();
+    const src = String(source || '').trim();
+    if (!text || text.length > 800) return false;
+    if (!REFUSAL_START.test(text) || !REFUSAL_CANT.test(text) || !REFUSAL_TOPIC.test(text)) return false;
+    // 원문도 같은 말로 시작하면(캐릭터의 사과·거절 대사) 제대로 된 번역이다.
+    if (REFUSAL_START.test(src)) return false;
+    // 원문을 몇 줄로 줄여 버린 답만 거절로 본다.
+    return text.length < src.length * 0.6;
   }
 
   // ----- Firebase 앱체크 -----
@@ -4720,11 +4834,15 @@ ${TRANSLATION_ONLY_RULE}`;
       const candidate = result.response.candidates?.[0];
       return checkedTranslation(
         { text: restored, usage, model: modelId },
-        candidate?.finishReason || result.response.promptFeedback?.blockReason,
-        candidate?.finishReason === 'MAX_TOKENS'
+        candidate?.finishReason,
+        candidate?.finishReason === 'MAX_TOKENS',
+        result.response.promptFeedback?.blockReason
       );
     } catch (e) {
+      if (e?.censored) throw e;
       const message = String(e?.message || e || '');
+      // SDK는 검열로 막힌 답의 글을 꺼낼 때 'Response was blocked due to SAFETY' 같은 오류를 던진다.
+      if (isCensorErrorMessage(message)) throw censoredError(censorReasonOf(message));
       if (isAppCheckError(message)) {
         // 거부된 토큰을 다음 번역에서 다시 쓰지 않도록 캐시를 비운다.
         if (appCheckToken) clearAppCheckCache();
@@ -4770,6 +4888,13 @@ ${TRANSLATION_ONLY_RULE}`;
     if (existing) return getApp(name);
     return initializeApp(configObj, name);
   }
+
+  const GOOGLE_SAFETY_SETTINGS = [
+    'HARM_CATEGORY_HATE_SPEECH',
+    'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+    'HARM_CATEGORY_HARASSMENT',
+    'HARM_CATEGORY_DANGEROUS_CONTENT',
+  ].map(category => ({ category, threshold: 'OFF' }));
 
   function buildSafetySettings(HarmCategory, HarmBlockThreshold) {
     return [
@@ -6322,10 +6447,18 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
   function openCachedResultForBubble(chatId, bubbleMsgId, bubbleText) {
     const found = findCachedResultForBubble(chatId, bubbleMsgId, bubbleText);
-    if (!found) return false;
-    const { cacheKey, cached } = found;
+    return found ? openBubbleResult(found.cacheKey) : false;
+  }
 
+  // 저장된 결과 하나를 결과 창으로 연다(말풍선 버튼, 끝난 번역 알림의 '보기').
+  function openBubbleResult(cacheKey) {
     storeActiveBubbleResult();
+    const cached = bubbleResultCache.get(cacheKey);
+    if (!cached) {
+      showNudge('다시 열 번역 결과가 없습니다.', 'err');
+      return false;
+    }
+
     activeBubbleCacheKey = cacheKey;
     activeOriginalText = cached.originalText;
     activeSourceContent = cached.sourceContent || cached.originalText;
@@ -6376,24 +6509,34 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       return;
     }
 
-    if (bubbleTranslationInProgress) {
+    // PC는 번역을 뒤에서 돌리고 끝나면 알린다. 그동안 채팅·다른 탭 등 하던 일을 계속하고, 다른 말풍선도 번역할 수 있다.
+    // 폰은 지금처럼 하나씩 하고, 끝나면 결과 창을 바로 연다.
+    const background = !isMobileLayout();
+    const jobKey = getBubbleResultCacheKey(chatId, fallbackMsgId, textToTranslate);
+    if (bubbleJobs.has(jobKey)) {
+      showNudge('이 답변은 번역하는 중이에요. 끝나면 알려 드릴게요.', 'info');
+      return;
+    }
+    if (bubbleJobs.size && !background) {
       showNudge('이미 번역이 진행 중입니다. 잠시 기다려주세요.', 'info');
       return;
     }
 
-    bubbleTranslationInProgress = true;
+    bubbleJobs.add(jobKey);
+    try {
+      const instantApply = document.getElementById('trans-instant-apply')?.checked || GM_getValue('instantApply', false);
+      if (instantApply) await executeInstantBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement, background);
+      else if (background) await executeBackgroundBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement);
+      else await executeModalBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement);
+    } finally {
+      bubbleJobs.delete(jobKey);
+    }
+  }
+
+  // 폰: 번역이 끝나면 결과 창을 바로 연다.
+  async function executeModalBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement = null) {
     const bubbleBtn = bubbleButtonFor(bubbleElement);
     setBubbleButtonState(bubbleBtn, 'busy');
-    const instantApply = document.getElementById('trans-instant-apply')?.checked || GM_getValue('instantApply', false);
-    if (instantApply) {
-      try {
-        await executeInstantBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement);
-      } finally {
-        bubbleTranslationInProgress = false;
-      }
-      return;
-    }
-
     const translationSessionId = ++transSessionId;
 
     document.getElementById('trans-modal-model').value = document.getElementById('trans-model-select').value;
@@ -6427,21 +6570,69 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       refreshCachedResultBubbleButtons();
       openResultModal();
       if (resultObj.truncated) showNudge(TRUNCATED_REVIEW_MESSAGE, 'err', true);
+      else if (resultObj.refused) showNudge(REFUSED_REVIEW_MESSAGE, 'err', true);
       else showNudge('번역 완료. 팝업에서 확인하세요.', 'ok');
     } catch (err) {
       if (translationSessionId !== transSessionId) return;
       setBubbleButtonState(bubbleBtn, 'fail', 6000);
-      notifyError('번역하지 못했어요', err.message);
+      notifyError(err.censored ? '검열에 걸려 번역하지 못했어요' : '번역하지 못했어요', err.message);
     } finally {
-      bubbleTranslationInProgress = false;
       if (bubbleBtn?.classList.contains('is-busy')) setBubbleButtonState(bubbleBtn, '');
     }
   }
 
-  async function executeInstantBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement = null) {
+  // 결과를 말풍선 캐시에만 넣는다(결과 창은 열지 않는다). 말풍선 버튼이나 알림의 '보기'로 연다.
+  function saveBubbleResult(chatId, bubbleMsgId, bubbleText, stableTarget, resultObj) {
+    const cacheKey = getBubbleResultCacheKey(chatId, bubbleMsgId, bubbleText);
+    if (!cacheKey) return '';
+    // 결과 창이 같은 말풍선의 예전 결과를 들고 있으면, 나중에 그 예전 결과가 새 결과를 덮어쓰지 않게 끊는다.
+    if (activeBubbleCacheKey === cacheKey) activeBubbleCacheKey = '';
+    const source = stableTarget.targetContent;
+    bubbleResultCache.set(cacheKey, {
+      history: [resultObj.text],
+      usageHistory: [{ usage: resultObj.usage, model: resultObj.model }],
+      index: 0,
+      originalText: source,
+      sourceContent: source,
+      serverContent: stableTarget.serverContent ?? source,
+      chatId,
+      msgId: stableTarget.targetMsgId,
+      bubbleMsgId: String(stableTarget.bubbleId || bubbleMsgId || stableTarget.targetMsgId || ''),
+      bubbleTextKey: normalizeForMessageMatch(bubbleText),
+      bubbleElement: stableTarget.bubbleElement,
+      isFullMode: true,
+    });
+    return cacheKey;
+  }
+
+  // PC: 결과 창을 바로 띄우지 않는다. 결과를 저장해 두고 '번역이 끝났어요 · 보기'로 알린다.
+  async function executeBackgroundBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement = null) {
     const bubbleBtn = bubbleButtonFor(bubbleElement);
     setBubbleButtonState(bubbleBtn, 'busy');
-    showNudge('번역 중... 완료되면 바로 교체합니다.', 'info', true);
+    showNudge('번역을 시작했어요. 끝나면 알려 드릴게요.', 'info');
+
+    try {
+      const stableTarget = await fetchStableBubbleTarget(chatId, fallbackMsgId, textToTranslate, bubbleElement);
+      const resultObj = await callGemini(stableTarget.targetContent);
+      const cacheKey = saveBubbleResult(chatId, fallbackMsgId, textToTranslate, stableTarget, resultObj);
+      setBubbleButtonState(bubbleButtonFor(findBubbleBlock(stableTarget.bubbleId, bubbleElement)) || bubbleBtn, '');
+      const open = cacheKey ? { label: '보기', run: () => openBubbleResult(cacheKey) } : null;
+      if (resultObj.truncated) notifyTranslationResult('번역이 끝났어요 · 길이 제한에 잘렸을 수 있어요', 'err', open);
+      else if (resultObj.refused) notifyTranslationResult('번역 AI가 번역을 거절한 것 같아요', 'err', open);
+      else notifyTranslationResult('번역이 끝났어요', 'ok', open);
+    } catch (err) {
+      setBubbleButtonState(bubbleBtn, 'fail', 6000);
+      notifyError(err.censored ? '검열에 걸려 번역하지 못했어요' : '번역하지 못했어요', err.message, undefined, true);
+    } finally {
+      if (bubbleBtn?.classList.contains('is-busy')) setBubbleButtonState(bubbleBtn, '');
+    }
+  }
+
+  async function executeInstantBubbleTranslation(textToTranslate, fallbackMsgId, chatId, bubbleElement = null, background = false) {
+    const bubbleBtn = bubbleButtonFor(bubbleElement);
+    setBubbleButtonState(bubbleBtn, 'busy');
+    if (background) showNudge('번역을 시작했어요. 끝나면 바로 교체하고 알려 드릴게요.', 'info');
+    else showNudge('번역 중... 완료되면 바로 교체합니다.', 'info', true);
 
     try {
       const stableTarget = await fetchStableBubbleTarget(chatId, fallbackMsgId, textToTranslate, bubbleElement);
@@ -6451,6 +6642,14 @@ if(__exports != exports)module.exports = exports;return module.exports}));
 
       const resultObj = await callGemini(originalContent);
       if (resultObj.truncated) throw new Error(TRUNCATED_APPLY_MESSAGE);
+      const doneBtn = () => bubbleButtonFor(findBubbleBlock(stableTarget.bubbleId, bubbleElement)) || bubbleBtn;
+      if (resultObj.refused) {
+        // 거절 문장으로 교체하면 원문이 사라진다. 교체하지 않고 결과만 저장해 둔다(잘못 걸렀으면 '보기'에서 직접 교체).
+        const cacheKey = saveBubbleResult(chatId, fallbackMsgId, textToTranslate, stableTarget, resultObj);
+        setBubbleButtonState(doneBtn(), 'fail', 6000);
+        notifyTranslationResult(REFUSED_TITLE, 'err', cacheKey ? { label: '보기', run: () => openBubbleResult(cacheKey) } : null);
+        return;
+      }
       const newContent = resultObj.text;
 
       const displayResult = await saveAndDisplayMessage({
@@ -6465,11 +6664,13 @@ if(__exports != exports)module.exports = exports;return module.exports}));
       const displayText = displayResult === 'visible'
         ? '번역 교체 완료! 화면에 바로 반영했습니다.'
         : '번역 저장 완료! 말풍선이 나타나면 자동으로 반영합니다.';
-      showNudge(`${displayText}${formatCostForMessage(resultObj.usage, resultObj.model)}`, 'ok');
-      setBubbleButtonState(bubbleButtonFor(findBubbleBlock(stableTarget.bubbleId, bubbleElement)) || bubbleBtn, 'done', 3000);
+      notifyTranslationResult(`${displayText}${formatCostForMessage(resultObj.usage, resultObj.model)}`, 'ok');
+      setBubbleButtonState(doneBtn(), 'done', 3000);
     } catch (err) {
       setBubbleButtonState(bubbleBtn, 'fail', 6000);
-      notifyError('번역하지 못했어요', err.message);
+      notifyError(err.censored ? CENSORED_TITLE : '번역하지 못했어요', err.message, undefined, true);
+    } finally {
+      if (bubbleBtn?.classList.contains('is-busy')) setBubbleButtonState(bubbleBtn, '');
     }
   }
 
