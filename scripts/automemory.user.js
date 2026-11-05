@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.13
+// @version      2.4.0.14
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -647,7 +647,7 @@ This requirement controls coverage only. It must not change or add any output fo
         var normalizedChatId = normalizeAutoMemorySettingsChatId(chatId);
         if (!normalizedChatId) return null;
         var rawState = null;
-        try { rawState = JSON.parse(localStorage.getItem(AUTO_MEMORY_STATE_PREFIX + normalizedChatId) || 'null'); } catch (e) {}
+        try { rawState = JSON.parse(readAutoMemoryStateText(normalizedChatId) || 'null'); } catch (e) {}
         if (!rawState || typeof rawState !== 'object') return null;
         var signature = String(rawState.settingsSignature || '');
         if (!signature && rawState.pendingApply) signature = String(rawState.pendingApply.settingsSignature || '');
@@ -864,7 +864,7 @@ This requirement controls coverage only. It must not change or add any output fo
         if (!chatId) return state;
         var saved = {};
         try {
-            saved = JSON.parse(localStorage.getItem(AUTO_MEMORY_STATE_PREFIX + chatId) || '{}') || {};
+            saved = JSON.parse(readAutoMemoryStateText(chatId) || '{}') || {};
             state = Object.assign(state, saved);
         } catch (e) {}
         var savedVersion = Number(saved.version) || 0;
@@ -908,9 +908,67 @@ This requirement controls coverage only. It must not change or add any output fo
         });
     }
 
+    // 크랙 저장 공간(localStorage)이 꽉 차면 자동 정리의 잠금과 진행 기록을 쓸 수 없어, 오류도 없이 '첫 확인 대기 중'에 멈췄다.
+    // 이때는 확프 저장소(GM)에 대신 둔다. localStorage에 다시 써지면 대신 둔 사본은 지운다. GM이 없는 관리자는 이 탭 메모리에 둔다.
+    var AUTO_MEMORY_OVERFLOW_MEMORY = new Map();
+    var AUTO_MEMORY_STORAGE_FULL_WARNED = false;
+
+    // 방에 들어오자마자 창 없이 뜰 수 있어 스타일부터 넣는다. 설정 저장 실패 알림이 이미 떴으면 또 띄우지 않는다.
+    function warnAutoMemoryStorageFull(err) {
+        if (AUTO_MEMORY_STORAGE_FULL_WARNED || LOCAL_STORAGE_WRITE_WARNED || !isStorageQuotaError(err)) return;
+        AUTO_MEMORY_STORAGE_FULL_WARNED = true;
+        try {
+            injectAiStyles();
+            showToast('크랙 저장 공간이 가득 찼습니다. 안 쓰는 확프의 기록을 정리해 주세요.');
+        } catch (e) {}
+    }
+
+    function readAutoMemoryOverflow(key) {
+        if (AUTO_MEMORY_OVERFLOW_MEMORY.has(key)) return AUTO_MEMORY_OVERFLOW_MEMORY.get(key);
+        try { if (typeof GM_getValue === 'function') return GM_getValue(key, null); } catch (e) {}
+        return null;
+    }
+
+    function writeAutoMemoryOverflow(key, text) {
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(key, text);
+                AUTO_MEMORY_OVERFLOW_MEMORY.delete(key);
+                return true;
+            }
+        } catch (e) {}
+        AUTO_MEMORY_OVERFLOW_MEMORY.set(key, text);
+        return false;
+    }
+
+    function clearAutoMemoryOverflow(key) {
+        AUTO_MEMORY_OVERFLOW_MEMORY.delete(key);
+        try {
+            if (typeof GM_getValue === 'function' && typeof GM_deleteValue === 'function' && GM_getValue(key, null) != null) GM_deleteValue(key);
+        } catch (e) {}
+    }
+
+    function readAutoMemoryStateText(chatId) {
+        var key = AUTO_MEMORY_STATE_PREFIX + chatId;
+        var overflow = readAutoMemoryOverflow(key);
+        return overflow != null ? overflow : localStorage.getItem(key);
+    }
+
     function saveAutoMemoryState(chatId, state) {
         if (!chatId) return;
-        localStorage.setItem(AUTO_MEMORY_STATE_PREFIX + chatId, JSON.stringify(state));
+        var key = AUTO_MEMORY_STATE_PREFIX + chatId;
+        var text = JSON.stringify(state);
+        try {
+            localStorage.setItem(key, text);
+            clearAutoMemoryOverflow(key);
+        } catch (err) {
+            console.warn('[AutoMemory] localStorage 저장 실패, 확프 저장소에 대신 둡니다:', err);
+            // 기록은 한 곳에만 둔다. 확프 저장소에 들어갔으면 낡은 사본을 지워 자리도 비운다.
+            if (writeAutoMemoryOverflow(key, text)) {
+                try { localStorage.removeItem(key); } catch (e) {}
+            }
+            warnAutoMemoryStorageFull(err);
+        }
         notifyAutoMemoryStatus(chatId, state);
     }
 
@@ -923,7 +981,28 @@ This requirement controls coverage only. It must not change or add any output fo
     function resetAutoMemoryState(chatId) {
         if (!chatId) return;
         localStorage.removeItem(AUTO_MEMORY_STATE_PREFIX + chatId);
+        clearAutoMemoryOverflow(AUTO_MEMORY_STATE_PREFIX + chatId);
         notifyAutoMemoryStatus(chatId);
+    }
+
+    function readAutoMemoryLock(key) {
+        var local = null;
+        var overflow = null;
+        try { local = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) {}
+        try { overflow = JSON.parse(readAutoMemoryOverflow(key) || 'null'); } catch (e) {}
+        if (local && overflow) return (Number(overflow.expiresAt) || 0) > (Number(local.expiresAt) || 0) ? overflow : local;
+        return local || overflow;
+    }
+
+    function writeAutoMemoryLock(key, record) {
+        var text = JSON.stringify(record);
+        try {
+            localStorage.setItem(key, text);
+            clearAutoMemoryOverflow(key);
+        } catch (e) {
+            writeAutoMemoryOverflow(key, text);
+            warnAutoMemoryStorageFull(e);
+        }
     }
 
     function acquireAutoMemoryLock(chatId) {
@@ -931,11 +1010,10 @@ This requirement controls coverage only. It must not change or add any output fo
         var key = AUTO_MEMORY_LOCK_PREFIX + String(chatId).toLowerCase();
         var now = Date.now();
         try {
-            var current = JSON.parse(localStorage.getItem(key) || 'null');
+            var current = readAutoMemoryLock(key);
             if (current && current.owner !== AUTO_MEMORY_SESSION_ID && current.expiresAt > now) return false;
-            var next = { owner:AUTO_MEMORY_SESSION_ID, expiresAt:now + AUTO_MEMORY_LOCK_MS };
-            localStorage.setItem(key, JSON.stringify(next));
-            var confirmed = JSON.parse(localStorage.getItem(key) || 'null');
+            writeAutoMemoryLock(key, { owner:AUTO_MEMORY_SESSION_ID, expiresAt:now + AUTO_MEMORY_LOCK_MS });
+            var confirmed = readAutoMemoryLock(key);
             return !!confirmed && confirmed.owner === AUTO_MEMORY_SESSION_ID;
         } catch (e) {
             return false;
@@ -946,8 +1024,11 @@ This requirement controls coverage only. It must not change or add any output fo
         if (!chatId) return;
         var key = AUTO_MEMORY_LOCK_PREFIX + String(chatId).toLowerCase();
         try {
-            var current = JSON.parse(localStorage.getItem(key) || 'null');
-            if (current && current.owner === AUTO_MEMORY_SESSION_ID) localStorage.removeItem(key);
+            var current = readAutoMemoryLock(key);
+            if (current && current.owner === AUTO_MEMORY_SESSION_ID) {
+                clearAutoMemoryOverflow(key);
+                localStorage.removeItem(key);
+            }
         } catch (e) {}
     }
 
@@ -955,11 +1036,11 @@ This requirement controls coverage only. It must not change or add any output fo
         if (!chatId) return false;
         var key = AUTO_MEMORY_LOCK_PREFIX + String(chatId).toLowerCase();
         try {
-            var current = JSON.parse(localStorage.getItem(key) || 'null');
+            var current = readAutoMemoryLock(key);
             if (!current || current.owner !== AUTO_MEMORY_SESSION_ID) return false;
             current.expiresAt = Date.now() + AUTO_MEMORY_LOCK_MS;
-            localStorage.setItem(key, JSON.stringify(current));
-            var confirmed = JSON.parse(localStorage.getItem(key) || 'null');
+            writeAutoMemoryLock(key, current);
+            var confirmed = readAutoMemoryLock(key);
             return !!confirmed && confirmed.owner === AUTO_MEMORY_SESSION_ID;
         } catch (e) {
             return false;
@@ -5516,7 +5597,7 @@ margin-bottom:12px;
         }
         if (state.pendingApply) return '미완료 슬롯 저장 재개 대기 · ' + (state.lastError ? shortAutoError(state.lastError) : (state.lastStatus || '검증 중'));
         if (state.lastError) return '오류 · ' + shortAutoError(state.lastError);
-        if (!state.initialized) return '첫 확인 대기 중';
+        if (!state.initialized) return state.lastStatus || '첫 확인 대기 중';
         if (state.pendingCutoffTurnKey) return '요약 대기/처리 중 · ' + (state.lastStatus || '슬롯 확인 중');
         var remaining = Math.max(0, settings.intervalTurns - (state.observedNewTurns || 0));
         var suffix = state.lastSuccessAt ? ' · 마지막 ' + new Date(state.lastSuccessAt).toLocaleString() : '';
@@ -5562,6 +5643,7 @@ margin-bottom:12px;
         if ((!manual && !settings.enabled) || AUTO_MEMORY_BUSY) return false;
         if (!acquireAutoMemoryLock(chatId)) {
             if (!manual && settings.enabled) scheduleAutoMemoryResponseCheck(15000);
+            if (manual) await showUiAlert('다른 탭에서 자동 저장을 처리 중입니다. 잠시 후 다시 시도해주세요.', '자동 저장 처리 중', { tone:'warning' });
             return false;
         }
         AUTO_MEMORY_BUSY = true;
