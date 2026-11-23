@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         📝 크랙 요약 메모리 편집 & AI 자동 정리
 // @namespace    https://crack.wrtn.ai/
-// @version      2.4.0.14
+// @version      2.4.0.15
 // @updateURL    https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @downloadURL  https://raw.githubusercontent.com/h-ap5/userscripts/main/scripts/automemory.user.js
 // @homepageURL  https://github.com/h-ap5/userscripts
@@ -2237,6 +2237,9 @@ async function fetchRecentMessages(limit) {
         google: {
             // Gemini 4 Argon 출시 할인가: 2026-11-30까지. 12월 1일 0시(미국 태평양 시간)부터 standard 단가로 계산한다.
             'gemini-4-argon': { input:2.00, cachedInput:0.10, output:10.00, standardFrom:Date.UTC(2026, 11, 1, 8), standard:{ input:4.00, cachedInput:0.20, output:20.00 } },
+            // Gemini 4 Neon · Hydrogen: 공식 가격표(2026-11-23), 날짜에 따른 값 변동 없음.
+            'gemini-4-neon': { input:3.00, cachedInput:0.15, output:15.00 },
+            'gemini-4-hydrogen': { input:1.50, cachedInput:0.075, output:7.50 },
             // Gemini 3.8/3.7/3.6 프로모션 단가: 2026-12-31까지. 2027-01-01부터 표준 단가로 갱신 필요.
             'gemini-3.8-flash': { input:0.75, cachedInput:0.075, output:3.75 },
             'gemini-3.7-flash': { input:0.75, cachedInput:0.075, output:3.75 },
@@ -4254,6 +4257,8 @@ margin-bottom:12px;
         if (provider === 'google' || provider === 'vertex') {
             models = [
                 {v:'gemini-4-argon', t:'4 Argon'},
+                {v:'gemini-4-neon', t:'4 Neon'},
+                {v:'gemini-4-hydrogen', t:'4 Hydrogen'},
                 {v:'gemini-3.8-flash', t:'3.8 Flash'},
                 {v:'gemini-3.7-flash', t:'3.7 Flash'},
                 {v:'gemini-3.6-flash', t:'3.6 Flash'},
@@ -4273,6 +4278,8 @@ margin-bottom:12px;
         } else if (provider === 'firebase') {
             models = [
                 {v:'gemini-4-argon', t:'4 Argon'},
+                {v:'gemini-4-neon', t:'4 Neon'},
+                {v:'gemini-4-hydrogen', t:'4 Hydrogen'},
                 {v:'gemini-3.8-flash', t:'3.8 Flash'},
                 {v:'gemini-3.7-flash', t:'3.7 Flash'},
                 {v:'gemini-3.6-flash', t:'3.6 Flash'},
