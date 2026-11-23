@@ -7,6 +7,16 @@
 
 ## 📌 업데이트 내역
 
+## v2.4.0.15
+
+### Gemini 4 Neon·Hydrogen 지원
+
+* Google·Firebase·Vertex JSON 모델 목록의 `4 Argon` 아래에 `4 Neon`(`gemini-4-neon`)과 `4 Hydrogen`(`gemini-4-hydrogen`)을 추가했습니다.
+* 4 Argon과 같이 추론 설정은 자동·낮음·보통·높음 중 고르고 최소 단계는 없습니다. temperature 같은 샘플링 값은 보내지 않고, Vertex JSON은 global 위치로 보냅니다.
+* 사용량 비용은 100만 토큰당 4 Neon 입력 $3·캐시 입력 $0.15·출력 $15, 4 Hydrogen 입력 $1.50·캐시 입력 $0.075·출력 $7.50으로 계산합니다. 4 Argon과 달리 날짜에 따라 바뀌는 할인가는 없습니다.
+
+---
+
 ## v2.4.0.14
 
 ### 저장 공간이 가득 찼을 때 자동 정리 멈춤 수정
