@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🅰️ 크랙 초월 번역기 🅰️
 // @namespace    http://tampermonkey.net/
-// @version      4.2.6
+// @version      4.2.6.1
 // @description  앞 답변을 참고해 말투·문체를 이어 가는 번역(켜고 끄기·참고할 답변 수), 번역투를 줄인 기본 지침, Gemini 4 Argon·3.8 Flash, 새로고침 없는 안전한 말풍선 교체, 검열·거절 답은 교체하지 않고 원문 유지, PC는 번역을 뒤에서 돌리고 끝나면 알림, 번역 버튼 꾹 눌러 빠른 설정, 사용자 번역 지침 슬롯 및 휘발성 OOC 자동 삽입 기능 포함.
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_setValue
@@ -41,6 +41,9 @@
       standardFrom: GEMINI_4_ARGON_STANDARD_FROM,
       standard: { input: 4.00, output: 20.00, cacheRead: 0.20, cacheWrite: 4.00 },
     },
+    // Gemini 4 Neon · Hydrogen: 공식 가격표(2026-11-23), 날짜에 따른 값 변동 없음.
+    'gemini-4-neon': { input: 3.00, output: 15.00, cacheRead: 0.15, cacheWrite: 3.00 },
+    'gemini-4-hydrogen': { input: 1.50, output: 7.50, cacheRead: 0.075, cacheWrite: 1.50 },
     'gemini-3.8-flash': { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 },
     'gemini-3.7-flash': { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 },
     'gemini-3.6-flash': { input: 1.50, output: 7.50, cacheRead: 0.15, cacheWrite: 1.50 },
@@ -2430,6 +2433,8 @@ ${TRANSLATION_ONLY_RULE}`;
   ];
   const MODEL_OPTIONS = [
     ['gemini-4-argon', 'Gemini 4 Argon', '4 Argon'],
+    ['gemini-4-neon', 'Gemini 4 Neon', '4 Neon'],
+    ['gemini-4-hydrogen', 'Gemini 4 Hydrogen', '4 Hydrogen'],
     ['gemini-3.8-flash', 'Gemini 3.8 Flash', '3.8 Flash'],
     ['gemini-3.7-flash', 'Gemini 3.7 Flash', '3.7 Flash'],
     ['gemini-3.6-flash', 'Gemini 3.6 Flash', '3.6 Flash'],
